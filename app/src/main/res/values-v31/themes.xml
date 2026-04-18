@@ -1,0 +1,6 @@
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <!-- On Android 12+ we apply dynamic color via DynamicColors.applyToActivitiesIfAvailable in VCAMApp. -->
+    <style name="Theme.VCAM" parent="Base.Theme.VCAM">
+        <item name="android:statusBarColor">?attr/colorSurface</item>
+    </style>
+</resources>

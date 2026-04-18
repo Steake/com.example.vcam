@@ -1,257 +1,427 @@
 package com.example.vcam;
 
-
 import android.Manifest;
-import android.app.Activity;
-import android.app.AlertDialog;
-import android.app.Application;
-import android.content.DialogInterface;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
+import android.graphics.Bitmap;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
+import android.provider.MediaStore;
+import android.provider.Settings;
+import android.text.TextUtils;
 import android.util.Log;
-import android.widget.Button;
-import android.widget.CompoundButton;
-import android.widget.Switch;
+import android.view.View;
+import android.widget.ImageView;
 import android.widget.Toast;
+
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
+import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
+import androidx.appcompat.app.AlertDialog;
+import androidx.appcompat.app.AppCompatActivity;
+import androidx.core.content.ContextCompat;
+
+import com.google.android.material.appbar.MaterialToolbar;
+import com.google.android.material.button.MaterialButton;
+import com.google.android.material.chip.Chip;
+import com.google.android.material.materialswitch.MaterialSwitch;
+import com.google.android.material.textfield.TextInputEditText;
 
 import java.io.File;
 import java.io.IOException;
 
-public class MainActivity extends Activity {
+/**
+ * Material 3 companion UI for the VCAM Xposed module.
+ *
+ * <p>Preserves the legacy file-based toggle contract (marker files under
+ * {@code /DCIM/Camera1/}) and the hook's expected media paths
+ * ({@code virtual.mp4} / {@code 1000.bmp}) so previously installed hooks
+ * keep working unchanged.
+ */
+public class MainActivity extends AppCompatActivity {
 
-    private Switch force_show_switch;
-    private Switch disable_switch;
-    private Switch play_sound_switch;
-    private Switch force_private_dir;
-    private Switch disable_toast_switch;
+    private static final String TAG = "VCAM";
+
+    private MaterialSwitch force_show_switch;
+    private MaterialSwitch disable_switch;
+    private MaterialSwitch play_sound_switch;
+    private MaterialSwitch force_private_dir;
+    private MaterialSwitch disable_toast_switch;
+    private MaterialSwitch loopSwitch;
+    private MaterialSwitch muteSwitch;
+
+    private Chip chipModule, chipImage, chipVideo, chipRes, chipSize;
+    private ImageView preview;
+    private TextInputEditText pkgFilter, customImagePath, customVideoPath;
+
+    private ActivityResultLauncher<String> pickImageLauncher;
+    private ActivityResultLauncher<String> pickVideoLauncher;
+    private ActivityResultLauncher<String[]> storagePermsLauncher;
+
+    private SharedPreferences prefs;
 
     @Override
-    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
-        if (grantResults.length > 0) {
-            if (grantResults[0] == PackageManager.PERMISSION_DENIED) {
-                Toast.makeText(MainActivity.this, R.string.permission_lack_warn, Toast.LENGTH_SHORT).show();
-            }else {
-                File camera_dir = new File (Environment.getExternalStorageDirectory().getAbsolutePath()+"/DCIM/Camera1/");
-                if (!camera_dir.exists()){
-                    camera_dir.mkdir();
-                }
+    protected void onCreate(@Nullable Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        setContentView(R.layout.activity_main);
+        prefs = getSharedPreferences(VCAMApp.PREFS, MODE_PRIVATE);
+
+        MaterialToolbar toolbar = findViewById(R.id.toolbar);
+        setSupportActionBar(toolbar);
+        toolbar.setOnMenuItemClickListener(item -> {
+            int id = item.getItemId();
+            if (id == R.id.action_onboarding) {
+                startActivity(new Intent(this, OnboardingActivity.class));
+                return true;
+            } else if (id == R.id.action_injected_ui) {
+                startActivity(new Intent(this, InjectedConfigActivity.class));
+                return true;
             }
+            return false;
+        });
+
+        // Switches
+        force_show_switch = findViewById(R.id.switch1);
+        disable_switch = findViewById(R.id.switch2);
+        play_sound_switch = findViewById(R.id.switch3);
+        force_private_dir = findViewById(R.id.switch4);
+        disable_toast_switch = findViewById(R.id.switch5);
+        loopSwitch = findViewById(R.id.switch_loop);
+        muteSwitch = findViewById(R.id.switch_mute);
+
+        // Status chips + preview
+        chipModule = findViewById(R.id.chip_module);
+        chipImage = findViewById(R.id.chip_image);
+        chipVideo = findViewById(R.id.chip_video);
+        chipRes = findViewById(R.id.chip_resolution);
+        chipSize = findViewById(R.id.chip_size);
+        preview = findViewById(R.id.image_preview);
+
+        // Advanced inputs
+        pkgFilter = findViewById(R.id.edit_package_filter);
+        customImagePath = findViewById(R.id.edit_custom_image_path);
+        customVideoPath = findViewById(R.id.edit_custom_video_path);
+        pkgFilter.setText(prefs.getString(VCAMApp.KEY_PACKAGE_FILTER, ""));
+        customImagePath.setText(prefs.getString(VCAMApp.KEY_CUSTOM_IMAGE_PATH, ""));
+        customVideoPath.setText(prefs.getString(VCAMApp.KEY_CUSTOM_VIDEO_PATH, ""));
+
+        loopSwitch.setChecked(prefs.getBoolean(VCAMApp.KEY_LOOP_VIDEO, true));
+        muteSwitch.setChecked(prefs.getBoolean(VCAMApp.KEY_MUTE_VIDEO, false));
+
+        loopSwitch.setOnCheckedChangeListener((b, c) ->
+                prefs.edit().putBoolean(VCAMApp.KEY_LOOP_VIDEO, c).apply());
+        muteSwitch.setOnCheckedChangeListener((b, c) ->
+                prefs.edit().putBoolean(VCAMApp.KEY_MUTE_VIDEO, c).apply());
+
+        // Register activity result launchers (Photo Picker on 13+, GetContent fallback).
+        pickImageLauncher = registerForActivityResult(
+                new ActivityResultContracts.GetContent(),
+                uri -> {
+                    if (uri != null) importMedia(uri, true);
+                });
+        pickVideoLauncher = registerForActivityResult(
+                new ActivityResultContracts.GetContent(),
+                uri -> {
+                    if (uri != null) importMedia(uri, false);
+                });
+        storagePermsLauncher = registerForActivityResult(
+                new ActivityResultContracts.RequestMultiplePermissions(),
+                res -> syncStateWithFiles());
+
+        // Buttons
+        findViewById(R.id.btn_pick_image).setOnClickListener(v -> {
+            if (!hasStoragePermission()) { requestStoragePermission(); return; }
+            MediaPaths.defaultDir();
+            pickImageLauncher.launch("image/*");
+        });
+        findViewById(R.id.btn_pick_video).setOnClickListener(v -> {
+            if (!hasStoragePermission()) { requestStoragePermission(); return; }
+            MediaPaths.defaultDir();
+            pickVideoLauncher.launch("video/*");
+        });
+
+        findViewById(R.id.btn_clear).setOnClickListener(v -> clearMedia());
+        findViewById(R.id.btn_test).setOnClickListener(v -> openSystemCamera());
+
+        findViewById(R.id.btn_save_paths).setOnClickListener(v -> savePaths());
+
+        findViewById(R.id.button).setOnClickListener(v -> {
+            Uri uri = Uri.parse("https://github.com/w2016561536/android_virtual_cam");
+            startActivity(new Intent(Intent.ACTION_VIEW, uri));
+        });
+        findViewById(R.id.button2).setOnClickListener(v -> {
+            Uri uri = Uri.parse("https://gitee.com/w2016561536/android_virtual_cam");
+            startActivity(new Intent(Intent.ACTION_VIEW, uri));
+        });
+
+        wireSwitchesToFiles();
+
+        if (!hasStoragePermission()) {
+            // Don't block; just surface once so the user isn't left wondering why imports fail.
+            requestStoragePermission();
+        }
+
+        if (!prefs.getBoolean(VCAMApp.KEY_ONBOARDING_DONE, false)) {
+            startActivity(new Intent(this, OnboardingActivity.class));
         }
     }
 
     @Override
     protected void onResume() {
         super.onResume();
-        sync_statue_with_files();
+        syncStateWithFiles();
     }
 
-    @Override
-    public void onCreate(Bundle savedInstanceState) {
-        super.onCreate(savedInstanceState);
-        setContentView(R.layout.activity_main);
+    // ---------------------------------------------------------------------
+    // Permissions / storage
+    // ---------------------------------------------------------------------
 
-        Button repo_button = findViewById(R.id.button);
-        force_show_switch = findViewById(R.id.switch1);
-        disable_switch = findViewById(R.id.switch2);
-        play_sound_switch = findViewById(R.id.switch3);
-        force_private_dir = findViewById(R.id.switch4);
-        disable_toast_switch = findViewById(R.id.switch5);
+    private boolean hasStoragePermission() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return true;
+        // On Android 11+ we need "All files access" to write into /DCIM/Camera1/
+        // because that's where the Xposed hook reads. Scoped-media APIs are unsuitable
+        // since the hook uses plain File I/O.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            return Environment.isExternalStorageManager();
+        }
+        return ContextCompat.checkSelfPermission(this, Manifest.permission.READ_EXTERNAL_STORAGE)
+                == PackageManager.PERMISSION_GRANTED
+                && ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                == PackageManager.PERMISSION_GRANTED;
+    }
 
-
-
-        sync_statue_with_files();
-
-        repo_button.setOnClickListener(v -> {
-
-            Uri uri = Uri.parse("https://github.com/w2016561536/android_virtual_cam");
-            Intent intent = new Intent(Intent.ACTION_VIEW, uri);
-            startActivity(intent);
-        });
-
-        Button repo_button_chinamainland = findViewById(R.id.button2);
-        repo_button_chinamainland.setOnClickListener(view -> {
-            Uri uri = Uri.parse("https://gitee.com/w2016561536/android_virtual_cam");
-            Intent intent = new Intent(Intent.ACTION_VIEW, uri);
-            startActivity(intent);
-        });
-
-        disable_switch.setOnCheckedChangeListener((compoundButton, b) -> {
-            if (compoundButton.isPressed()) {
-                if (!has_permission()) {
-                    request_permission();
-                } else {
-                    File disable_file = new File(Environment.getExternalStorageDirectory().getAbsolutePath() + "/DCIM/Camera1/disable.jpg");
-                    if (disable_file.exists() != b){
-                        if (b){
-                            try {
-                                disable_file.createNewFile();
-                            } catch (IOException e) {
-                                e.printStackTrace();
-                            }
-                        }else {
-                            disable_file.delete();
+    private void requestStoragePermission() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return;
+        new AlertDialog.Builder(this)
+                .setTitle(R.string.permission_lack_warn)
+                .setMessage(R.string.permission_description)
+                .setNegativeButton(R.string.negative, (d, w) ->
+                        Toast.makeText(this, R.string.permission_lack_warn, Toast.LENGTH_SHORT).show())
+                .setPositiveButton(R.string.positive, (d, w) -> {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                        try {
+                            Intent i = new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION);
+                            i.setData(Uri.parse("package:" + getPackageName()));
+                            startActivity(i);
+                        } catch (Throwable t) {
+                            startActivity(new Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION));
                         }
-                    }
-                }
-                sync_statue_with_files();
-            }
-        });
-
-        force_show_switch.setOnCheckedChangeListener((compoundButton, b) -> {
-            if (compoundButton.isPressed()) {
-                if (!has_permission()) {
-                    request_permission();
-                } else {
-                    File force_show_switch = new File(Environment.getExternalStorageDirectory().getAbsolutePath() + "/DCIM/Camera1/force_show.jpg");
-                    if (force_show_switch.exists() != b){
-                        if (b){
-                            try {
-                                force_show_switch.createNewFile();
-                            } catch (IOException e) {
-                                e.printStackTrace();
-                            }
-                        }else {
-                            force_show_switch.delete();
-                        }
-                    }
-                }
-                sync_statue_with_files();
-            }
-        });
-
-        play_sound_switch.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
-            @Override
-            public void onCheckedChanged(CompoundButton compoundButton, boolean b) {
-                if (compoundButton.isPressed()) {
-                    if (!has_permission()) {
-                        request_permission();
                     } else {
-                        File play_sound_switch = new File(Environment.getExternalStorageDirectory().getAbsolutePath() + "/DCIM/Camera1/no-silent.jpg");
-                        if (play_sound_switch.exists() != b){
-                            if (b){
-                                try {
-                                    play_sound_switch.createNewFile();
-                                } catch (IOException e) {
-                                    e.printStackTrace();
-                                }
-                            }else {
-                                play_sound_switch.delete();
-                            }
-                        }
+                        storagePermsLauncher.launch(new String[]{
+                                Manifest.permission.READ_EXTERNAL_STORAGE,
+                                Manifest.permission.WRITE_EXTERNAL_STORAGE
+                        });
                     }
-                    sync_statue_with_files();
-                }
-            }
-        });
-
-        force_private_dir.setOnCheckedChangeListener((compoundButton, b) -> {
-            if (compoundButton.isPressed()) {
-                if (!has_permission()) {
-                    request_permission();
-                } else {
-                    File force_private_dir = new File(Environment.getExternalStorageDirectory().getAbsolutePath() + "/DCIM/Camera1/private_dir.jpg");
-                    if (force_private_dir.exists() != b){
-                        if (b){
-                            try {
-                                force_private_dir.createNewFile();
-                            } catch (IOException e) {
-                                e.printStackTrace();
-                            }
-                        }else {
-                            force_private_dir.delete();
-                        }
-                    }
-                }
-                sync_statue_with_files();
-            }
-        });
-
-
-        disable_toast_switch.setOnCheckedChangeListener((compoundButton, b) -> {
-            if (compoundButton.isPressed()) {
-                if (!has_permission()) {
-                    request_permission();
-                } else {
-                    File disable_toast_file = new File(Environment.getExternalStorageDirectory().getAbsolutePath() + "/DCIM/Camera1/no_toast.jpg");
-                    if (disable_toast_file.exists() != b){
-                        if (b){
-                            try {
-                                disable_toast_file.createNewFile();
-                            } catch (IOException e) {
-                                e.printStackTrace();
-                            }
-                        }else {
-                            disable_toast_file.delete();
-                        }
-                    }
-                }
-                sync_statue_with_files();
-            }
-        });
-
+                })
+                .show();
     }
 
-    private void request_permission() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            if (this.checkSelfPermission(Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_DENIED
-                    || this.checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_DENIED) {
-                AlertDialog.Builder builder = new AlertDialog.Builder(MainActivity.this);
-                builder.setTitle(R.string.permission_lack_warn);
-                builder.setMessage(R.string.permission_description);
+    // ---------------------------------------------------------------------
+    // Toggle switches backed by marker files (legacy contract)
+    // ---------------------------------------------------------------------
 
-                builder.setNegativeButton(R.string.negative, (dialogInterface, i) -> Toast.makeText(MainActivity.this, R.string.permission_lack_warn, Toast.LENGTH_SHORT).show());
+    private void wireSwitchesToFiles() {
+        bindMarker(force_show_switch, "force_show.jpg");
+        bindMarker(disable_switch, "disable.jpg");
+        bindMarker(play_sound_switch, "no-silent.jpg");
+        bindMarker(force_private_dir, "private_dir.jpg");
+        bindMarker(disable_toast_switch, "no_toast.jpg");
+    }
 
-                builder.setPositiveButton(R.string.positive, (dialogInterface, i) -> requestPermissions(new String[]{Manifest.permission.READ_EXTERNAL_STORAGE, Manifest.permission.WRITE_EXTERNAL_STORAGE}, 1));
-                builder.show();
+    private void bindMarker(MaterialSwitch sw, String fileName) {
+        sw.setOnCheckedChangeListener((view, checked) -> {
+            if (!view.isPressed()) return;
+            if (!hasStoragePermission()) {
+                requestStoragePermission();
+                return;
             }
+            File marker = new File(Environment.getExternalStorageDirectory()
+                    + "/DCIM/Camera1/" + fileName);
+            if (marker.exists() != checked) {
+                if (checked) {
+                    try {
+                        //noinspection ResultOfMethodCallIgnored
+                        marker.getParentFile().mkdirs();
+                        marker.createNewFile();
+                    } catch (IOException e) {
+                        Log.w(TAG, "Failed to create " + marker, e);
+                    }
+                } else {
+                    //noinspection ResultOfMethodCallIgnored
+                    marker.delete();
+                }
+            }
+            syncStateWithFiles();
+        });
+    }
+
+    // ---------------------------------------------------------------------
+    // Picker handling
+    // ---------------------------------------------------------------------
+
+    private void importMedia(@NonNull Uri uri, boolean isImage) {
+        File dst = isImage ? MediaPaths.getImageTarget(this) : MediaPaths.getVideoTarget(this);
+        try {
+            long bytes = MediaPaths.copyUriToFile(this, uri, dst);
+            prefs.edit()
+                    .putString(isImage ? VCAMApp.KEY_LAST_IMAGE_URI : VCAMApp.KEY_LAST_VIDEO_URI,
+                            uri.toString())
+                    .apply();
+            Toast.makeText(this,
+                    getString(R.string.media_imported_format, MediaPaths.humanBytes(bytes)),
+                    Toast.LENGTH_SHORT).show();
+        } catch (Exception e) {
+            Log.w(TAG, "Import failed (dst=" + dst + ")", e);
+            if (!hasStoragePermission()) {
+                Toast.makeText(this, R.string.media_import_failed_no_perm, Toast.LENGTH_LONG).show();
+                requestStoragePermission();
+            } else {
+                Toast.makeText(this,
+                        getString(R.string.media_import_failed_format, e.getMessage()),
+                        Toast.LENGTH_LONG).show();
+            }
+        }
+        syncStateWithFiles();
+    }
+
+    private void clearMedia() {
+        File img = MediaPaths.getImageTarget(this);
+        File vid = MediaPaths.getVideoTarget(this);
+        //noinspection ResultOfMethodCallIgnored
+        if (img.exists()) img.delete();
+        //noinspection ResultOfMethodCallIgnored
+        if (vid.exists()) vid.delete();
+        prefs.edit()
+                .remove(VCAMApp.KEY_LAST_IMAGE_URI)
+                .remove(VCAMApp.KEY_LAST_VIDEO_URI)
+                .apply();
+        Toast.makeText(this, R.string.cleared, Toast.LENGTH_SHORT).show();
+        syncStateWithFiles();
+    }
+
+    private void openSystemCamera() {
+        Intent i = new Intent(MediaStore.ACTION_IMAGE_CAPTURE);
+        if (i.resolveActivity(getPackageManager()) != null) {
+            startActivity(i);
+        } else {
+            Toast.makeText(this, R.string.test_camera_failed, Toast.LENGTH_SHORT).show();
         }
     }
 
-    private boolean has_permission() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            return this.checkSelfPermission(Manifest.permission.READ_EXTERNAL_STORAGE) != PackageManager.PERMISSION_DENIED
-                    && this.checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_DENIED;
+    private void savePaths() {
+        String pkg = safe(pkgFilter.getText());
+        String img = safe(customImagePath.getText());
+        String vid = safe(customVideoPath.getText());
+        if (!TextUtils.isEmpty(img) && !isSaneAbsolutePath(img)) {
+            Toast.makeText(this, R.string.invalid_path, Toast.LENGTH_SHORT).show();
+            return;
+        }
+        if (!TextUtils.isEmpty(vid) && !isSaneAbsolutePath(vid)) {
+            Toast.makeText(this, R.string.invalid_path, Toast.LENGTH_SHORT).show();
+            return;
+        }
+        prefs.edit()
+                .putString(VCAMApp.KEY_PACKAGE_FILTER, pkg)
+                .putString(VCAMApp.KEY_CUSTOM_IMAGE_PATH, img)
+                .putString(VCAMApp.KEY_CUSTOM_VIDEO_PATH, vid)
+                .apply();
+        Toast.makeText(this, R.string.saved, Toast.LENGTH_SHORT).show();
+        syncStateWithFiles();
+    }
+
+    private static String safe(@Nullable CharSequence cs) {
+        return cs == null ? "" : cs.toString().trim();
+    }
+
+    /**
+     * Minimal guardrail: absolute, no traversal segments, no nulls.
+     * We intentionally keep validation lightweight because Xposed usage
+     * legitimately spans many vendor-specific paths.
+     */
+    private static boolean isSaneAbsolutePath(@NonNull String path) {
+        if (!path.startsWith("/")) return false;
+        if (path.contains("\0")) return false;
+        for (String seg : path.split("/")) {
+            if ("..".equals(seg)) return false;
         }
         return true;
     }
 
+    // ---------------------------------------------------------------------
+    // Status sync
+    // ---------------------------------------------------------------------
 
-    private void sync_statue_with_files() {
-        Log.d(this.getApplication().getPackageName(), "【VCAM】[sync]同步开关状态");
-
-        if (!has_permission()){
-            request_permission();
-        }else {
-            File camera_dir = new File (Environment.getExternalStorageDirectory().getAbsolutePath()+"/DCIM/Camera1");
-            if (!camera_dir.exists()){
-                camera_dir.mkdir();
-            }
+    private void syncStateWithFiles() {
+        Log.d(TAG, "[sync] syncing state with files");
+        if (hasStoragePermission()) {
+            MediaPaths.defaultDir();
         }
 
-        File disable_file = new File(Environment.getExternalStorageDirectory().getAbsolutePath() + "/DCIM/Camera1/disable.jpg");
-        disable_switch.setChecked(disable_file.exists());
+        chipRes.setVisibility(View.GONE);
+        chipRes.setText("");
+        chipSize.setVisibility(View.GONE);
+        chipSize.setText("");
 
-        File force_show_file = new File(Environment.getExternalStorageDirectory().getAbsolutePath() + "/DCIM/Camera1/force_show.jpg");
-        force_show_switch.setChecked(force_show_file.exists());
+        // marker switches
+        File base = new File(Environment.getExternalStorageDirectory() + "/DCIM/Camera1/");
+        disable_switch.setChecked(new File(base, "disable.jpg").exists());
+        force_show_switch.setChecked(new File(base, "force_show.jpg").exists());
+        play_sound_switch.setChecked(new File(base, "no-silent.jpg").exists());
+        force_private_dir.setChecked(new File(base, "private_dir.jpg").exists());
+        disable_toast_switch.setChecked(new File(base, "no_toast.jpg").exists());
 
-        File play_sound_file = new File(Environment.getExternalStorageDirectory().getAbsolutePath() + "/DCIM/Camera1/no-silent.jpg");
-        play_sound_switch.setChecked(play_sound_file.exists());
+        // module status chip
+        if (MediaPaths.isXposedLikelyActive()) {
+            chipModule.setText(R.string.chip_module_enabled);
+            chipModule.setChipIconResource(android.R.drawable.checkbox_on_background);
+        } else {
+            chipModule.setText(R.string.chip_module_unknown);
+            chipModule.setChipIcon(null);
+        }
 
-        File force_private_dir_file = new File(Environment.getExternalStorageDirectory().getAbsolutePath() + "/DCIM/Camera1/private_dir.jpg");
-        force_private_dir.setChecked(force_private_dir_file.exists());
+        // image & video chips/preview
+        File img = MediaPaths.getImageTarget(this);
+        File vid = MediaPaths.getVideoTarget(this);
 
-        File disable_toast_file = new File(Environment.getExternalStorageDirectory().getAbsolutePath() + "/DCIM/Camera1/no_toast.jpg");
-        disable_toast_switch.setChecked(disable_toast_file.exists());
+        Bitmap thumb = null;
+        if (img.exists() && img.length() > 0) {
+            chipImage.setText(R.string.chip_image_loaded);
+            thumb = MediaPaths.decodeImageThumb(img, 800);
+            int[] res = MediaPaths.imageResolution(img);
+            if (res != null) {
+                chipRes.setVisibility(View.VISIBLE);
+                chipRes.setText(getString(R.string.chip_resolution_format, res[0], res[1]));
+            }
+            chipSize.setVisibility(View.VISIBLE);
+            chipSize.setText(MediaPaths.humanBytes(img.length()));
+        } else {
+            chipImage.setText(R.string.chip_image_none);
+        }
 
+        if (vid.exists() && vid.length() > 0) {
+            chipVideo.setText(R.string.chip_video_loaded);
+            if (thumb == null) {
+                thumb = MediaPaths.decodeVideoFrame(vid);
+                int[] res = MediaPaths.videoResolution(vid);
+                if (res != null) {
+                    chipRes.setVisibility(View.VISIBLE);
+                    chipRes.setText(getString(R.string.chip_resolution_format, res[0], res[1]));
+                }
+                chipSize.setVisibility(View.VISIBLE);
+                chipSize.setText(MediaPaths.humanBytes(vid.length()));
+            }
+        } else {
+            chipVideo.setText(R.string.chip_video_none);
+        }
+
+        if (thumb != null) {
+            preview.setImageBitmap(thumb);
+        } else {
+            preview.setImageResource(android.R.drawable.ic_menu_gallery);
+        }
     }
-
-
 }
-
-
-

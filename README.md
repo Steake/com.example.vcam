@@ -1,73 +1,233 @@
 # android_virtual_cam
 
-[简体中文](https://github.com/Xposed-Modules-Repo/com.example.vcam/blob/main/README.md) | [繁體中文](https://github.com/Xposed-Modules-Repo/com.example.vcam/blob/main/README_tc.md) | [English](https://github.com/Xposed-Modules-Repo/com.example.vcam/blob/main/README_en.md)
+[简体中文](./README.md) | [繁體中文](./README_tc.md) | [English](./README_en.md)
 
-基于Xposed的虚拟摄像头
+> *"独立心智的本质，不在于它想什么，而在于它怎样去想。"* —— 克里斯托弗·希钦斯
 
-# 请勿用于任何非法用途，所有后果自负。
+一款基于 Xposed/LSPosed 的 Android 虚拟摄像头模块。它把目标应用相机管线里的实时传感器帧，替换成你提供的一张图片或一段视频。仅此而已——也请把话说在前头：这里不用任何委婉语。
 
-### 中国大陆加速地址（Gitee平台）： https://gitee.com/w2016561536/android_virtual_cam
+---
 
-## 支持平台：
+## 0. 进入手册之前
 
-- 安卓5.0+
+这种软件会吸引两类用户。一类是折腾者：在没有实体相机的构建服务器上调试相机流程的开发者、研究闭源 App 帧处理的安全工程师、为了复现 bug 把设备扔进柜子里的 QA。这些都是正经事。
 
-## 使用方法
+另一类希望以此欺骗一个并未同意被欺骗的人——朋友、交易对手、机构、法庭。这份文档对你毫无用处。直白地说：**如果你的目的需要向一个没有同意被骗的人撒谎，这个模块就不是工具，而是共犯；大多数法域对"共犯"这个词是有明确立场的。** 使用者自行承担一切民事与刑事责任，作者概不负责。
 
-1. 安装此模块，并在Xposed中启用此模块，Lsposed等包含作用域的框架需要选择目标app，无需选择系统框架。
-   
-2. 在系统设置中，授予目标应用读取本地存储的权限，并强制结束目标应用程序。若应用程序未申请此权限，请见步骤3。
-   
-3. 打开目标应用，若应用未能获得读取存储的权限，则会以气泡消息提示，`Camera1`目录被重定向至应用程序私有目录`/[内部存储]/Android/data/[应用包名]/files/Camera1/`。若未提示，则默认`Camera1`目录为`/[内部存储]/DCIM/Camera1/`。若目录不存在，请手动创建。
+此点若已明了，我们继续。
 
-> 注意：私有目录下的`Camera1`仅对该应用单独生效。
+---
 
-4. 在目标应用中打开相机预览，会以气泡消息提示“宽：……高：……”，需要根据此分辨率数据制作替换视频，放置于`Camera1`目录下，并命名为`virtual.mp4`，若打开相机并无提示消息，则无需调整视频分辨率。
-   
-5. 若在目标应用中拍照却显示真实图片，且出现气泡消息`发现拍照`和分辨率，则需根据此分辨率数据准备一张照片，命名为`1000.bmp`，放入`Camera1`目录下（支持其它格式改后缀为bmp）。如果拍照时无气泡消息提示，则`1000.bmp`无效。
-   
-6. 如果需要播放视频的声音，需在`/[内部存储]/DCIM/Camera1/`目录下创建`no-silent.jpg`文件。（全局实时生效）
-   
-7. 如果需要临时停用视频替换，需在`/[内部存储]/DCIM/Camera1/`目录下创建`disable.jpg`文件。（全局实时生效）
+## 1. 它到底在做什么
 
-8. 如果觉得Toast消息烦，可以在`/[内部存储]/DCIM/Camera1/`目录下创建`no_toast.jpg`文件。（全局实时生效）
+VCAM 是一个典型的 Xposed 模块。在具备可用框架（LSPosed、EdXposed，或那具老古董 Xposed Original）的设备上，当框架把目标进程拉起来时，本模块挂入以下位置：
 
-9. 目录重定向消息默认只显示一次，如果错过了目录重定向的Toast消息，可以在`/[内部存储]/DCIM/Camera1/`目录下创建`force_show.jpg`文件来覆盖默认设定。（全局实时生效）
+- `android.hardware.Camera` —— 传统 Camera1：`setPreviewTexture`、`setPreviewDisplay`、`setPreviewCallback`、`takePicture` 以及相关的状态机。
+- `android.hardware.camera2.*` —— `CameraDevice`、`CaptureRequest`、`CameraCaptureSession` 与供图的 surface 管线。
+- `MediaPlayer`/编解码器的 surface，用来解码我们的替换视频。
 
-10. 如果需要为每一个应用程序分配视频，可以在`/[内部存储]/DCIM/Camera1/`目录下创建`private_dir.jpg`强制使用应用程序私有目录。（全局实时生效）
+挂钩把从传感器读取的内容，改为从磁盘上预先暂存的文件读取。干活的其实只有两个文件：
 
-> 注意：6~10的配置开关均在应用程序中，您可以快捷地在应用程序中配置，也可以手动创建文件。
+| 用途 | 默认路径 | 说明 |
+|---|---|---|
+| 预览用**视频** | `/[内部存储]/DCIM/Camera1/virtual.mp4` | 分辨率需匹配目标 App 首次打开时 Toast 提示的数值。 |
+| 拍照用**静态图片** | `/[内部存储]/DCIM/Camera1/1000.bmp` | 扩展名只是约定，任何 BitmapFactory 可解码的图片改名为 `.bmp` 均可。 |
 
-## 常见问题
+旁边还有若干"标记文件"开关：`disable.jpg`、`force_show.jpg`、`no-silent.jpg`、`private_dir.jpg`、`no_toast.jpg`。挂钩只关心它们**是否存在**，不读内容。4.5 版本的 UI 会替你新建/删除，怀旧派继续用 `touch` 也完全合法。
 
-A1. 前置摄像头方向问题？  
-Q1. 大多数情况下,替换前置摄像头的视频需要水平翻转并右旋90度，并且视频***处理后***的分辨率应与气泡消息内分辨率相同。但有时这并不需要，具体请根据实际情况判断。
+### 与其废话，不如作图
 
+```mermaid
+flowchart LR
+    subgraph Manager["VCAM 管理应用（本 UI）"]
+        UI[Material 3 界面]
+        Picker[Photo Picker /<br/>ActivityResultContracts.GetContent]
+        Inj[InjectedConfigActivity<br/><i>半透明对话框</i>]
+        Prefs[(SharedPreferences)]
+    end
 
-Q2. 画面黑屏，相机启动失败？  
-A2. 目前有些应用并不能成功替换（特别是系统相机）。或者是因为视频路径不对（是否创建了两级Camera1目录，如`./DCIM/Camera1/Camera1/virtual.mp4`，但只需要一级目录）。
+    subgraph Disk["共享存储"]
+        Img[[/DCIM/Camera1/1000.bmp]]
+        Vid[[/DCIM/Camera1/virtual.mp4]]
+        Markers[["标记文件：<br/>disable.jpg、force_show.jpg、<br/>no-silent.jpg、private_dir.jpg、no_toast.jpg"]]
+    end
 
+    subgraph Target["目标应用进程（被挂钩）"]
+        Cam1[android.hardware.Camera]
+        Cam2[android.hardware.camera2.*]
+        MP[MediaPlayer / Codec]
+        Hook[HookMain<br/><i>Xposed 模块</i>]
+    end
 
-Q3. 画面花屏？  
-A3. 视频分辨率不对。
+    UI --> Picker --> Prefs
+    UI --> Markers
+    Picker -->|流式复制| Img
+    Picker -->|流式复制| Vid
+    Inj --> Img
+    Inj --> Vid
+    Inj --> Prefs
 
-Q4. 画面扭曲，变形？  
-A4. 请使用剪辑软件修改原视频来匹配屏幕。
+    Hook -. 读取 .-> Img
+    Hook -. 读取 .-> Vid
+    Hook -. 读取 .-> Markers
+    Hook --> Cam1
+    Hook --> Cam2
+    Hook --> MP
 
-Q5. 创建`disable.jpg`无效？  
-A5. 如果应用版本`<=4.0`，那么`[内部存储]/DCIM/Camera1`目录下的文件对**具有访问存储权限**的应用生效，其余无权限应用应在**私有目录**下创建  
-如果应用版本`>=4.1`，那么应在`[内部存储]/DCIM/Camera1`创建，无论目标应用是否具有权限。
+    classDef disk fill:#fff8e1,stroke:#b28704;
+    class Img,Vid,Markers disk;
+```
 
+注意这里**没有**的东西：没有守护进程、没有 ContentProvider、没有要你搞懂的 IPC 契约。挂钩与 UI 全靠文件系统通信——原始、稳健，而且由于挂钩比 UI 先存在，第二阶段特意保留了这份契约不动。UI 只是披在旧契约外面的一层便利。
 
-## 反馈问题
+---
 
-请直接在issues中反馈，如果为BUG反馈，请附带Xposed**模块**日志信息。
+## 2. 平台支持
 
+- **Android 5.0（API 21）及以上。** 理论上挂钩可以更往回走；但 Material 3 的 UI 不行，也没有理由在 2025 年为 KitKat 操心。
+- **Xposed 系框架。** 当下就是 Magisk/KernelSU + LSPosed。Taichi、EdXposed 以及 Xposed 原版都曾经工作过，但不是我们的测试目标。
 
-## 致谢:
+---
 
-提供HOOK思路: https://github.com/wangwei1237/CameraHook  
+## 3. 第二阶段改了什么
 
-H264硬解码： https://github.com/zhantong/Android-VideoToImages  
+第一阶段（issue #1）把项目迁到英语为默认、中文为镜像的字符串目录。第二阶段（本次 `4.5` 发布）是对配套 App 的全面翻新。挂钩本身未动。
 
-JPEG转YUV： https://blog.csdn.net/jacke121/article/details/73888732  
+- **Material 3 UI**：`Theme.Material3.DayNight`，Android 12+ 开启动态取色，`MaterialToolbar + CoordinatorLayout + MaterialCardView` 把界面划为「状态」「素材媒体」「高级」三张卡；全面替换为 `MaterialButton` / `MaterialSwitch`；浅色/深色跟随系统。
+- **图片/视频选择器**：基于 `ActivityResultContracts.GetContent`，Android 13+ 自动走系统 Photo Picker。现代 Android 上不再一刀切地索取 `READ_EXTERNAL_STORAGE`。选中的 URI 通过流拷贝写入挂钩期望的目标文件；上一次选择的 URI 持久化到 `SharedPreferences`。
+- **缩略图预览**：图片走 `BitmapFactory`，视频走 `MediaMetadataRetriever.getFrameAtTime()`。解码走 `inSampleSize`，48MP 的图也不会把进程撑爆。
+- **状态 Chips**：*模块已启用*（尽力检测 Xposed bridge）、*图片/视频已加载*、分辨率、文件大小。
+- **高级**：循环视频、视频静音、包名过滤；对于 `/DCIM/` 被特殊厂商守护的设备，还提供图片与视频的自定义目标路径输入——写入前做了最基本的路径校验（拒绝相对 `..` 段、拒绝包含空字节）。
+- **测试相机**：通过 `MediaStore.ACTION_IMAGE_CAPTURE` 打开系统相机，一秒内验证挂钩是否生效。
+- **首次启动引导**：`ViewPager2` 三页——启用、选素材、测试。可跳过。没人想要更长的引导。
+- **应用内注入 UI**（这是有意思的那块）：`InjectedConfigActivity`，使用 `Theme.VCAM.Translucent`，以 `com.example.vcam.action.CONFIGURE` Intent action 暴露。挂钩、用户或快捷方式均可拉起；支持再选、切换、清除素材，切换「全局/按应用」行为，「返回应用」收尾。受限上下文里的选择器异常不会把目标进程带走。
+- **无障碍**：预览控件具 `contentDescription`，点击目标 ≥48dp，文字对比度符合 Material 色板的要求。
+- **本地化**：所有新增字串都覆盖 `values/`、`values-zh/`、`values-zh-rTW/`，并为 `values-zh-rCN/`、`values-zh-rSG/`、`values-zh-rHK/`、`values-zh-rMO/` 提供镜像。
+
+### 选择器数据流
+
+```mermaid
+sequenceDiagram
+    actor User as 用户
+    participant UI as MainActivity / InjectedConfigActivity
+    participant GC as GetContent / Photo Picker
+    participant CR as ContentResolver
+    participant FS as /DCIM/Camera1/
+    participant SP as SharedPreferences
+    participant Hook as HookMain（目标进程）
+
+    User->>UI: 点击「选择图片」
+    UI->>GC: launch("image/*")
+    GC-->>UI: Uri（content://media/...）
+    UI->>CR: openInputStream(uri)
+    CR-->>UI: InputStream
+    UI->>FS: 写入 1000.bmp（或自定义覆盖路径）
+    UI->>SP: 记录 last_image_uri
+    UI->>User: Toast「已导入（N MB）」，刷新 chips 与缩略图
+    Note over Hook,FS: 挂钩在独立进程中，<br/>下一帧读 1000.bmp
+```
+
+### 注入 UI 生命周期
+
+```mermaid
+stateDiagram-v2
+    [*] --> 从管理器进入: 溢出菜单
+    [*] --> 从挂钩进入: ACTION_CONFIGURE
+
+    从管理器进入 --> 对话框
+    从挂钩进入 --> 对话框
+
+    state 对话框 {
+        [*] --> 显示
+        显示 --> 选择图片: 点 pick_image
+        显示 --> 选择视频: 点 pick_video
+        选择图片 --> 写入文件: URI 返回
+        选择视频 --> 写入文件: URI 返回
+        写入文件 --> 显示: 刷新缩略图与 chips
+        显示 --> 清除: 点 Clear
+        清除 --> 显示
+        显示 --> 切换模式: 单选按钮
+        切换模式 --> 显示: 写入 SharedPreferences
+    }
+
+    对话框 --> 返回: 点「返回应用」
+    返回 --> [*]: finish() 并唤回调用方
+```
+
+---
+
+## 4. 安装
+
+最省事的办法是直接装发布 PR 里附带的 debug APK，然后在 LSPosed 里启用。自行构建也可以：
+
+```bash
+git clone https://github.com/Steake/com.example.vcam.git
+cd com.example.vcam
+./gradlew :app:assembleDebug
+# APK：app/build/outputs/apk/debug/app-debug.apk
+```
+
+依赖：JDK 17、Android SDK（platform 34 + build-tools 30.0.3，Gradle 会自行下载后者）。AGP 8.0.2、Gradle 8.0，已启用 `androidx`。
+
+然后在 LSPosed：**模块 → VCAM → 启用 → 勾选作用域（目标 App，非系统框架）**，最后对目标 App 执行「强制停止」。全部仪式就是这样。
+
+### 中国大陆加速地址（Gitee 平台）
+
+<https://gitee.com/w2016561536/android_virtual_cam>
+
+---
+
+## 5. 使用配套 App
+
+1. **在 LSPosed 中启用模块**，作用域选目标 App。
+2. **打开 VCAM**。首次启动会看到引导页，跳过或阅读皆可。
+3. **选择图片/选择视频**：文件会被拷入 `/DCIM/Camera1/1000.bmp` 与 `/DCIM/Camera1/virtual.mp4`（或你填的自定义路径）；chips 会更新，缩略图会出现。
+4. **（可选）高级卡**：设包名过滤、循环/静音，或在设备对 `/DCIM/` 有特殊限制时设定自定义路径。
+5. **「测试相机」**：直接打开系统相机。挂钩生效时，预览与拍照都会被你的素材替换。
+6. **在目标 App 内**：可通过管理器的溢出菜单、桌面快捷方式或 `am start -a com.example.vcam.action.CONFIGURE` 拉起 `InjectedConfigActivity`，就地切换素材。
+
+### 旧式手动路径（偏爱文件系统的用户）
+
+第二阶段没删除任何旧行为。挂钩依然识别：
+
+- `virtual.mp4`、`1000.bmp` —— 素材本身。
+- `disable.jpg` —— 临时停用模块（全局、实时）。
+- `force_show.jpg` —— 每次都显示重定向 Toast（全局）。
+- `no-silent.jpg` —— 允许注入视频发声。
+- `private_dir.jpg` —— 强制每个 App 使用私有目录作为素材源。
+- `no_toast.jpg` —— 屏蔽提示 Toast。
+
+在 `/[内部存储]/DCIM/Camera1/` 自行 `touch` 或删除皆可。UI 是便利，不是守门人。
+
+---
+
+## 6. 常见问题
+
+**Q1. 前置摄像头方向不对/镜像了。**
+A. 多数情况下需要水平翻转 + 右旋 90°；**处理后**的分辨率需与 Toast 一致。少数情况无需调整——以设备为准，不以文档为准。
+
+**Q2. 黑屏 / 无法打开相机。**
+A. 要么这个 App 挂不上（特别是系统相机），要么你建了双层 `Camera1/Camera1/`。只需要一层 `Camera1`。就一层。
+
+**Q3. 花屏。**
+A. 分辨率不对。读 Toast。
+
+**Q4. 拉伸/变形。**
+A. 用剪辑软件把素材重新编码到目标分辨率。模块内不内置运行时缩放器。
+
+**Q5. `disable.jpg` 无效。**
+A. App 版本 `<=4.0`：`/DCIM/Camera1/` 下的标记文件**只对有存储权限**的 App 生效，其余无权限的 App 要放进各自的私有目录。版本 `>=4.1`：统一放 `/DCIM/Camera1/`，无论权限。
+
+---
+
+## 7. 反馈问题
+
+直接到 issues 里提。若是 BUG，请附 **Xposed 模块日志**（LSPosed → 日志 → 模块）。欢迎 UI 截图；猜测就算了。
+
+---
+
+## 8. 致谢
+
+- 挂钩思路：[wangwei1237/CameraHook](https://github.com/wangwei1237/CameraHook)
+- H.264 硬解码：[zhantong/Android-VideoToImages](https://github.com/zhantong/Android-VideoToImages)
+- JPEG→YUV 转换参考：[jacke121 / CSDN](https://blog.csdn.net/jacke121/article/details/73888732)

@@ -1,17 +1,77 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">VCAM</string>
-    <string name="click_to_go_to_repo">click to go to repository</string>
-    <string name="description">Please go to online repository to check for latest update, latest usgae and report bugs</string>
-    <string name="Warning">DO NOT USE FOR ANY ILLEGAL PURPOSE !!YOU NEED TO TAKE ALL RESPONSIBILITY AND CONSEQUENCE!!</string>
-    <string name="switch1">Force to show permission lack warning</string>
-    <string name="switch2">Disable the module temporarily (On is disable)</string>
-    <string name="switch3">Play sounds of videos</string>
-    <string name="switch4">Force every app use private directory</string>
-    <string name="gitee" translatable="false">Gitee平台（中国大陆更快）</string>
-    <string name="switch5">Disable toast message</string>
+    <string name="xposed_description">Android virtual camera module</string>
+
+    <string name="click_to_go_to_repo">Open project repository</string>
+    <string name="description">Please go to the online repository for the latest updates, usage instructions and bug reports.</string>
+    <string name="Warning">DO NOT USE FOR ANY ILLEGAL PURPOSE. YOU TAKE FULL RESPONSIBILITY FOR ALL CONSEQUENCES.</string>
+
+    <string name="switch1">Force show permission-missing warning</string>
+    <string name="switch2">Temporarily disable the module</string>
+    <string name="switch3">Play sound of injected video</string>
+    <string name="switch4">Force every app to use its private directory</string>
+    <string name="switch5">Disable toast messages</string>
+    <string name="switch_loop">Loop video playback</string>
+    <string name="switch_mute">Mute video audio</string>
+    <string name="gitee" translatable="false">Gitee (faster inside mainland China)</string>
+
     <string name="permission_lack_warn">Missing permissions</string>
-    <string name="permission_description">The permission to access local storage is used to set up configuration files. If refused you need to set up file manually.</string>
-    <string name="positive">Sure</string>
+    <string name="permission_description">VCAM needs \"All files access\" (Android 11+) or READ/WRITE external storage so it can place the image/video under /DCIM/Camera1/ where the Xposed hook reads them. Without this, imports will silently fail.</string>
+    <string name="positive">Allow</string>
     <string name="negative">Refuse</string>
+
+    <string name="section_status">Status</string>
+    <string name="section_source_media">Source media</string>
+    <string name="section_advanced">Advanced</string>
+
+    <string name="pick_image">Select image</string>
+    <string name="pick_video">Select video</string>
+    <string name="clear">Clear</string>
+    <string name="test_camera">Test camera</string>
+    <string name="test_camera_failed">No camera app available</string>
+    <string name="save_paths">Save</string>
+    <string name="saved">Saved</string>
+    <string name="cleared">Cleared</string>
+    <string name="invalid_path">Invalid path</string>
+
+    <string name="media_imported_format">Imported (%1$s)</string>
+    <string name="media_import_failed">Import failed</string>
+    <string name="media_import_failed_format">Import failed: %1$s</string>
+    <string name="media_import_failed_no_perm">Storage access required. Grant \"All files access\" in system settings.</string>
+
+    <string name="chip_module_enabled">Module enabled</string>
+    <string name="chip_module_unknown">Module status unknown</string>
+    <string name="chip_image_loaded">Image loaded</string>
+    <string name="chip_image_none">No image</string>
+    <string name="chip_video_loaded">Video loaded</string>
+    <string name="chip_video_none">No video</string>
+    <string name="chip_resolution_format">%1$d × %2$d</string>
+
+    <string name="hint_package_filter">Package filter (comma-separated)</string>
+    <string name="hint_custom_image_path">Custom image target (absolute path)</string>
+    <string name="hint_custom_video_path">Custom video target (absolute path)</string>
+
+    <string name="cd_preview">Media preview thumbnail</string>
+
+    <string name="menu_onboarding">Show onboarding</string>
+    <string name="menu_injected_ui">Open in-app config</string>
+
+    <string name="onboarding_next">Next</string>
+    <string name="onboarding_skip">Skip</string>
+    <string name="onboarding_done">Done</string>
+    <string name="onboarding_title_1">Enable in LSPosed</string>
+    <string name="onboarding_body_1">Install VCAM as a module and enable its scope for the camera-using apps you want to inject.</string>
+    <string name="onboarding_title_2">Select your media</string>
+    <string name="onboarding_body_2">Pick an image and/or video from the Source media card. The file is copied to the hook\'s expected location automatically.</string>
+    <string name="onboarding_title_3">Open the target camera app</string>
+    <string name="onboarding_body_3">Launch the camera inside your target app. Use the in-app config dialog from the overflow menu to swap media on the fly.</string>
+
+    <string name="injected_title">VCAM in-app config</string>
+    <string name="injected_subtitle_format">Configuring for %1$s</string>
+    <string name="injected_subtitle_global">Configuring global defaults</string>
+    <string name="injected_mode_global">Use global media</string>
+    <string name="injected_mode_per_app">Use per-app media</string>
+    <string name="injected_return">Return to app</string>
+    <string name="injected_launch_failed">Picker unavailable here</string>
 </resources>
