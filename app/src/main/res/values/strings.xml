@@ -17,7 +17,7 @@
     <string name="gitee" translatable="false">Gitee (faster inside mainland China)</string>
 
     <string name="permission_lack_warn">Missing permissions</string>
-    <string name="permission_description">Storage access is used to place configuration files and injected media. If refused, you will need to configure files manually.</string>
+    <string name="permission_description">VCAM needs \"All files access\" (Android 11+) or READ/WRITE external storage so it can place the image/video under /DCIM/Camera1/ where the Xposed hook reads them. Without this, imports will silently fail.</string>
     <string name="positive">Allow</string>
     <string name="negative">Refuse</string>
 
@@ -37,6 +37,8 @@
 
     <string name="media_imported_format">Imported (%1$s)</string>
     <string name="media_import_failed">Import failed</string>
+    <string name="media_import_failed_format">Import failed: %1$s</string>
+    <string name="media_import_failed_no_perm">Storage access required. Grant \"All files access\" in system settings.</string>
 
     <string name="chip_module_enabled">Module enabled</string>
     <string name="chip_module_unknown">Module status unknown</string>

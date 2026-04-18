@@ -17,7 +17,7 @@
     <string name="gitee" translatable="false">Gitee平台（中国大陆更快）</string>
 
     <string name="permission_lack_warn">权限缺失</string>
-    <string name="permission_description">访问本地存储的权限用于设置配置文件和注入媒体。如果拒绝，您需要手动配置。</string>
+    <string name="permission_description">VCAM 需要「所有文件访问」权限（Android 11+），或读/写外部存储权限，才能把图片/视频放到 /DCIM/Camera1/ 下供 Xposed 钩子读取。否则导入会静默失败。</string>
     <string name="positive">允许</string>
     <string name="negative">拒绝</string>
 
@@ -37,6 +37,8 @@
 
     <string name="media_imported_format">已导入（%1$s）</string>
     <string name="media_import_failed">导入失败</string>
+    <string name="media_import_failed_format">导入失败：%1$s</string>
+    <string name="media_import_failed_no_perm">需要存储权限。请在系统设置中授予「所有文件访问」权限。</string>
 
     <string name="chip_module_enabled">模块已启用</string>
     <string name="chip_module_unknown">模块状态未知</string>

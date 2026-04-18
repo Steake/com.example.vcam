@@ -10,6 +10,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
 import android.provider.MediaStore;
+import android.provider.Settings;
 import android.text.TextUtils;
 import android.util.Log;
 import android.view.View;
@@ -133,11 +134,13 @@ public class MainActivity extends AppCompatActivity {
 
         // Buttons
         findViewById(R.id.btn_pick_image).setOnClickListener(v -> {
-            ensureStorageDir();
+            if (!hasStoragePermission()) { requestStoragePermission(); return; }
+            MediaPaths.defaultDir();
             pickImageLauncher.launch("image/*");
         });
         findViewById(R.id.btn_pick_video).setOnClickListener(v -> {
-            ensureStorageDir();
+            if (!hasStoragePermission()) { requestStoragePermission(); return; }
+            MediaPaths.defaultDir();
             pickVideoLauncher.launch("video/*");
         });
 
@@ -157,6 +160,11 @@ public class MainActivity extends AppCompatActivity {
 
         wireSwitchesToFiles();
 
+        if (!hasStoragePermission()) {
+            // Don't block; just surface once so the user isn't left wondering why imports fail.
+            requestStoragePermission();
+        }
+
         if (!prefs.getBoolean(VCAMApp.KEY_ONBOARDING_DONE, false)) {
             startActivity(new Intent(this, OnboardingActivity.class));
         }
@@ -172,21 +180,14 @@ public class MainActivity extends AppCompatActivity {
     // Permissions / storage
     // ---------------------------------------------------------------------
 
-    private void ensureStorageDir() {
-        if (!hasStoragePermission()) {
-            requestStoragePermission();
-        }
-        MediaPaths.defaultDir();
-    }
-
     private boolean hasStoragePermission() {
-        // From Android 13+, READ_MEDIA_IMAGES/VIDEO replace READ_EXTERNAL_STORAGE;
-        // we use GetContent which does not require permissions for picking.
-        // However writing to /DCIM/Camera1 still needs legacy external-storage write
-        // on API <= 29.  On 30+ we use MediaStore-less direct writes, so we still
-        // request READ/WRITE when they're declared (for the toggle marker files).
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return true;
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) return true;
+        // On Android 11+ we need "All files access" to write into /DCIM/Camera1/
+        // because that's where the Xposed hook reads. Scoped-media APIs are unsuitable
+        // since the hook uses plain File I/O.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            return Environment.isExternalStorageManager();
+        }
         return ContextCompat.checkSelfPermission(this, Manifest.permission.READ_EXTERNAL_STORAGE)
                 == PackageManager.PERMISSION_GRANTED
                 && ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE)
@@ -195,17 +196,27 @@ public class MainActivity extends AppCompatActivity {
 
     private void requestStoragePermission() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return;
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) return;
         new AlertDialog.Builder(this)
                 .setTitle(R.string.permission_lack_warn)
                 .setMessage(R.string.permission_description)
                 .setNegativeButton(R.string.negative, (d, w) ->
                         Toast.makeText(this, R.string.permission_lack_warn, Toast.LENGTH_SHORT).show())
-                .setPositiveButton(R.string.positive, (d, w) ->
+                .setPositiveButton(R.string.positive, (d, w) -> {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                        try {
+                            Intent i = new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION);
+                            i.setData(Uri.parse("package:" + getPackageName()));
+                            startActivity(i);
+                        } catch (Throwable t) {
+                            startActivity(new Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION));
+                        }
+                    } else {
                         storagePermsLauncher.launch(new String[]{
                                 Manifest.permission.READ_EXTERNAL_STORAGE,
                                 Manifest.permission.WRITE_EXTERNAL_STORAGE
-                        }))
+                        });
+                    }
+                })
                 .show();
     }
 
@@ -264,8 +275,15 @@ public class MainActivity extends AppCompatActivity {
                     getString(R.string.media_imported_format, MediaPaths.humanBytes(bytes)),
                     Toast.LENGTH_SHORT).show();
         } catch (Exception e) {
-            Log.w(TAG, "Import failed", e);
-            Toast.makeText(this, R.string.media_import_failed, Toast.LENGTH_SHORT).show();
+            Log.w(TAG, "Import failed (dst=" + dst + ")", e);
+            if (!hasStoragePermission()) {
+                Toast.makeText(this, R.string.media_import_failed_no_perm, Toast.LENGTH_LONG).show();
+                requestStoragePermission();
+            } else {
+                Toast.makeText(this,
+                        getString(R.string.media_import_failed_format, e.getMessage()),
+                        Toast.LENGTH_LONG).show();
+            }
         }
         syncStateWithFiles();
     }
@@ -339,9 +357,7 @@ public class MainActivity extends AppCompatActivity {
 
     private void syncStateWithFiles() {
         Log.d(TAG, "[sync] syncing state with files");
-        if (!hasStoragePermission()) {
-            requestStoragePermission();
-        } else {
+        if (hasStoragePermission()) {
             MediaPaths.defaultDir();
         }
 

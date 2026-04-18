@@ -17,7 +17,7 @@
     <string name="gitee" translatable="false">Gitee（中國大陸更快）</string>
 
     <string name="permission_lack_warn">權限不足</string>
-    <string name="permission_description">存取本機儲存的權限用於放置設定檔與注入媒體。若拒絕，您需要手動設定。</string>
+    <string name="permission_description">VCAM 需要「所有檔案存取」權限（Android 11+），或讀/寫外部儲存權限，才能把圖片/影片放到 /DCIM/Camera1/ 供 Xposed 掛鉤讀取。否則匯入會默默失敗。</string>
     <string name="positive">允許</string>
     <string name="negative">拒絕</string>
 
@@ -37,6 +37,8 @@
 
     <string name="media_imported_format">已匯入（%1$s）</string>
     <string name="media_import_failed">匯入失敗</string>
+    <string name="media_import_failed_format">匯入失敗：%1$s</string>
+    <string name="media_import_failed_no_perm">需要儲存權限。請於系統設定授予「所有檔案存取」權限。</string>
 
     <string name="chip_module_enabled">模組已啟用</string>
     <string name="chip_module_unknown">模組狀態未知</string>
