@@ -1,6 +1,6 @@
 # android_virtual_cam
 
-[简体中文](./README.md) | [繁體中文](./README_tc.md) | [English](./README_en.md)
+[English](./README.md) | [简体中文](./README_zh.md) | [繁體中文](./README_tc.md)
 
 > *「獨立心智的本質，不在於它想什麼，而在於它怎樣去想。」* —— 克里斯多福·希鈞斯
 
@@ -100,7 +100,7 @@ flowchart LR
 - **進階**：循環影片、影片靜音、套件名稱過濾；針對對 `/DCIM/` 有特殊限制的裝置，提供自訂圖片／影片目標路徑——寫入前做了最基本的路徑校驗（拒絕相對 `..` 段、拒絕含空位元組）。
 - **測試相機**：透過 `MediaStore.ACTION_IMAGE_CAPTURE` 開啟系統相機，一鍵驗證掛鉤是否生效。
 - **首次啟動引導**：`ViewPager2` 三頁——啟用、選素材、測試。可略過。從未有人抱怨引導太短。
-- **應用內注入 UI**（最有趣的一塊）：`InjectedConfigActivity`，採 `Theme.VCAM.Translucent`，以 `com.example.vcam.action.CONFIGURE` Intent action 暴露。掛鉤、使用者或捷徑均可喚起；支援重新選擇、切換、清除素材、於「全域／各應用程式」模式間切換，並以「返回應用」收尾。受限上下文中的選取器錯誤會被攔下而不波及目標程序。
+- **應用內注入 UI**（最有趣的一塊）：`InjectedConfigActivity`，採 `Theme.VCAM.Translucent`，作為 `Theme.VCAM.Translucent` 的半透明介面，由管理器溢位選單開啟；支援重新選擇、切換與清除素材，並以「返回應用」收尾。受限上下文中的選取器錯誤會被攔下而不波及程序。
 - **無障礙**：預覽元件具 `contentDescription`、點擊目標 ≥48dp、文字對比度符合 Material 色盤要求。
 - **本地化**：所有新增字串皆涵蓋 `values/`、`values-zh/`、`values-zh-rTW/`，並為 `values-zh-rCN/`、`values-zh-rSG/`、`values-zh-rHK/`、`values-zh-rMO/` 提供鏡像。
 
@@ -132,10 +132,9 @@ sequenceDiagram
 ```mermaid
 stateDiagram-v2
     [*] --> 由管理器進入: 溢位選單
-    [*] --> 由掛鉤進入: ACTION_CONFIGURE
+    [*] --> 由管理器進入: 溢位選單
 
     由管理器進入 --> 對話框
-    由掛鉤進入 --> 對話框
 
     state 對話框 {
         [*] --> 顯示
@@ -180,7 +179,7 @@ cd com.example.vcam
 3. **選擇圖片／選擇影片**：檔案會被拷入 `/DCIM/Camera1/1000.bmp` 與 `/DCIM/Camera1/virtual.mp4`（或自訂覆寫路徑）；chips 更新，縮圖出現。
 4. **（可選）進階卡**：設定套件過濾、循環／靜音，或為對 `/DCIM/` 有特殊限制的裝置設定自訂路徑。
 5. **「測試相機」**：直接開啟系統相機。掛鉤生效時，預覽與拍照都會被你的素材替換。
-6. **在目標 App 中**：透過管理器溢位選單、桌面捷徑或 `am start -a com.example.vcam.action.CONFIGURE` 喚起 `InjectedConfigActivity`，原地切換素材。
+6. **在目標 App 中**：透過管理器溢位選單開啟 `InjectedConfigActivity`，原地切換素材。
 
 ### 舊式手動路徑（偏好檔案系統的使用者）
 
