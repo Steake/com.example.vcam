@@ -132,7 +132,6 @@ sequenceDiagram
 ```mermaid
 stateDiagram-v2
     [*] --> 由管理器進入: 溢位選單
-    [*] --> 由管理器進入: 溢位選單
 
     由管理器進入 --> 對話框
 
