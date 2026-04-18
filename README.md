@@ -100,7 +100,7 @@ Phase 1 (issue #1) moved the project onto an English-default string catalogue wi
 - **Advanced**: loop video, mute audio, package filter, and — for the user whose device puts media somewhere impolite — explicit override fields for the image and video target paths. Paths are validated against trivial traversal and null-byte abuse before being persisted.
 - **Test camera** opens the system camera via `MediaStore.ACTION_IMAGE_CAPTURE`, so you can check the hook in the amount of time it takes to press one button.
 - **First-launch onboarding**: a three-page `ViewPager2` pager explaining enable → select → test. Skippable, and deliberately short; nobody ever wanted *more* onboarding.
-- **Injected in-app UI** (the interesting one): `InjectedConfigActivity`, a `Theme.VCAM.Translucent` activity exposed opened from the manager overflow menu so you can re-pick, swap, or clear media without leaving the companion app. Picker failures in constrained contexts are caught and surfaced rather than crashing the process.
+- **Injected in-app UI** (the interesting one): `InjectedConfigActivity`, a `Theme.VCAM.Translucent` activity opened from the manager overflow menu so you can re-pick, swap, or clear media without leaving the companion app. Picker failures in constrained contexts are caught and surfaced rather than crashing the process.
 - **Accessibility**: `contentDescription` on preview imagery, 48dp minimum tap targets, text contrast checked against the Material palette.
 - **i18n**: every new string exists in `values/`, `values-zh/`, `values-zh-rTW/`, with mirrors for `values-zh-rCN/`, `values-zh-rSG/`, `values-zh-rHK/`, `values-zh-rMO/`.
 

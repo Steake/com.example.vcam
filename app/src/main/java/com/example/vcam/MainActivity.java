@@ -63,7 +63,8 @@ public class MainActivity extends AppCompatActivity {
     private ActivityResultLauncher<String> pickImageLauncher;
     private ActivityResultLauncher<String> pickVideoLauncher;
     private ActivityResultLauncher<String[]> storagePermsLauncher;
-    private final ExecutorService ioExecutor = Executors.newSingleThreadExecutor();
+    private final ExecutorService ioExecutor = Executors.newSingleThreadExecutor(
+            runnable -> new Thread(runnable, "VCAM-IO"));
     private int syncRequestId = 0;
 
     private SharedPreferences prefs;
