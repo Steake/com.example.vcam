@@ -1,25 +1,25 @@
-<?xml version="1.0" encoding="utf-8"?>
+<?xml version='1.0' encoding='utf-8'?>
 <resources>
-    <string name="app_name">VCAM</string>
-    <string name="xposed_description">Android virtual camera module</string>
+    <string name="app_name">Virtual Camera</string>
+    <string name="xposed_description">Android Virtual Camera</string>
 
-    <string name="click_to_go_to_repo">Open project repository</string>
-    <string name="description">Please go to the online repository for the latest updates, usage instructions and bug reports.</string>
-    <string name="Warning">DO NOT USE FOR ANY ILLEGAL PURPOSE. YOU TAKE FULL RESPONSIBILITY FOR ALL CONSEQUENCES.</string>
+    <string name="click_to_go_to_repo">Go to repository</string>
+    <string name="description">Visit the online repository for the latest updates, usage instructions, and to report bugs.</string>
+    <string name="Warning">Do not use for any illegal purpose. You bear full responsibility for all consequences.</string>
 
-    <string name="switch1">Force show permission-missing warning</string>
-    <string name="switch2">Temporarily disable the module</string>
-    <string name="switch3">Play sound of injected video</string>
-    <string name="switch4">Force every app to use its private directory</string>
-    <string name="switch5">Disable toast messages</string>
+    <string name="switch1">Force permission warning display</string>
+    <string name="switch2">Disable module temporarily (on = disabled)</string>
+    <string name="switch3">Play video audio</string>
+    <string name="switch4">Force all apps to use private directory (regardless of permission)</string>
+    <string name="switch5">Disable toast notifications</string>
     <string name="switch_loop">Loop video playback</string>
     <string name="switch_mute">Mute video audio</string>
-    <string name="gitee" translatable="false">Gitee (faster inside mainland China)</string>
+    <string name="gitee">Gitee (faster in mainland China)</string>
 
     <string name="permission_lack_warn">Missing permissions</string>
     <string name="permission_description">VCAM needs \"All files access\" (Android 11+) or READ/WRITE external storage so it can place the image/video under /DCIM/Camera1/ where the Xposed hook reads them. Without this, imports will silently fail.</string>
     <string name="positive">Allow</string>
-    <string name="negative">Refuse</string>
+    <string name="negative">Deny</string>
 
     <string name="section_status">Status</string>
     <string name="section_source_media">Source media</string>

@@ -1,20 +1,20 @@
-<?xml version="1.0" encoding="utf-8"?>
+<?xml version='1.0' encoding='utf-8'?>
 <resources>
-    <string name="app_name">VCAM</string>
-    <string name="xposed_description">安卓虚拟摄像头模块</string>
+    <string name="app_name">虚拟摄像头</string>
+    <string name="xposed_description">安卓虚拟摄像头</string>
 
     <string name="click_to_go_to_repo">前往仓库</string>
-    <string name="description">请前往在线仓库查看最新更新、使用方法和反馈问题。</string>
-    <string name="Warning">请勿用于任何非法用途，所有后果由您自行承担。</string>
+    <string name="description">请前往在线仓库来查看使用方法，应用更新和反馈缺陷</string>
+    <string name="Warning">请勿用于非法用途，所有后果自负!</string>
 
     <string name="switch1">强制显示权限缺失提示</string>
     <string name="switch2">临时关闭模块</string>
     <string name="switch3">播放视频声音</string>
-    <string name="switch4">强制每个应用使用私有目录（无论权限）</string>
+    <string name="switch4">强制每个应用程序使用私有目录（无论权限）</string>
     <string name="switch5">关闭提示消息</string>
     <string name="switch_loop">循环播放视频</string>
     <string name="switch_mute">静音视频声音</string>
-    <string name="gitee" translatable="false">Gitee平台（中国大陆更快）</string>
+    <string name="gitee">Gitee平台（中国大陆更快）</string>
 
     <string name="permission_lack_warn">权限缺失</string>
     <string name="permission_description">VCAM 需要「所有文件访问」权限（Android 11+），或读/写外部存储权限，才能把图片/视频放到 /DCIM/Camera1/ 下供 Xposed 钩子读取。否则导入会静默失败。</string>

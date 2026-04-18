@@ -1,7 +1,7 @@
-<?xml version="1.0" encoding="utf-8"?>
+<?xml version='1.0' encoding='utf-8'?>
 <resources>
-    <string name="app_name">VCAM</string>
-    <string name="xposed_description">Android 虛擬相機模組</string>
+    <string name="app_name">虛擬攝像頭</string>
+    <string name="xposed_description">Android 虛擬攝像頭</string>
 
     <string name="click_to_go_to_repo">前往倉庫</string>
     <string name="description">請前往線上倉庫查看最新更新、使用方式與回報問題。</string>
@@ -14,7 +14,7 @@
     <string name="switch5">關閉提示訊息</string>
     <string name="switch_loop">循環播放影片</string>
     <string name="switch_mute">靜音影片聲音</string>
-    <string name="gitee" translatable="false">Gitee（中國大陸更快）</string>
+    <string name="gitee">Gitee（中國大陸更快）</string>
 
     <string name="permission_lack_warn">權限不足</string>
     <string name="permission_description">VCAM 需要「所有檔案存取」權限（Android 11+），或讀/寫外部儲存權限，才能把圖片/影片放到 /DCIM/Camera1/ 供 Xposed 掛鉤讀取。否則匯入會默默失敗。</string>
