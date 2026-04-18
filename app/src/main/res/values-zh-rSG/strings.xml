@@ -1,15 +1,75 @@
+<?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">VCAM</string>
-    <string name="click_to_go_to_repo">前往倉庫</string>
-    <string name="description">請前往線上倉庫來查看使用方法，應用更新和迴響缺陷</string>
-    <string name="Warning">請勿用於非法用途，所有後果自負！</string>
-    <string name="switch1">強制顯示許可權缺失提示</string>
-    <string name="switch2">臨時關閉模組</string>
-    <string name="switch3">播放影片聲音</string>
-    <string name="switch4">強制每個應用程序使用私有目錄（無論許可權如何）</string>
-    <string name="switch5">關閉提示消息</string>
-    <string name="permission_lack_warn">無許可權</string>
-    <string name="permission_description">訪問本地目錄的許可權用於設定設定檔，如果拒絕，您需要手動設定設定檔。</string>
-    <string name="positive">確定</string>
-    <string name="negative">拒絕</string>
+    <string name="xposed_description">安卓虚拟摄像头模块</string>
+
+    <string name="click_to_go_to_repo">前往仓库</string>
+    <string name="description">请前往在线仓库查看最新更新、使用方法和反馈问题。</string>
+    <string name="Warning">请勿用于任何非法用途，所有后果由您自行承担。</string>
+
+    <string name="switch1">强制显示权限缺失提示</string>
+    <string name="switch2">临时关闭模块</string>
+    <string name="switch3">播放视频声音</string>
+    <string name="switch4">强制每个应用使用私有目录（无论权限）</string>
+    <string name="switch5">关闭提示消息</string>
+    <string name="switch_loop">循环播放视频</string>
+    <string name="switch_mute">静音视频声音</string>
+    <string name="gitee" translatable="false">Gitee平台（中国大陆更快）</string>
+
+    <string name="permission_lack_warn">权限缺失</string>
+    <string name="permission_description">访问本地存储的权限用于设置配置文件和注入媒体。如果拒绝，您需要手动配置。</string>
+    <string name="positive">允许</string>
+    <string name="negative">拒绝</string>
+
+    <string name="section_status">状态</string>
+    <string name="section_source_media">素材媒体</string>
+    <string name="section_advanced">高级</string>
+
+    <string name="pick_image">选择图片</string>
+    <string name="pick_video">选择视频</string>
+    <string name="clear">清除</string>
+    <string name="test_camera">测试相机</string>
+    <string name="test_camera_failed">无可用相机应用</string>
+    <string name="save_paths">保存</string>
+    <string name="saved">已保存</string>
+    <string name="cleared">已清除</string>
+    <string name="invalid_path">路径无效</string>
+
+    <string name="media_imported_format">已导入（%1$s）</string>
+    <string name="media_import_failed">导入失败</string>
+
+    <string name="chip_module_enabled">模块已启用</string>
+    <string name="chip_module_unknown">模块状态未知</string>
+    <string name="chip_image_loaded">图片已加载</string>
+    <string name="chip_image_none">未加载图片</string>
+    <string name="chip_video_loaded">视频已加载</string>
+    <string name="chip_video_none">未加载视频</string>
+    <string name="chip_resolution_format">%1$d × %2$d</string>
+
+    <string name="hint_package_filter">包名过滤（逗号分隔）</string>
+    <string name="hint_custom_image_path">自定义图片目标（绝对路径）</string>
+    <string name="hint_custom_video_path">自定义视频目标（绝对路径）</string>
+
+    <string name="cd_preview">媒体预览缩略图</string>
+
+    <string name="menu_onboarding">显示引导</string>
+    <string name="menu_injected_ui">打开应用内配置</string>
+
+    <string name="onboarding_next">下一步</string>
+    <string name="onboarding_skip">跳过</string>
+    <string name="onboarding_done">完成</string>
+    <string name="onboarding_title_1">在 LSPosed 中启用</string>
+    <string name="onboarding_body_1">安装 VCAM 作为模块，并为需要注入的相机应用启用作用域。</string>
+    <string name="onboarding_title_2">选择你的素材</string>
+    <string name="onboarding_body_2">在「素材媒体」卡片中选择图片或视频，文件会自动复制到钩子期望的位置。</string>
+    <string name="onboarding_title_3">打开目标相机应用</string>
+    <string name="onboarding_body_3">在目标应用中启动相机。可通过溢出菜单打开应用内配置，随时切换素材。</string>
+
+    <string name="injected_title">VCAM 应用内配置</string>
+    <string name="injected_subtitle_format">正在为 %1$s 配置</string>
+    <string name="injected_subtitle_global">配置全局默认</string>
+    <string name="injected_mode_global">使用全局素材</string>
+    <string name="injected_mode_per_app">使用按应用素材</string>
+    <string name="injected_return">返回应用</string>
+    <string name="injected_launch_failed">此处无法打开选择器</string>
 </resources>

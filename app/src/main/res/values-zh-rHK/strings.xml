@@ -1,15 +1,75 @@
+<?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">VCAM</string>
+    <string name="xposed_description">Android 虛擬相機模組</string>
+
     <string name="click_to_go_to_repo">前往倉庫</string>
-    <string name="description">請前往線上倉庫來查看使用方法，應用更新和迴響缺陷</string>
-    <string name="Warning">請勿用於非法用途，所有後果自負！</string>
-    <string name="switch2">臨時關閉模組</string>
-    <string name="switch1">強制顯示許可權缺失提示</string>
+    <string name="description">請前往線上倉庫查看最新更新、使用方式與回報問題。</string>
+    <string name="Warning">請勿用於任何非法用途，所有後果由您自行承擔。</string>
+
+    <string name="switch1">強制顯示權限缺失提示</string>
+    <string name="switch2">暫時停用模組</string>
     <string name="switch3">播放影片聲音</string>
-    <string name="switch4">強制每個應用程序使用私有目錄（無論許可權如何）</string>
-    <string name="switch5">關閉提示消息</string>
-    <string name="permission_lack_warn">無許可權</string>
-    <string name="permission_description">訪問本地目錄的許可權用於設定設定檔，如果拒絕，您需要手動設定設定檔。</string>
-    <string name="positive">確定</string>
+    <string name="switch4">強制每個應用程式使用私有目錄（無論權限）</string>
+    <string name="switch5">關閉提示訊息</string>
+    <string name="switch_loop">循環播放影片</string>
+    <string name="switch_mute">靜音影片聲音</string>
+    <string name="gitee" translatable="false">Gitee（中國大陸更快）</string>
+
+    <string name="permission_lack_warn">權限不足</string>
+    <string name="permission_description">存取本機儲存的權限用於放置設定檔與注入媒體。若拒絕，您需要手動設定。</string>
+    <string name="positive">允許</string>
     <string name="negative">拒絕</string>
+
+    <string name="section_status">狀態</string>
+    <string name="section_source_media">來源媒體</string>
+    <string name="section_advanced">進階</string>
+
+    <string name="pick_image">選擇圖片</string>
+    <string name="pick_video">選擇影片</string>
+    <string name="clear">清除</string>
+    <string name="test_camera">測試相機</string>
+    <string name="test_camera_failed">沒有可用的相機應用</string>
+    <string name="save_paths">儲存</string>
+    <string name="saved">已儲存</string>
+    <string name="cleared">已清除</string>
+    <string name="invalid_path">路徑無效</string>
+
+    <string name="media_imported_format">已匯入（%1$s）</string>
+    <string name="media_import_failed">匯入失敗</string>
+
+    <string name="chip_module_enabled">模組已啟用</string>
+    <string name="chip_module_unknown">模組狀態未知</string>
+    <string name="chip_image_loaded">已載入圖片</string>
+    <string name="chip_image_none">未載入圖片</string>
+    <string name="chip_video_loaded">已載入影片</string>
+    <string name="chip_video_none">未載入影片</string>
+    <string name="chip_resolution_format">%1$d × %2$d</string>
+
+    <string name="hint_package_filter">套件過濾（以逗號分隔）</string>
+    <string name="hint_custom_image_path">自訂圖片目標（絕對路徑）</string>
+    <string name="hint_custom_video_path">自訂影片目標（絕對路徑）</string>
+
+    <string name="cd_preview">媒體預覽縮圖</string>
+
+    <string name="menu_onboarding">顯示引導</string>
+    <string name="menu_injected_ui">開啟應用內設定</string>
+
+    <string name="onboarding_next">下一步</string>
+    <string name="onboarding_skip">略過</string>
+    <string name="onboarding_done">完成</string>
+    <string name="onboarding_title_1">在 LSPosed 啟用</string>
+    <string name="onboarding_body_1">安裝 VCAM 作為模組，並為需要注入的相機應用啟用作用域。</string>
+    <string name="onboarding_title_2">選擇素材</string>
+    <string name="onboarding_body_2">在「來源媒體」卡片中挑選圖片或影片，檔案會自動複製到掛鉤預期的位置。</string>
+    <string name="onboarding_title_3">開啟目標相機應用</string>
+    <string name="onboarding_body_3">在目標應用中啟動相機。可透過溢位選單開啟應用內設定，隨時切換素材。</string>
+
+    <string name="injected_title">VCAM 應用內設定</string>
+    <string name="injected_subtitle_format">正在為 %1$s 設定</string>
+    <string name="injected_subtitle_global">設定全域預設值</string>
+    <string name="injected_mode_global">使用全域素材</string>
+    <string name="injected_mode_per_app">使用各應用程式素材</string>
+    <string name="injected_return">返回應用</string>
+    <string name="injected_launch_failed">此處無法開啟選取器</string>
 </resources>
