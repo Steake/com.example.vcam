@@ -103,7 +103,7 @@ public class VideoToFrames implements Runnable {
             extractor.setDataSource(videoFilePath);
             int trackIndex = selectTrack(extractor);
             if (trackIndex < 0) {
-                XposedBridge.log("[VCAM][decoder]No video track found in " + videoFilePath);
+                XposedBridge.log("[VCAM][decoder] No video track found in " + videoFilePath);
             }
             extractor.selectTrack(trackIndex);
             MediaFormat mediaFormat = extractor.getTrackFormat(trackIndex);
@@ -112,10 +112,10 @@ public class VideoToFrames implements Runnable {
             showSupportedColorFormat(decoder.getCodecInfo().getCapabilitiesForType(mime));
             if (isColorFormatSupported(decodeColorFormat, decoder.getCodecInfo().getCapabilitiesForType(mime))) {
                 mediaFormat.setInteger(MediaFormat.KEY_COLOR_FORMAT, decodeColorFormat);
-                XposedBridge.log("[VCAM][decoder]set decode color format to type " + decodeColorFormat);
+                XposedBridge.log("[VCAM][decoder] Set decode color format to type " + decodeColorFormat);
             } else {
                 Log.i(TAG, "unable to set decode color format, color format type " + decodeColorFormat + " not supported");
-                XposedBridge.log("[VCAM][decoder]unable to set decode color format, color format type " + decodeColorFormat + " not supported");
+                XposedBridge.log("[VCAM][decoder] Unable to set decode color format, color format type " + decodeColorFormat + " not supported");
             }
             decodeFramesToImage(decoder, extractor, mediaFormat);
             decoder.stop();
@@ -125,7 +125,7 @@ public class VideoToFrames implements Runnable {
                 decoder.stop();
             }
         }catch (Exception e){
-            XposedBridge.log("[VCAM][videofile]"+ e.toString());
+            XposedBridge.log("[VCAM][videofile] " + e.toString());
         } finally {
             if (decoder != null) {
                 decoder.stop();
@@ -355,6 +355,5 @@ enum OutputImageFormat {
         return friendlyName;
     }
 }
-
 
 

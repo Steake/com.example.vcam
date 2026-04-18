@@ -58,9 +58,10 @@ jobs:
           VERSION=${GITHUB_REF_NAME//\//-}
           DEST="vcam-${VERSION}-debug.apk"
           cp "$APK" "$DEST"
-          sha256sum "$DEST" | tee "${DEST}.sha256"
+          APK_SHA256=$(sha256sum "$DEST" | awk '{print $1}')
+          printf '%s  %s\n' "$APK_SHA256" "$DEST" | tee "${DEST}.sha256"
           echo "apk_path=$DEST" >> "$GITHUB_OUTPUT"
-          echo "apk_sha256=$(sha256sum "$DEST" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+          echo "apk_sha256=$APK_SHA256" >> "$GITHUB_OUTPUT"
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4

@@ -33,6 +33,8 @@ import com.google.android.material.textfield.TextInputEditText;
 
 import java.io.File;
 import java.io.IOException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /**
  * Material 3 companion UI for the VCAM Xposed module.
@@ -61,6 +63,8 @@ public class MainActivity extends AppCompatActivity {
     private ActivityResultLauncher<String> pickImageLauncher;
     private ActivityResultLauncher<String> pickVideoLauncher;
     private ActivityResultLauncher<String[]> storagePermsLauncher;
+    private final ExecutorService ioExecutor = Executors.newSingleThreadExecutor();
+    private int syncRequestId = 0;
 
     private SharedPreferences prefs;
 
@@ -117,7 +121,7 @@ public class MainActivity extends AppCompatActivity {
         muteSwitch.setOnCheckedChangeListener((b, c) ->
                 prefs.edit().putBoolean(VCAMApp.KEY_MUTE_VIDEO, c).apply());
 
-        // Register activity result launchers (Photo Picker on 13+, GetContent fallback).
+        // Register content pickers for image/video import.
         pickImageLauncher = registerForActivityResult(
                 new ActivityResultContracts.GetContent(),
                 uri -> {
@@ -174,6 +178,12 @@ public class MainActivity extends AppCompatActivity {
     protected void onResume() {
         super.onResume();
         syncStateWithFiles();
+    }
+
+    @Override
+    protected void onDestroy() {
+        ioExecutor.shutdownNow();
+        super.onDestroy();
     }
 
     // ---------------------------------------------------------------------
@@ -265,27 +275,34 @@ public class MainActivity extends AppCompatActivity {
 
     private void importMedia(@NonNull Uri uri, boolean isImage) {
         File dst = isImage ? MediaPaths.getImageTarget(this) : MediaPaths.getVideoTarget(this);
-        try {
-            long bytes = MediaPaths.copyUriToFile(this, uri, dst);
-            prefs.edit()
-                    .putString(isImage ? VCAMApp.KEY_LAST_IMAGE_URI : VCAMApp.KEY_LAST_VIDEO_URI,
-                            uri.toString())
-                    .apply();
-            Toast.makeText(this,
-                    getString(R.string.media_imported_format, MediaPaths.humanBytes(bytes)),
-                    Toast.LENGTH_SHORT).show();
-        } catch (Exception e) {
-            Log.w(TAG, "Import failed (dst=" + dst + ")", e);
-            if (!hasStoragePermission()) {
-                Toast.makeText(this, R.string.media_import_failed_no_perm, Toast.LENGTH_LONG).show();
-                requestStoragePermission();
-            } else {
-                Toast.makeText(this,
-                        getString(R.string.media_import_failed_format, e.getMessage()),
-                        Toast.LENGTH_LONG).show();
+        ioExecutor.execute(() -> {
+            try {
+                long bytes = MediaPaths.copyUriToFile(this, uri, dst);
+                prefs.edit()
+                        .putString(isImage ? VCAMApp.KEY_LAST_IMAGE_URI : VCAMApp.KEY_LAST_VIDEO_URI,
+                                uri.toString())
+                        .apply();
+                runOnUiThread(() -> {
+                    Toast.makeText(this,
+                            getString(R.string.media_imported_format, MediaPaths.humanBytes(bytes)),
+                            Toast.LENGTH_SHORT).show();
+                    syncStateWithFiles();
+                });
+            } catch (Exception e) {
+                Log.w(TAG, "Import failed (dst=" + dst + ")", e);
+                runOnUiThread(() -> {
+                    if (!hasStoragePermission()) {
+                        Toast.makeText(this, R.string.media_import_failed_no_perm, Toast.LENGTH_LONG).show();
+                        requestStoragePermission();
+                    } else {
+                        Toast.makeText(this,
+                                getString(R.string.media_import_failed_format, e.getMessage()),
+                                Toast.LENGTH_LONG).show();
+                    }
+                    syncStateWithFiles();
+                });
             }
-        }
-        syncStateWithFiles();
+        });
     }
 
     private void clearMedia() {
@@ -386,42 +403,65 @@ public class MainActivity extends AppCompatActivity {
         // image & video chips/preview
         File img = MediaPaths.getImageTarget(this);
         File vid = MediaPaths.getVideoTarget(this);
+        boolean hasImage = img.exists() && img.length() > 0;
+        boolean hasVideo = vid.exists() && vid.length() > 0;
+        chipImage.setText(hasImage ? R.string.chip_image_loaded : R.string.chip_image_none);
+        chipVideo.setText(hasVideo ? R.string.chip_video_loaded : R.string.chip_video_none);
+        preview.setImageResource(android.R.drawable.ic_menu_gallery);
 
-        Bitmap thumb = null;
+        final int requestId = ++syncRequestId;
+        ioExecutor.execute(() -> {
+            MediaPreviewState state = loadMediaPreviewState(img, vid);
+            runOnUiThread(() -> {
+                if (isFinishing() || isDestroyed() || requestId != syncRequestId) return;
+                applyMediaPreviewState(state);
+            });
+        });
+    }
+
+    private MediaPreviewState loadMediaPreviewState(File img, File vid) {
+        MediaPreviewState state = new MediaPreviewState();
         if (img.exists() && img.length() > 0) {
-            chipImage.setText(R.string.chip_image_loaded);
-            thumb = MediaPaths.decodeImageThumb(img, 800);
-            int[] res = MediaPaths.imageResolution(img);
-            if (res != null) {
-                chipRes.setVisibility(View.VISIBLE);
-                chipRes.setText(getString(R.string.chip_resolution_format, res[0], res[1]));
-            }
+            state.thumb = MediaPaths.decodeImageThumb(img, 800);
+            state.resolution = MediaPaths.imageResolution(img);
+            state.sizeLabel = MediaPaths.humanBytes(img.length());
+        }
+        if ((state.thumb == null) && vid.exists() && vid.length() > 0) {
+            state.thumb = MediaPaths.decodeVideoFrame(vid);
+            state.resolution = MediaPaths.videoResolution(vid);
+            state.sizeLabel = MediaPaths.humanBytes(vid.length());
+        }
+        return state;
+    }
+
+    private void applyMediaPreviewState(MediaPreviewState state) {
+        if (state.resolution != null) {
+            chipRes.setVisibility(View.VISIBLE);
+            chipRes.setText(getString(R.string.chip_resolution_format,
+                    state.resolution[0], state.resolution[1]));
+        } else {
+            chipRes.setVisibility(View.GONE);
+            chipRes.setText("");
+        }
+
+        if (!TextUtils.isEmpty(state.sizeLabel)) {
             chipSize.setVisibility(View.VISIBLE);
-            chipSize.setText(MediaPaths.humanBytes(img.length()));
+            chipSize.setText(state.sizeLabel);
         } else {
-            chipImage.setText(R.string.chip_image_none);
+            chipSize.setVisibility(View.GONE);
+            chipSize.setText("");
         }
 
-        if (vid.exists() && vid.length() > 0) {
-            chipVideo.setText(R.string.chip_video_loaded);
-            if (thumb == null) {
-                thumb = MediaPaths.decodeVideoFrame(vid);
-                int[] res = MediaPaths.videoResolution(vid);
-                if (res != null) {
-                    chipRes.setVisibility(View.VISIBLE);
-                    chipRes.setText(getString(R.string.chip_resolution_format, res[0], res[1]));
-                }
-                chipSize.setVisibility(View.VISIBLE);
-                chipSize.setText(MediaPaths.humanBytes(vid.length()));
-            }
-        } else {
-            chipVideo.setText(R.string.chip_video_none);
-        }
-
-        if (thumb != null) {
-            preview.setImageBitmap(thumb);
+        if (state.thumb != null) {
+            preview.setImageBitmap(state.thumb);
         } else {
             preview.setImageResource(android.R.drawable.ic_menu_gallery);
         }
+    }
+
+    private static final class MediaPreviewState {
+        private Bitmap thumb;
+        private int[] resolution;
+        private String sizeLabel;
     }
 }
