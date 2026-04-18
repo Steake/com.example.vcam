@@ -1,17 +1,77 @@
-<?xml version="1.0" encoding="utf-8"?>
+<?xml version='1.0' encoding='utf-8'?>
 <resources>
     <string name="app_name">Virtual Camera</string>
+    <string name="xposed_description">Android Virtual Camera</string>
+
     <string name="click_to_go_to_repo">Go to repository</string>
     <string name="description">Visit the online repository for the latest updates, usage instructions, and to report bugs.</string>
     <string name="Warning">Do not use for any illegal purpose. You bear full responsibility for all consequences.</string>
+
     <string name="switch1">Force permission warning display</string>
     <string name="switch2">Disable module temporarily (on = disabled)</string>
     <string name="switch3">Play video audio</string>
     <string name="switch4">Force all apps to use private directory (regardless of permission)</string>
-    <string name="gitee">Gitee (faster in mainland China)</string>
     <string name="switch5">Disable toast notifications</string>
+    <string name="switch_loop">Loop video playback</string>
+    <string name="switch_mute">Mute video audio</string>
+    <string name="gitee">Gitee (faster in mainland China)</string>
+
     <string name="permission_lack_warn">Missing permissions</string>
-    <string name="permission_description">Storage access permission is needed to manage configuration files. If denied, you must configure the files manually.</string>
+    <string name="permission_description">VCAM needs \"All files access\" (Android 11+) or READ/WRITE external storage so it can place the image/video under /DCIM/Camera1/ where the Xposed hook reads them. Without this, imports will silently fail.</string>
     <string name="positive">Allow</string>
     <string name="negative">Deny</string>
+
+    <string name="section_status">Status</string>
+    <string name="section_source_media">Source media</string>
+    <string name="section_advanced">Advanced</string>
+
+    <string name="pick_image">Select image</string>
+    <string name="pick_video">Select video</string>
+    <string name="clear">Clear</string>
+    <string name="test_camera">Test camera</string>
+    <string name="test_camera_failed">No camera app available</string>
+    <string name="save_paths">Save</string>
+    <string name="saved">Saved</string>
+    <string name="cleared">Cleared</string>
+    <string name="invalid_path">Invalid path</string>
+
+    <string name="media_imported_format">Imported (%1$s)</string>
+    <string name="media_import_failed">Import failed</string>
+    <string name="media_import_failed_format">Import failed: %1$s</string>
+    <string name="media_import_failed_no_perm">Storage access required. Grant \"All files access\" in system settings.</string>
+
+    <string name="chip_module_enabled">Module enabled</string>
+    <string name="chip_module_unknown">Module status unknown</string>
+    <string name="chip_image_loaded">Image loaded</string>
+    <string name="chip_image_none">No image</string>
+    <string name="chip_video_loaded">Video loaded</string>
+    <string name="chip_video_none">No video</string>
+    <string name="chip_resolution_format">%1$d × %2$d</string>
+
+    <string name="hint_package_filter">Package filter (comma-separated)</string>
+    <string name="hint_custom_image_path">Custom image target (absolute path)</string>
+    <string name="hint_custom_video_path">Custom video target (absolute path)</string>
+
+    <string name="cd_preview">Media preview thumbnail</string>
+
+    <string name="menu_onboarding">Show onboarding</string>
+    <string name="menu_injected_ui">Open in-app config</string>
+
+    <string name="onboarding_next">Next</string>
+    <string name="onboarding_skip">Skip</string>
+    <string name="onboarding_done">Done</string>
+    <string name="onboarding_title_1">Enable in LSPosed</string>
+    <string name="onboarding_body_1">Install VCAM as a module and enable its scope for the camera-using apps you want to inject.</string>
+    <string name="onboarding_title_2">Select your media</string>
+    <string name="onboarding_body_2">Pick an image and/or video from the Source media card. The file is copied to the hook\'s expected location automatically.</string>
+    <string name="onboarding_title_3">Open the target camera app</string>
+    <string name="onboarding_body_3">Launch the camera inside your target app. Use the in-app config dialog from the overflow menu to swap media on the fly.</string>
+
+    <string name="injected_title">VCAM in-app config</string>
+    <string name="injected_subtitle_format">Configuring for %1$s</string>
+    <string name="injected_subtitle_global">Configuring global defaults</string>
+    <string name="injected_mode_global">Use global media</string>
+    <string name="injected_mode_per_app">Use per-app media</string>
+    <string name="injected_return">Return to app</string>
+    <string name="injected_launch_failed">Picker unavailable here</string>
 </resources>

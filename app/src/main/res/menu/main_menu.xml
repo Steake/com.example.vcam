@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto">
+    <item
+        android:id="@+id/action_onboarding"
+        android:title="@string/menu_onboarding"
+        app:showAsAction="never" />
+    <item
+        android:id="@+id/action_injected_ui"
+        android:title="@string/menu_injected_ui"
+        app:showAsAction="never" />
+</menu>
