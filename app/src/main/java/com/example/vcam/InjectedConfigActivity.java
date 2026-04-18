@@ -1,12 +1,10 @@
 package com.example.vcam;
 
 import android.content.Intent;
-import android.content.SharedPreferences;
 import android.graphics.Bitmap;
 import android.net.Uri;
 import android.os.Bundle;
 import android.widget.ImageView;
-import android.widget.RadioGroup;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -33,12 +31,9 @@ public class InjectedConfigActivity extends AppCompatActivity {
 
     public static final String EXTRA_CALLER_PACKAGE = "caller_package";
 
-    private SharedPreferences prefs;
-
     private ImageView preview;
     private TextView subtitle;
     private ChipGroup chips;
-    private RadioGroup modeGroup;
 
     private ActivityResultLauncher<String> pickImageLauncher;
     private ActivityResultLauncher<String> pickVideoLauncher;
@@ -51,8 +46,6 @@ public class InjectedConfigActivity extends AppCompatActivity {
         setTheme(R.style.Theme_VCAM_Translucent);
         setContentView(R.layout.activity_injected_config);
 
-        prefs = getSharedPreferences(VCAMApp.PREFS, MODE_PRIVATE);
-
         callerPackage = getIntent().getStringExtra(EXTRA_CALLER_PACKAGE);
         if (callerPackage == null && getCallingPackage() != null) {
             callerPackage = getCallingPackage();
@@ -61,24 +54,12 @@ public class InjectedConfigActivity extends AppCompatActivity {
         subtitle = findViewById(R.id.injected_subtitle);
         preview = findViewById(R.id.injected_preview);
         chips = findViewById(R.id.injected_chips);
-        modeGroup = findViewById(R.id.injected_mode);
 
         if (callerPackage != null) {
             subtitle.setText(getString(R.string.injected_subtitle_format, callerPackage));
         } else {
             subtitle.setText(R.string.injected_subtitle_global);
         }
-
-        String mode = prefs.getString(keyMode(), "global");
-        ((com.google.android.material.radiobutton.MaterialRadioButton)
-                findViewById("per_app".equals(mode)
-                        ? R.id.injected_mode_per_app
-                        : R.id.injected_mode_global)).setChecked(true);
-
-        modeGroup.setOnCheckedChangeListener((group, checkedId) -> {
-            String newMode = checkedId == R.id.injected_mode_per_app ? "per_app" : "global";
-            prefs.edit().putString(keyMode(), newMode).apply();
-        });
 
         pickImageLauncher = registerForActivityResult(
                 new ActivityResultContracts.GetContent(),
@@ -93,10 +74,6 @@ public class InjectedConfigActivity extends AppCompatActivity {
         findViewById(R.id.injected_return).setOnClickListener(v -> returnToCaller());
 
         refresh();
-    }
-
-    private String keyMode() {
-        return "injection_mode_" + (callerPackage == null ? "default" : callerPackage);
     }
 
     private void safeLaunch(ActivityResultLauncher<String> l, String type) {

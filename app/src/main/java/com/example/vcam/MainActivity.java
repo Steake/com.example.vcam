@@ -361,6 +361,11 @@ public class MainActivity extends AppCompatActivity {
             MediaPaths.defaultDir();
         }
 
+        chipRes.setVisibility(View.GONE);
+        chipRes.setText("");
+        chipSize.setVisibility(View.GONE);
+        chipSize.setText("");
+
         // marker switches
         File base = new File(Environment.getExternalStorageDirectory() + "/DCIM/Camera1/");
         disable_switch.setChecked(new File(base, "disable.jpg").exists());
@@ -375,6 +380,7 @@ public class MainActivity extends AppCompatActivity {
             chipModule.setChipIconResource(android.R.drawable.checkbox_on_background);
         } else {
             chipModule.setText(R.string.chip_module_unknown);
+            chipModule.setChipIcon(null);
         }
 
         // image & video chips/preview

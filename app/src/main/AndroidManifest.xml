@@ -13,8 +13,9 @@
          under /sdcard/DCIM/Camera1/. Users must grant this once via system settings. -->
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
         tools:ignore="ScopedStorage" />
-    <!-- So the hook, running in target-app processes, can post a notification linking to
-         the in-app config dialog on Android 13+. -->
+    <!-- Allows this app/module to post its own notifications on Android 13+.
+         HookMain posts from hooked target-app processes, so their notification state
+         is still controlled by each target app's Android 13+ notification permission. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <queries>

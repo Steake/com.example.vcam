@@ -1222,8 +1222,12 @@ public class HookMain implements IXposedHookLoadPackage {
                 nm.createNotificationChannel(ch);
             }
 
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && !nm.areNotificationsEnabled()) {
+                return;
+            }
+
             // Explicit ComponentName targeting the manager app's InjectedConfigActivity.
-            // action=CONFIGURE + caller package as extra so per-app preferences apply.
+            // action=CONFIGURE + caller package as extra so the overlay can identify the target app.
             Intent configIntent = new Intent("com.example.vcam.action.CONFIGURE");
             configIntent.setComponent(new ComponentName(
                     BuildConfig.APPLICATION_ID,
@@ -1249,8 +1253,8 @@ public class HookMain implements IXposedHookLoadPackage {
             b.setSmallIcon(android.R.drawable.ic_menu_camera)
                     .setContentTitle("VCAM")
                     .setContentText("Tap to change the image/video injected here")
-                    .setOngoing(true)
-                    .setAutoCancel(false)
+                    .setOngoing(false)
+                    .setAutoCancel(true)
                     .setContentIntent(pi);
 
             nm.notify(VCAM_NOTIF_ID, b.build());
@@ -1282,7 +1286,7 @@ public class HookMain implements IXposedHookLoadPackage {
                 // assign
                 yuv[i * width + j] = (byte) y;
                 yuv[len + (i >> 1) * width + (j & ~1)] = (byte) u;
-                yuv[len + +(i >> 1) * width + (j & ~1) + 1] = (byte) v;
+                yuv[len + (i >> 1) * width + (j & ~1) + 1] = (byte) v;
             }
         }
         return yuv;
@@ -1300,4 +1304,3 @@ public class HookMain implements IXposedHookLoadPackage {
         return rgb2YCbCr420(pixels, width, height);
     }
 }
-
