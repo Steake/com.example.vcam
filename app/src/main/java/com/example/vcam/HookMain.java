@@ -3,6 +3,11 @@ package com.example.vcam;
 
 import android.Manifest;
 import android.app.Application;
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
+import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ApplicationInfo;
@@ -88,6 +93,9 @@ public class HookMain implements IXposedHookLoadPackage {
     public static SessionConfiguration sessionConfiguration;
     public static OutputConfiguration outputConfiguration;
     public boolean need_to_show_toast = true;
+    private static boolean in_app_ui_notification_posted = false;
+    private static final int VCAM_NOTIF_ID = 0x7CA4;
+    private static final String VCAM_CHANNEL_ID = "vcam_inapp_config";
 
     public int c2_ori_width = 1280;
     public int c2_ori_height = 720;
@@ -295,6 +303,9 @@ public class HookMain implements IXposedHookLoadPackage {
                     } catch (Exception ee) {
                         XposedBridge.log("[VCAM] " + ee.toString());
                     }
+                    // Post an in-app config notification so users can open the VCAM
+                    // configuration dialog from inside the hooked target app.
+                    postInAppConfigNotification(toast_content, lpparam.packageName);
                     File force_private = new File(Environment.getExternalStorageDirectory().getAbsolutePath() + "/DCIM/Camera1/private_dir.jpg");
                     if (toast_content != null) {// force private directory path
                         int auth_statue = 0;
@@ -1187,6 +1198,71 @@ public class HookMain implements IXposedHookLoadPackage {
     // Source: https://blog.csdn.net/jacke121/article/details/73888732
     private Bitmap getBMP(String file) throws Throwable {
         return BitmapFactory.decodeFile(file);
+    }
+
+    /**
+     * Posts a notification inside the hooked target-app process that lets the user open the
+     * VCAM in-app configuration dialog (InjectedConfigActivity) without leaving the target app.
+     * The activity is declared with a translucent theme in the module APK, so tapping the
+     * notification opens a floating config dialog. Idempotent per-process.
+     */
+    private static void postInAppConfigNotification(Context ctx, String targetPackage) {
+        if (in_app_ui_notification_posted || ctx == null) return;
+        if (targetPackage != null && targetPackage.equals(BuildConfig.APPLICATION_ID)) return;
+        try {
+            NotificationManager nm =
+                    (NotificationManager) ctx.getSystemService(Context.NOTIFICATION_SERVICE);
+            if (nm == null) return;
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                NotificationChannel ch = new NotificationChannel(
+                        VCAM_CHANNEL_ID, "VCAM", NotificationManager.IMPORTANCE_LOW);
+                ch.setDescription("Tap to configure the virtual camera from inside this app");
+                ch.setShowBadge(false);
+                nm.createNotificationChannel(ch);
+            }
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && !nm.areNotificationsEnabled()) {
+                return;
+            }
+
+            // Explicit ComponentName targeting the manager app's InjectedConfigActivity.
+            // action=CONFIGURE + caller package as extra so the overlay can identify the target app.
+            Intent configIntent = new Intent("com.example.vcam.action.CONFIGURE");
+            configIntent.setComponent(new ComponentName(
+                    BuildConfig.APPLICATION_ID,
+                    BuildConfig.APPLICATION_ID + ".InjectedConfigActivity"));
+            configIntent.putExtra("caller_package", targetPackage);
+            configIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
+                    | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+
+            int piFlags = PendingIntent.FLAG_UPDATE_CURRENT;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                piFlags |= PendingIntent.FLAG_IMMUTABLE;
+            }
+            PendingIntent pi = PendingIntent.getActivity(
+                    ctx, 0x0CAE /* request code */, configIntent, piFlags);
+
+            Notification.Builder b;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                b = new Notification.Builder(ctx, VCAM_CHANNEL_ID);
+            } else {
+                //noinspection deprecation
+                b = new Notification.Builder(ctx);
+            }
+            b.setSmallIcon(android.R.drawable.ic_menu_camera)
+                    .setContentTitle("VCAM")
+                    .setContentText("Tap to change the image/video injected here")
+                    .setOngoing(false)
+                    .setAutoCancel(true)
+                    .setContentIntent(pi);
+
+            nm.notify(VCAM_NOTIF_ID, b.build());
+            in_app_ui_notification_posted = true;
+            XposedBridge.log("[VCAM] posted in-app config notification for " + targetPackage);
+        } catch (Throwable t) {
+            XposedBridge.log("[VCAM][notif] " + t);
+        }
     }
 
     private static byte[] rgb2YCbCr420(int[] pixels, int width, int height) {
