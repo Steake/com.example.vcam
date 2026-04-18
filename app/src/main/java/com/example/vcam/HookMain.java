@@ -37,7 +37,10 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.Executor;
 
 import de.robv.android.xposed.IXposedHookLoadPackage;
@@ -103,7 +106,109 @@ public class HookMain implements IXposedHookLoadPackage {
     public static Class c2_state_callback;
     public Context toast_content;
 
+    /**
+     * Permissions that are spoofed as {@code PERMISSION_GRANTED} inside every
+     * injected application so the VCAM hook can access the user's
+     * {@code /DCIM/Camera1/} directory for image/video injection even when the
+     * host app was not granted storage access by the user.
+     */
+    private static final Set<String> SPOOFED_STORAGE_PERMISSIONS;
+    static {
+        Set<String> s = new HashSet<>(Arrays.asList(
+                Manifest.permission.READ_EXTERNAL_STORAGE,
+                Manifest.permission.WRITE_EXTERNAL_STORAGE,
+                Manifest.permission.MANAGE_EXTERNAL_STORAGE,
+                Manifest.permission.READ_MEDIA_IMAGES,
+                Manifest.permission.READ_MEDIA_VIDEO,
+                Manifest.permission.READ_MEDIA_AUDIO,
+                Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED,
+                Manifest.permission.ACCESS_MEDIA_LOCATION
+        ));
+        SPOOFED_STORAGE_PERMISSIONS = Collections.unmodifiableSet(s);
+    }
+
+    /**
+     * Hook the standard Android permission-check entry points so every injected
+     * application observes file-system / media permissions as granted. This is
+     * required for Image injection: the hook reads the replacement media from
+     * {@code /DCIM/Camera1/}, but many target apps have not been granted
+     * storage access by the user. Without this override the hook would silently
+     * fall back to the app-private external directory and lose access to the
+     * shared camera directory.
+     *
+     * <p>VCAM's own manager package is explicitly excluded so its real
+     * permission flow (and "All files access" UX) keeps working unchanged.
+     */
+    private void applyInjectedStoragePermissions(final XC_LoadPackage.LoadPackageParam lpparam) {
+        if (BuildConfig.APPLICATION_ID.equals(lpparam.packageName)) {
+            return;
+        }
+        final XC_MethodHook grantIfStorage = new XC_MethodHook() {
+            @Override
+            protected void beforeHookedMethod(MethodHookParam param) {
+                if (param.args.length > 0 && param.args[0] instanceof String
+                        && SPOOFED_STORAGE_PERMISSIONS.contains(param.args[0])) {
+                    param.setResult(PackageManager.PERMISSION_GRANTED);
+                }
+            }
+        };
+        final XC_MethodHook alwaysTrue = new XC_MethodHook() {
+            @Override
+            protected void beforeHookedMethod(MethodHookParam param) {
+                param.setResult(Boolean.TRUE);
+            }
+        };
+
+        // ContextImpl is the concrete implementation that every Context/
+        // ContextWrapper delegates to, so hooking it covers checkPermission,
+        // checkSelfPermission, checkCallingPermission and
+        // checkCallingOrSelfPermission for storage-related permissions.
+        try {
+            XposedHelpers.findAndHookMethod("android.app.ContextImpl", lpparam.classLoader,
+                    "checkPermission", String.class, int.class, int.class, grantIfStorage);
+        } catch (Throwable t) {
+            XposedBridge.log("[VCAM][perm-hook] ContextImpl.checkPermission: " + t);
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            try {
+                XposedHelpers.findAndHookMethod("android.app.ContextImpl", lpparam.classLoader,
+                        "checkSelfPermission", String.class, grantIfStorage);
+            } catch (Throwable t) {
+                XposedBridge.log("[VCAM][perm-hook] ContextImpl.checkSelfPermission: " + t);
+            }
+        }
+        try {
+            XposedHelpers.findAndHookMethod("android.app.ApplicationPackageManager", lpparam.classLoader,
+                    "checkPermission", String.class, String.class, grantIfStorage);
+        } catch (Throwable t) {
+            XposedBridge.log("[VCAM][perm-hook] ApplicationPackageManager.checkPermission: " + t);
+        }
+
+        // Environment.isExternalStorageManager() gates "All files access" on
+        // API 30+. Force it to true inside target apps so code paths guarded
+        // on MANAGE_EXTERNAL_STORAGE are taken.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            try {
+                XposedHelpers.findAndHookMethod("android.os.Environment", lpparam.classLoader,
+                        "isExternalStorageManager", alwaysTrue);
+            } catch (Throwable t) {
+                XposedBridge.log("[VCAM][perm-hook] Environment.isExternalStorageManager: " + t);
+            }
+            try {
+                XposedHelpers.findAndHookMethod("android.os.Environment", lpparam.classLoader,
+                        "isExternalStorageManager", File.class, alwaysTrue);
+            } catch (Throwable t) {
+                XposedBridge.log("[VCAM][perm-hook] Environment.isExternalStorageManager(File): " + t);
+            }
+        }
+    }
+
     public void handleLoadPackage(final XC_LoadPackage.LoadPackageParam lpparam) throws Exception {
+        // Grant file-system / media permissions to injected applications so
+        // the camera-directory based image injection works even when the host
+        // app was never granted storage access by the user.
+        applyInjectedStoragePermissions(lpparam);
+
         XposedHelpers.findAndHookMethod("android.hardware.Camera", lpparam.classLoader, "setPreviewTexture", SurfaceTexture.class, new XC_MethodHook() {
             @Override
             protected void beforeHookedMethod(MethodHookParam param) {
