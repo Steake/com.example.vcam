@@ -1368,10 +1368,10 @@ public class HookMain implements IXposedHookLoadPackage {
 
     /**
      * Show the "no replacement image or video" toast if toasts are enabled
-     * and a host context is available. Returns whether the toast gating
-     * indicates we should early-exit the caller (i.e. no media at all).
+     * and a host context is available. No-op when media is actually staged.
      */
-    private boolean notifyMissingMediaIfAny(String pkgName) {
+    private void showMissingMediaToast(String pkgName) {
+        if (hasAnyMedia()) return;
         File toast_control = new File(Environment.getExternalStorageDirectory().getPath()
                 + "/DCIM/Camera1/" + "no_toast.jpg");
         need_to_show_toast = !toast_control.exists();
@@ -1385,7 +1385,6 @@ public class HookMain implements IXposedHookLoadPackage {
                 XposedBridge.log("[VCAM][toast]" + ee.toString());
             }
         }
-        return true;
     }
 
     /**

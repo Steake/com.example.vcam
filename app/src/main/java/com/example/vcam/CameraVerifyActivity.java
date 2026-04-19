@@ -43,7 +43,6 @@ import java.io.FileInputStream;
 import java.nio.ByteBuffer;
 import java.security.MessageDigest;
 import java.util.Arrays;
-import java.util.Collections;
 
 /**
  * In-manager camera verifier (Bug 5 fix). Opens Camera2 inside this process
@@ -318,8 +317,6 @@ public class CameraVerifyActivity extends AppCompatActivity {
                 cameraThread.quitSafely();
                 cameraThread = null;
             }
-            // silence unused imports for tools
-            Collections.emptyList();
         } catch (Throwable t) {
             Log.w(TAG, "closeCamera", t);
         }
