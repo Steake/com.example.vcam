@@ -241,7 +241,7 @@ public class MediaProvider extends ContentProvider {
         }
         String resolved = MediaMappings.resolve(ctx, pkg, facing, type);
         if (TextUtils.isEmpty(resolved)) {
-            // Fall back to the legacy "/image" or "/video" legacy URI if the
+            // Fall back to the legacy "/image" or "/video" URI if the
             // manager-staged DCIM file is populated — keeps legacy-only users
             // working even when no explicit mapping was configured.
             File legacy = MediaMappings.TYPE_IMAGE.equals(type)
