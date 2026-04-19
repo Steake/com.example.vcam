@@ -11,7 +11,7 @@ android {
         minSdk 21
         targetSdk 34
         versionCode 31
-        versionName "4.8"
+        versionName "4.9"
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -24,6 +24,11 @@ android {
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            // Sign release builds with the debug keystore. This is an LSPosed
+            // module distributed as a tag-attached APK, not a Play target, so
+            // a stable publishable signing key is not required — but the APK
+            // still needs to be signed to be installable.
+            signingConfig signingConfigs.debug
         }
     }
     compileOptions {

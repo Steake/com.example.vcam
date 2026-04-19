@@ -18,6 +18,13 @@
          can confirm the hook replaces live preview / still captures. The
          hook itself runs in target processes and does not rely on this. -->
     <uses-permission android:name="android.permission.CAMERA" />
+    <!-- Needed by the Phase 4 "Per-app mapping" screen so we can enumerate
+         installed apps that declare CAMERA and let the user assign
+         distinct media per host. QUERY_ALL_PACKAGES is justified here:
+         this is an LSPosed-aware root-tier tool, not a Play app, and
+         without it Android 11+ would hide nearly every camera-using
+         installed package from our manager UI. -->
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" tools:ignore="QueryAllPackagesPermission" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
 
     <!-- Signature-level permission for the module/manager to guard
@@ -75,6 +82,10 @@
             android:exported="true"
             android:label="@string/injected_title"
             android:excludeFromRecents="true"
+            android:taskAffinity=""
+            android:launchMode="singleInstance"
+            android:finishOnTaskLaunch="true"
+            android:noHistory="true"
             android:theme="@style/Theme.VCAM.Translucent">
             <!--
                 Exported so that the in-host VCAM hook can launch this activity
@@ -93,6 +104,27 @@
             android:name=".CameraVerifyActivity"
             android:exported="false"
             android:label="@string/verify_camera_title"
+            android:theme="@style/Theme.VCAM" />
+
+        <activity
+            android:name=".MediaLibraryActivity"
+            android:exported="false"
+            android:label="@string/lib_title"
+            android:parentActivityName=".MainActivity"
+            android:theme="@style/Theme.VCAM" />
+
+        <activity
+            android:name=".PerAppMappingActivity"
+            android:exported="false"
+            android:label="@string/map_title"
+            android:parentActivityName=".MainActivity"
+            android:theme="@style/Theme.VCAM" />
+
+        <activity
+            android:name=".AppMappingEditActivity"
+            android:exported="false"
+            android:label="@string/map_title"
+            android:parentActivityName=".PerAppMappingActivity"
             android:theme="@style/Theme.VCAM" />
 
         <!--

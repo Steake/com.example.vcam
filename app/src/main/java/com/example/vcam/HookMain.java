@@ -7,11 +7,14 @@ import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
+import android.content.BroadcastReceiver;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
+import android.database.Cursor;
 import android.net.Uri;
 import android.content.res.Resources;
 import android.graphics.Bitmap;
@@ -19,6 +22,9 @@ import android.graphics.BitmapFactory;
 import android.graphics.SurfaceTexture;
 import android.hardware.Camera;
 import android.hardware.camera2.CameraCaptureSession;
+import android.hardware.camera2.CameraCharacteristics;
+import android.hardware.camera2.CameraManager;
+import android.hardware.camera2.CameraMetadata;
 import android.hardware.camera2.CameraDevice;
 import android.hardware.camera2.CaptureFailure;
 import android.hardware.camera2.CaptureRequest;
@@ -45,12 +51,15 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
+import android.app.AndroidAppHelper;
 
 public class HookMain implements IXposedHookLoadPackage {
     public static Surface mSurface;
@@ -115,6 +124,36 @@ public class HookMain implements IXposedHookLoadPackage {
 
     public static Class c2_state_callback;
     public Context toast_content;
+
+    /**
+     * Currently-open camera facing, tracked across Camera1 / Camera2 opens.
+     * {@code "back"} or {@code "front"}. Defaults to back so pre-facing-detection
+     * code paths still resolve the back-camera global default when Camera1
+     * legacy {@code open()} (no id) is used on devices with a single camera.
+     */
+    private static volatile String currentFacing = MediaMappings.FACING_BACK;
+
+    /**
+     * Dedupe key for {@link #maybeRestage}. {@code pkg|facing}; cleared when
+     * {@link MediaMappings#ACTION_UPDATED} broadcast fires so the next
+     * camera-open cycle re-stages with the new mapping.
+     */
+    private static volatile String lastStagedKey = null;
+    private static volatile boolean mappingReceiverRegistered = false;
+
+    /**
+     * Shared single-threaded executor for provider-backed staging work.
+     * Using one long-lived executor avoids the per-camera-open thread churn
+     * that raw {@code new Thread(...)} created — some host apps open and
+     * close the camera rapidly (e.g. pinch-to-zoom facing swaps), and we
+     * don't want to spin up a fresh OS thread each time.
+     */
+    private static final ExecutorService stagingExecutor =
+            Executors.newSingleThreadExecutor(r -> {
+                Thread t = new Thread(r, "vcam-stage");
+                t.setDaemon(true);
+                return t;
+            });
 
     /**
      * Permissions that are spoofed as {@code PERMISSION_GRANTED} inside every
@@ -219,6 +258,24 @@ public class HookMain implements IXposedHookLoadPackage {
         // app was never granted storage access by the user.
         applyInjectedStoragePermissions(lpparam);
 
+        // Camera1: Camera.open(int) — detect facing from the camera id so
+        // the per-(pkg,facing) mapping resolution knows which media to stage.
+        // The no-arg Camera.open() overload defaults the id to 0 which is
+        // the back camera on virtually every device, so the default
+        // {@link #currentFacing} of "back" is already correct there.
+        try {
+            XposedHelpers.findAndHookMethod("android.hardware.Camera", lpparam.classLoader,
+                    "open", int.class, new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+                            detectFacingCamera1(param);
+                            restageForHost(lpparam.packageName);
+                        }
+                    });
+        } catch (Throwable t) {
+            XposedBridge.log("[VCAM][facing] Camera.open(int) hook failed: " + t);
+        }
+
         XposedHelpers.findAndHookMethod("android.hardware.Camera", lpparam.classLoader, "setPreviewTexture", SurfaceTexture.class, new XC_MethodHook() {
             @Override
             protected void beforeHookedMethod(MethodHookParam param) {
@@ -274,6 +331,8 @@ public class HookMain implements IXposedHookLoadPackage {
         XposedHelpers.findAndHookMethod("android.hardware.camera2.CameraManager", lpparam.classLoader, "openCamera", String.class, CameraDevice.StateCallback.class, Handler.class, new XC_MethodHook() {
             @Override
             protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                detectFacingCamera2(param);
+                restageForHost(lpparam.packageName);
                 if (param.args[1] == null) {
                     return;
                 }
@@ -310,6 +369,8 @@ public class HookMain implements IXposedHookLoadPackage {
             XposedHelpers.findAndHookMethod("android.hardware.camera2.CameraManager", lpparam.classLoader, "openCamera", String.class, Executor.class, CameraDevice.StateCallback.class, new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                    detectFacingCamera2(param);
+                    restageForHost(lpparam.packageName);
                     if (param.args[2] == null) {
                         return;
                     }
@@ -425,27 +486,40 @@ public class HookMain implements IXposedHookLoadPackage {
                     postInAppConfigNotification(toast_content, lpparam.packageName);
                     File force_private = new File(Environment.getExternalStorageDirectory().getAbsolutePath() + "/DCIM/Camera1/private_dir.jpg");
                     if (toast_content != null) {// force private directory path
-                        int auth_statue = 0;
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                            try {
-                                auth_statue += (toast_content.checkSelfPermission(Manifest.permission.READ_EXTERNAL_STORAGE) + 1);
-                            } catch (Exception ee) {
-                                XposedBridge.log("[VCAM] [permission-check]" + ee.toString());
+                        // Our spoofed-permission set makes
+                        // checkSelfPermission() return GRANTED even when the
+                        // host has no real access to /sdcard/DCIM/. Probe
+                        // actual writability instead — write a tiny sentinel
+                        // into the public path and see if it sticks. On
+                        // Android 11+ this fails for almost every host, so we
+                        // transparently fall back to the host-private
+                        // getExternalFilesDir() path where writes always
+                        // succeed.
+                        boolean canUsePublicDcim;
+                        try {
+                            File publicDir = new File(Environment.getExternalStorageDirectory().getPath() + "/DCIM/Camera1/");
+                            if (!publicDir.exists()) publicDir.mkdirs();
+                            File probe = new File(publicDir, ".vcam_write_probe");
+                            // try-with-resources: guarantees the FD is
+                            // closed even if write() / flush() throws.
+                            try (FileOutputStream probeFos = new FileOutputStream(probe)) {
+                                probeFos.write(0);
+                                probeFos.flush();
                             }
-                            try {
-                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                                    auth_statue += (toast_content.checkSelfPermission(Manifest.permission.MANAGE_EXTERNAL_STORAGE) + 1);
-                                }
-                            } catch (Exception ee) {
-                                XposedBridge.log("[VCAM] [permission-check]" + ee.toString());
-                            }
-                        }else {
-                            if (toast_content.checkCallingPermission(Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED ){
-                                auth_statue = 2;
-                            }
+                            canUsePublicDcim = probe.exists() && probe.length() > 0;
+                            //noinspection ResultOfMethodCallIgnored
+                            probe.delete();
+                        } catch (Throwable probeFail) {
+                            canUsePublicDcim = false;
+                        }
+                        // Android 11+: never trust the public path, even if
+                        // the probe happened to succeed in this particular
+                        // process (MediaStore quirks). Force private.
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                            canUsePublicDcim = false;
                         }
                         // permissions resolved
-                        if (auth_statue < 1 || force_private.exists()) {
+                        if (!canUsePublicDcim || force_private.exists()) {
                             File shown_file = new File(toast_content.getExternalFilesDir(null).getAbsolutePath() + "/Camera1/");
                             if ((!shown_file.isDirectory()) && shown_file.exists()) {
                                 shown_file.delete();
@@ -457,7 +531,7 @@ public class HookMain implements IXposedHookLoadPackage {
                             File toast_force_file = new File(Environment.getExternalStorageDirectory().getPath()+ "/DCIM/Camera1/force_show.jpg");
                             if ((!lpparam.packageName.equals(BuildConfig.APPLICATION_ID)) && ((!shown_file.exists()) || toast_force_file.exists())) {
                                 try {
-                                    Toast.makeText(toast_content, lpparam.packageName + " has no storage permission\nCamera1 is redirected to " + toast_content.getExternalFilesDir(null).getAbsolutePath() + "/Camera1/", Toast.LENGTH_SHORT).show();
+                                    Toast.makeText(toast_content, "VCAM: Camera1 redirected to private storage for " + lpparam.packageName, Toast.LENGTH_SHORT).show();
                                     FileOutputStream fos = new FileOutputStream(toast_content.getExternalFilesDir(null).getAbsolutePath() + "/Camera1/" + "has_shown");
                                     String info = "shown";
                                     fos.write(info.getBytes());
@@ -494,16 +568,23 @@ public class HookMain implements IXposedHookLoadPackage {
                     // latency or even risk ANRs.
                     if (!hasAnyMedia() && toast_content != null) {
                         final Context appContext = toast_content;
-                        new Thread(new Runnable() {
+                        final String hostPkg = lpparam.packageName;
+                        stagingExecutor.execute(new Runnable() {
                             @Override public void run() {
                                 try {
-                                    stageFromProvider(appContext);
+                                    maybeRestage(appContext, hostPkg, currentFacing);
                                 } catch (Throwable t) {
                                     XposedBridge.log("[VCAM][stage] " + t);
                                 }
                             }
-                        }, "vcam-stage-provider").start();
+                        });
                     }
+                    // Register a broadcast receiver — clears the per-(pkg,facing)
+                    // stage cache so the next camera-open re-queries the
+                    // provider with the updated mapping. Silent failures are
+                    // fine: hosts with stripped permissions just keep using
+                    // whatever was staged on application start.
+                    registerMappingUpdatedReceiver(toast_content);
                 }
             }
         });
@@ -1580,8 +1661,9 @@ public class HookMain implements IXposedHookLoadPackage {
                     BuildConfig.APPLICATION_ID,
                     BuildConfig.APPLICATION_ID + ".InjectedConfigActivity"));
             configIntent.putExtra("caller_package", targetPackage);
+            configIntent.putExtra("current_facing", currentFacing);
             configIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
-                    | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+                    | Intent.FLAG_ACTIVITY_NO_ANIMATION);
 
             int piFlags = PendingIntent.FLAG_UPDATE_CURRENT;
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
@@ -1649,5 +1731,219 @@ public class HookMain implements IXposedHookLoadPackage {
         int[] pixels = new int[size];
         bitmap.getPixels(pixels, 0, width, 0, 0, width, height);
         return rgb2YCbCr420(pixels, width, height);
+    }
+
+    // ---------------------------------------------------------------------
+    // Phase 4: per-host / per-camera media mapping
+    // ---------------------------------------------------------------------
+
+    /**
+     * Camera1 facing: read cameraId from the hook param and dispatch to
+     * {@code Camera.getCameraInfo(id, info)} to learn front vs back.
+     */
+    private static void detectFacingCamera1(XC_MethodHook.MethodHookParam param) {
+        try {
+            int id = 0;
+            if (param.args.length > 0 && param.args[0] instanceof Integer) {
+                id = (Integer) param.args[0];
+            }
+            Camera.CameraInfo info = new Camera.CameraInfo();
+            Camera.getCameraInfo(id, info);
+            currentFacing = (info.facing == Camera.CameraInfo.CAMERA_FACING_FRONT)
+                    ? MediaMappings.FACING_FRONT : MediaMappings.FACING_BACK;
+        } catch (Throwable t) {
+            XposedBridge.log("[VCAM][facing] camera1: " + t);
+        }
+    }
+
+    /**
+     * Camera2 facing: pull the cameraId out of openCamera and read
+     * {@code CameraCharacteristics.LENS_FACING} from the CameraManager.
+     */
+    private static void detectFacingCamera2(XC_MethodHook.MethodHookParam param) {
+        try {
+            if (param.args.length == 0 || !(param.args[0] instanceof String)) return;
+            String cameraId = (String) param.args[0];
+            Object thisObj = param.thisObject;
+            if (!(thisObj instanceof CameraManager)) return;
+            CameraManager cm = (CameraManager) thisObj;
+            CameraCharacteristics cc = cm.getCameraCharacteristics(cameraId);
+            Integer lf = cc.get(CameraCharacteristics.LENS_FACING);
+            if (lf != null) {
+                currentFacing = (lf == CameraMetadata.LENS_FACING_FRONT)
+                        ? MediaMappings.FACING_FRONT : MediaMappings.FACING_BACK;
+            }
+        } catch (Throwable t) {
+            XposedBridge.log("[VCAM][facing] camera2: " + t);
+        }
+    }
+
+    /**
+     * Invoked from every camera-open hook. Kicks the stage-from-provider
+     * flow on a background thread so the next preview / still-capture
+     * picks up the correct media for the current {@code (host, facing)}
+     * tuple. Deduped per camera-open cycle.
+     */
+    private void restageForHost(final String hostPkg) {
+        // toast_content is set in Instrumentation.callApplicationOnCreate's
+        // afterHookedMethod — which fires *after* Application.onCreate()
+        // returns. Hosts that open the camera during their own
+        // Application.onCreate() would otherwise see ctx==null here and
+        // skip staging, producing an initial black frame. Fall back to
+        // AndroidAppHelper.currentApplication() which resolves via the
+        // ActivityThread and is available from the first moment the host
+        // process has an Application instance.
+        Context ctx = toast_content;
+        if (ctx == null) {
+            try {
+                android.app.Application app = AndroidAppHelper.currentApplication();
+                if (app != null) {
+                    // Don't backfill toast_content here — the Instrumentation
+                    // hook is the single writer and will populate it shortly.
+                    // We only need a local Context for this call.
+                    ctx = app.getApplicationContext();
+                }
+            } catch (Exception e) {
+                XposedBridge.log("[VCAM][stage] currentApplication fallback: " + e);
+            }
+        }
+        if (ctx == null || hostPkg == null) return;
+        final Context ctxFinal = ctx;
+        final String facing = currentFacing;
+        stagingExecutor.execute(new Runnable() {
+            @Override public void run() {
+                try {
+                    maybeRestage(ctxFinal, hostPkg, facing);
+                } catch (Throwable t) {
+                    XposedBridge.log("[VCAM][stage] " + t);
+                }
+            }
+        });
+    }
+
+    /**
+     * Stage media for the given {@code (pkg, facing)} iff we haven't just
+     * staged the same tuple in this process. Always writes to the legacy
+     * {@link #video_path} filenames so the existing File-based hook
+     * pipeline picks them up unchanged.
+     */
+    private static synchronized void maybeRestage(Context ctx, String pkg, String facing) {
+        if (ctx == null) return;
+        String key = pkg + "|" + facing;
+        if (key.equals(lastStagedKey)) return;
+        stageFromProviderFor(ctx, pkg, facing);
+        lastStagedKey = key;
+    }
+
+    /**
+     * Query {@code content://com.example.vcam/resolve?pkg=&facing=&type=}
+     * for both image and video, and copy whatever bytes the manager returns
+     * into the host's staging files. Silent on failure — we retain the
+     * previously-staged content and let the legacy DCIM fallback apply.
+     */
+    private static void stageFromProviderFor(Context ctx, String pkg, String facing) {
+        if (ctx == null) return;
+        try {
+            File dir = new File(video_path);
+            if (!dir.exists()) {
+                //noinspection ResultOfMethodCallIgnored
+                dir.mkdirs();
+            }
+        } catch (Throwable ignored) {}
+        String imgUri = queryResolve(ctx, pkg, facing, MediaMappings.TYPE_IMAGE);
+        String vidUri = queryResolve(ctx, pkg, facing, MediaMappings.TYPE_VIDEO);
+        // Fall back to the legacy provider roots when no mapping resolves.
+        // This covers fresh installs where the user staged a single
+        // image/video in the manager but never configured mappings.
+        if (imgUri == null) imgUri = "content://com.example.vcam/image";
+        if (vidUri == null) vidUri = "content://com.example.vcam/video";
+        copyProviderUri(ctx, Uri.parse(imgUri), new File(video_path + "1000.bmp"));
+        copyProviderUri(ctx, Uri.parse(vidUri), new File(video_path + "virtual.mp4"));
+    }
+
+    private static String queryResolve(Context ctx, String pkg, String facing, String type) {
+        try {
+            Uri u = Uri.parse("content://com.example.vcam/resolve")
+                    .buildUpon()
+                    .appendQueryParameter("pkg", pkg)
+                    .appendQueryParameter("facing", facing)
+                    .appendQueryParameter("type", type)
+                    .build();
+            Cursor c = ctx.getContentResolver().query(u, null, null, null, null);
+            if (c == null) return null;
+            try {
+                if (c.moveToFirst() && c.getColumnCount() > 0) {
+                    String uri = c.getString(0);
+                    if (uri != null && !uri.isEmpty() && !"null".equals(uri)) return uri;
+                }
+            } finally {
+                c.close();
+            }
+        } catch (Throwable t) {
+            XposedBridge.log("[VCAM][resolve] " + t);
+        }
+        return null;
+    }
+
+    private static void copyProviderUri(Context ctx, Uri src, File dst) {
+        InputStream in = null;
+        OutputStream out = null;
+        try {
+            in = ctx.getContentResolver().openInputStream(src);
+            if (in == null) return;
+            File tmp = new File(dst.getAbsolutePath() + ".tmp");
+            out = new FileOutputStream(tmp);
+            byte[] buf = new byte[64 * 1024];
+            int n;
+            long total = 0;
+            while ((n = in.read(buf)) > 0) {
+                out.write(buf, 0, n);
+                total += n;
+            }
+            out.flush();
+            try { out.close(); } catch (IOException ignored) {}
+            out = null;
+            if (total > 0) {
+                //noinspection ResultOfMethodCallIgnored
+                tmp.renameTo(dst);
+                XposedBridge.log("[VCAM][provider] staged " + dst.getAbsolutePath()
+                        + " (" + total + " bytes) from " + src);
+            } else {
+                //noinspection ResultOfMethodCallIgnored
+                tmp.delete();
+            }
+        } catch (Throwable t) {
+            // Keep previous staged content on failure.
+        } finally {
+            if (in != null) try { in.close(); } catch (IOException ignored) {}
+            if (out != null) try { out.close(); } catch (IOException ignored) {}
+        }
+    }
+
+    /**
+     * Register a broadcast receiver that invalidates {@link #lastStagedKey}
+     * when the manager edits the mapping table. The next camera-open cycle
+     * in this host will then re-query the provider with the new rules.
+     */
+    private static synchronized void registerMappingUpdatedReceiver(Context ctx) {
+        if (ctx == null || mappingReceiverRegistered) return;
+        try {
+            BroadcastReceiver r = new BroadcastReceiver() {
+                @Override public void onReceive(Context context, Intent intent) {
+                    lastStagedKey = null;
+                    XposedBridge.log("[VCAM][mapping] MAPPING_UPDATED — invalidated cache");
+                }
+            };
+            IntentFilter f = new IntentFilter(MediaMappings.ACTION_UPDATED);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                // Exported because the manager lives in a separate UID.
+                ctx.registerReceiver(r, f, Context.RECEIVER_EXPORTED);
+            } else {
+                ctx.registerReceiver(r, f);
+            }
+            mappingReceiverRegistered = true;
+        } catch (Throwable t) {
+            XposedBridge.log("[VCAM][mapping-recv] " + t);
+        }
     }
 }

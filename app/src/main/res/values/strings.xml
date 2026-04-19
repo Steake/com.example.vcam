@@ -93,4 +93,54 @@
     <string name="injected_mode_per_app">Use per-app media</string>
     <string name="injected_return">Return to app</string>
     <string name="injected_launch_failed">Picker unavailable here</string>
+
+    <!-- Phase 4: Library / Mapping screens -->
+    <string name="menu_media_library">Media library</string>
+    <string name="menu_per_app_mapping">Per-app mapping</string>
+    <string name="main_open_library">Manage library →</string>
+    <string name="main_open_mapping">Per-app mapping →</string>
+    <string name="main_open_defaults">Defaults →</string>
+
+    <string name="lib_title">Media library</string>
+    <string name="lib_pick_title_image">Pick an image</string>
+    <string name="lib_pick_title_video">Pick a video</string>
+    <string name="lib_import_image">Import image</string>
+    <string name="lib_import_video">Import video</string>
+    <string name="lib_empty">No media imported yet. Tap \"Import image\" or \"Import video\" to add one.</string>
+    <string name="lib_set_default">Set as default</string>
+    <string name="lib_delete">Delete</string>
+    <string name="lib_delete_confirm_title">Delete media?</string>
+    <string name="lib_delete_confirm_body">Remove \"%1$s\" from the library and drop any mapping referencing it?</string>
+    <string name="lib_set_default_done">Saved as global default</string>
+    <string name="lib_entry_meta_format">%1$s — %2$s — %3$s</string>
+    <string name="lib_resolution_unknown">unknown res</string>
+
+    <string name="map_title">Per-app mapping</string>
+    <string name="map_global_defaults_title">Global defaults</string>
+    <string name="map_same_for_both">Same media for both cameras</string>
+    <string name="map_section_any">Both cameras</string>
+    <string name="map_section_back">Back camera</string>
+    <string name="map_section_front">Front camera</string>
+    <string name="map_slot_unset">Use default</string>
+    <string name="map_tap_to_pick_hint">Tap a slot to pick media from the library. Long-press a slot to clear its override.</string>
+    <string name="map_cleared">Override cleared</string>
+    <string name="map_using_default">Using default</string>
+    <string name="map_default_short">default</string>
+    <string name="map_both_format">Both: %1$s / %2$s</string>
+    <string name="map_back_front_format">Back: %1$s · Front: %2$s</string>
+
+    <!-- Injected config scope picker -->
+    <string name="injected_scope_title">Save imported media for…</string>
+    <string name="injected_scope_this_back">This app · back</string>
+    <string name="injected_scope_this_front">This app · front</string>
+    <string name="injected_scope_this_both">This app · both</string>
+    <string name="injected_scope_global_back">Global · back</string>
+    <string name="injected_scope_global_front">Global · front</string>
+    <string name="injected_scope_global_both">Global · both</string>
+    <string name="injected_scope_current_facing_format">Current camera: %1$s</string>
+    <string name="injected_clear_scoped">Clear override(s)</string>
+    <string name="injected_facing_back">back</string>
+    <string name="injected_facing_front">front</string>
+    <string name="injected_facing_any">unknown</string>
+    <string name="injected_effective_format">Effective image: %1$s · video: %2$s</string>
 </resources>

@@ -173,6 +173,21 @@ public class MainActivity extends AppCompatActivity {
 
         findViewById(R.id.btn_save_paths).setOnClickListener(v -> savePaths());
 
+        findViewById(R.id.btn_open_library).setOnClickListener(v ->
+                startActivity(new Intent(this, MediaLibraryActivity.class)));
+        findViewById(R.id.btn_open_mapping).setOnClickListener(v ->
+                startActivity(new Intent(this, PerAppMappingActivity.class)));
+        findViewById(R.id.btn_open_defaults).setOnClickListener(v -> {
+            Intent i = new Intent(this, AppMappingEditActivity.class);
+            i.putExtra(AppMappingEditActivity.EXTRA_PKG, MediaMappings.PKG_GLOBAL);
+            startActivity(i);
+        });
+
+        // First-launch migration: move legacy DCIM-staged media into the
+        // new MediaLibrary and wire them up as the global default. No-op
+        // after the first successful run; legacy files stay in place.
+        MediaMigration.migrateIfNeeded(this);
+
         findViewById(R.id.button).setOnClickListener(v -> {
             Uri uri = Uri.parse("https://github.com/w2016561536/android_virtual_cam");
             startActivity(new Intent(Intent.ACTION_VIEW, uri));
@@ -221,13 +236,29 @@ public class MainActivity extends AppCompatActivity {
     // ---------------------------------------------------------------------
 
     private void wireDemoCard() {
-        demoTexture = findViewById(R.id.demo_texture);
         demoOkChip = findViewById(R.id.demo_chip_ok);
         demoReport = findViewById(R.id.demo_report);
         demoHandler = new Handler(Looper.getMainLooper());
 
         findViewById(R.id.demo_btn_validate).setOnClickListener(v -> validateStagedMedia());
 
+        // TextureView construction can throw on software-rendered windows
+        // (some LSPosed / LineageOS setups end up here). Try once; if we
+        // can't build it, leave the demo placeholder in place — the
+        // validate button still works, it just has no live preview.
+        android.widget.FrameLayout container = findViewById(R.id.demo_texture_container);
+        try {
+            demoTexture = new TextureView(this);
+            container.addView(demoTexture,
+                    new android.widget.FrameLayout.LayoutParams(
+                            android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+                            android.widget.FrameLayout.LayoutParams.MATCH_PARENT));
+        } catch (Exception t) {
+            Log.w(TAG, "TextureView unavailable, disabling live demo preview", t);
+            demoTexture = null;
+        }
+
+        if (demoTexture == null) return;
         demoTexture.setSurfaceTextureListener(new TextureView.SurfaceTextureListener() {
             @Override public void onSurfaceTextureAvailable(@NonNull SurfaceTexture s, int w, int h) {
                 startDemoPlayback();
@@ -243,6 +274,7 @@ public class MainActivity extends AppCompatActivity {
 
     private void startDemoPlayback() {
         stopDemo();
+        if (demoTexture == null) return;
         SurfaceTexture tex = demoTexture.getSurfaceTexture();
         if (tex == null) return;
         demoSurface = new Surface(tex);

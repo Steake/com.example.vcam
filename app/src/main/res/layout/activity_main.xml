@@ -119,8 +119,14 @@
                         android:text="@string/demo_section"
                         android:textAppearance="?attr/textAppearanceTitleMedium" />
 
-                    <TextureView
-                        android:id="@+id/demo_texture"
+                    <!-- TextureView is added programmatically inside this
+                         FrameLayout so a failed instantiation (e.g. on a
+                         software-rendered window under LSPosed on some
+                         LineageOS builds, which throws InflateException
+                         during XML inflation) degrades gracefully instead
+                         of taking down the whole MainActivity. -->
+                    <FrameLayout
+                        android:id="@+id/demo_texture_container"
                         android:layout_width="match_parent"
                         android:layout_height="220dp"
                         android:layout_marginTop="12dp"
@@ -238,6 +244,32 @@
                             android:minHeight="48dp"
                             android:text="@string/test_camera" />
                     </LinearLayout>
+
+                    <!-- Phase 4: quick links to the library / mapping / defaults screens -->
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btn_open_library"
+                        style="@style/Widget.Material3.Button.TextButton"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:gravity="start|center_vertical"
+                        android:text="@string/main_open_library" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btn_open_mapping"
+                        style="@style/Widget.Material3.Button.TextButton"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:gravity="start|center_vertical"
+                        android:text="@string/main_open_mapping" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btn_open_defaults"
+                        style="@style/Widget.Material3.Button.TextButton"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:gravity="start|center_vertical"
+                        android:text="@string/main_open_defaults" />
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
 
