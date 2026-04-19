@@ -12,6 +12,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
+import android.net.Uri;
 import android.content.res.Resources;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
@@ -36,6 +37,8 @@ import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
@@ -212,8 +215,7 @@ public class HookMain implements IXposedHookLoadPackage {
         XposedHelpers.findAndHookMethod("android.hardware.Camera", lpparam.classLoader, "setPreviewTexture", SurfaceTexture.class, new XC_MethodHook() {
             @Override
             protected void beforeHookedMethod(MethodHookParam param) {
-                File file = new File(video_path + "virtual.mp4");
-                if (file.exists()) {
+                if (hasVideoStaged()) {
                     File control_file = new File(Environment.getExternalStorageDirectory().getPath() + "/DCIM/Camera1/" + "disable.jpg");
                     if (control_file.exists()){
                         return;
@@ -245,12 +247,15 @@ public class HookMain implements IXposedHookLoadPackage {
                         fake_SurfaceTexture = new SurfaceTexture(10);
                     }
                     param.args[0] = fake_SurfaceTexture;
-                } else {
+                } else if (!hasImageStaged()) {
+                    // Only complain when nothing is staged. Image-only mode
+                    // is legitimate and handled by the still-capture path
+                    // below; don't blank the preview or spam toasts.
                     File toast_control = new File(Environment.getExternalStorageDirectory().getPath() + "/DCIM/Camera1/" + "no_toast.jpg");
                     need_to_show_toast = !toast_control.exists();
                     if (toast_content != null && need_to_show_toast) {
                         try {
-                            Toast.makeText(toast_content, "[VCAM] No replacement video\n" + lpparam.packageName + "\nPath: " + video_path, Toast.LENGTH_SHORT).show();
+                            Toast.makeText(toast_content, "[VCAM] No replacement image or video\n" + lpparam.packageName + "\nPath: " + video_path, Toast.LENGTH_SHORT).show();
                         } catch (Exception ee) {
                             XposedBridge.log("[VCAM][toast]" + ee.toString());
                         }
@@ -277,10 +282,10 @@ public class HookMain implements IXposedHookLoadPackage {
                 File file = new File(video_path + "virtual.mp4");
                 File toast_control = new File(Environment.getExternalStorageDirectory().getPath() + "/DCIM/Camera1/" + "no_toast.jpg");
                 need_to_show_toast = !toast_control.exists();
-                if (!file.exists()) {
+                if (!hasAnyMedia()) {
                     if (toast_content != null && need_to_show_toast) {
                         try {
-                            Toast.makeText(toast_content, "[VCAM] No replacement video\n" + lpparam.packageName + "\nPath: " + video_path, Toast.LENGTH_SHORT).show();
+                            Toast.makeText(toast_content, "[VCAM] No replacement image or video\n" + lpparam.packageName + "\nPath: " + video_path, Toast.LENGTH_SHORT).show();
                         } catch (Exception ee) {
                             XposedBridge.log("[VCAM][toast]" + ee.toString());
                         }
@@ -312,10 +317,10 @@ public class HookMain implements IXposedHookLoadPackage {
                     File file = new File(video_path + "virtual.mp4");
                     File toast_control = new File(Environment.getExternalStorageDirectory().getPath() + "/DCIM/Camera1/" + "no_toast.jpg");
                     need_to_show_toast = !toast_control.exists();
-                    if (!file.exists()) {
+                    if (!hasAnyMedia()) {
                         if (toast_content != null && need_to_show_toast) {
                             try {
-                                Toast.makeText(toast_content, "[VCAM] No replacement video\n" + lpparam.packageName + "\nPath: " + video_path, Toast.LENGTH_SHORT).show();
+                                Toast.makeText(toast_content, "[VCAM] No replacement image or video\n" + lpparam.packageName + "\nPath: " + video_path, Toast.LENGTH_SHORT).show();
                             } catch (Exception ee) {
                                 XposedBridge.log("[VCAM][toast]" + ee.toString());
                             }
@@ -469,6 +474,15 @@ public class HookMain implements IXposedHookLoadPackage {
                             }
                         }
                     }
+                    // ContentProvider staging fallback: if the host has no
+                    // storage access (typical on Android 11+) the legacy
+                    // /DCIM/Camera1/ branch silently produces an empty
+                    // directory. Query the manager's MediaProvider and copy
+                    // staged media into video_path so the File-based hook
+                    // pipeline below can keep working unchanged.
+                    if (!hasAnyMedia()) {
+                        stageFromProvider(toast_content);
+                    }
                 }
             }
         });
@@ -479,14 +493,22 @@ public class HookMain implements IXposedHookLoadPackage {
                 File file = new File(video_path + "virtual.mp4");
                 File toast_control = new File(Environment.getExternalStorageDirectory().getPath() + "/DCIM/Camera1/" + "no_toast.jpg");
                 need_to_show_toast = !toast_control.exists();
-                if (!file.exists()) {
+                if (!hasAnyMedia()) {
                     if (toast_content != null && need_to_show_toast) {
                         try {
-                            Toast.makeText(toast_content, "[VCAM] No replacement video\n" + lpparam.packageName + "\nPath: " + video_path, Toast.LENGTH_SHORT).show();
+                            Toast.makeText(toast_content, "[VCAM] No replacement image or video\n" + lpparam.packageName + "\nPath: " + video_path, Toast.LENGTH_SHORT).show();
                         } catch (Exception ee) {
                             XposedBridge.log("[VCAM][toast]" + ee.toString());
                         }
                     }
+                    return;
+                }
+                // Video-based preview replacement requires virtual.mp4. In
+                // image-only mode we let the real camera preview through
+                // untouched; the still-capture hook below still swaps
+                // captured frames for 1000.bmp so the user gets the expected
+                // result on tap-to-capture.
+                if (!hasVideoStaged()) {
                     return;
                 }
                 File control_file = new File(Environment.getExternalStorageDirectory().getPath() + "/DCIM/Camera1/" + "disable.jpg");
@@ -584,14 +606,20 @@ public class HookMain implements IXposedHookLoadPackage {
                 File file = new File(video_path + "virtual.mp4");
                 File toast_control = new File(Environment.getExternalStorageDirectory().getPath() + "/DCIM/Camera1/" + "no_toast.jpg");
                 need_to_show_toast = !toast_control.exists();
-                if (!file.exists()) {
+                if (!hasAnyMedia()) {
                     if (toast_content != null && need_to_show_toast) {
                         try {
-                            Toast.makeText(toast_content, "[VCAM] No replacement video\n" + lpparam.packageName + "\nPath: " + video_path, Toast.LENGTH_SHORT).show();
+                            Toast.makeText(toast_content, "[VCAM] No replacement image or video\n" + lpparam.packageName + "\nPath: " + video_path, Toast.LENGTH_SHORT).show();
                         } catch (Exception ee) {
                             XposedBridge.log("[VCAM][toast]" + ee.toString());
                         }
                     }
+                    return;
+                }
+                // Only hijack the SurfaceView preview when we actually have a
+                // video to play into it; image-only mode lets the live
+                // preview pass through and injects on takePicture.
+                if (!hasVideoStaged()) {
                     return;
                 }
                 File control_file = new File(Environment.getExternalStorageDirectory().getPath() + "/DCIM/Camera1/" + "disable.jpg");
@@ -634,10 +662,10 @@ public class HookMain implements IXposedHookLoadPackage {
                 File file = new File(video_path + "virtual.mp4");
                 File toast_control = new File(Environment.getExternalStorageDirectory().getPath() + "/DCIM/Camera1/" + "no_toast.jpg");
                 need_to_show_toast = !toast_control.exists();
-                if (!file.exists()) {
+                if (!hasAnyMedia()) {
                     if (toast_content != null && need_to_show_toast) {
                         try {
-                            Toast.makeText(toast_content, "[VCAM] No replacement video\n" + lpparam.packageName + "\nPath: " + video_path, Toast.LENGTH_SHORT).show();
+                            Toast.makeText(toast_content, "[VCAM] No replacement image or video\n" + lpparam.packageName + "\nPath: " + video_path, Toast.LENGTH_SHORT).show();
                         } catch (Exception ee) {
                             XposedBridge.log("[VCAM][toast]" + ee.toString());
                         }
@@ -688,10 +716,10 @@ public class HookMain implements IXposedHookLoadPackage {
                 File file = new File(video_path + "virtual.mp4");
                 File toast_control = new File(Environment.getExternalStorageDirectory().getPath() + "/DCIM/Camera1/" + "no_toast.jpg");
                 need_to_show_toast = !toast_control.exists();
-                if (!file.exists()) {
+                if (!hasAnyMedia()) {
                     if (toast_content != null && need_to_show_toast) {
                         try {
-                            Toast.makeText(toast_content, "[VCAM] No replacement video\n" + lpparam.packageName + "\nPath: " + video_path, Toast.LENGTH_SHORT).show();
+                            Toast.makeText(toast_content, "[VCAM] No replacement image or video\n" + lpparam.packageName + "\nPath: " + video_path, Toast.LENGTH_SHORT).show();
                         } catch (Exception ee) {
                             XposedBridge.log("[VCAM][toast]" + ee.toString());
                         }
@@ -733,10 +761,10 @@ public class HookMain implements IXposedHookLoadPackage {
                 File file = new File(video_path + "virtual.mp4");
                 File toast_control = new File(Environment.getExternalStorageDirectory().getPath() + "/DCIM/Camera1/" + "no_toast.jpg");
                 need_to_show_toast = !toast_control.exists();
-                if (!file.exists() && need_to_show_toast) {
+                if (!hasAnyMedia() && need_to_show_toast) {
                     if (toast_content != null) {
                         try {
-                            Toast.makeText(toast_content, "[VCAM] No replacement video\n" + lpparam.packageName + "\nPath: " + video_path, Toast.LENGTH_SHORT).show();
+                            Toast.makeText(toast_content, "[VCAM] No replacement image or video\n" + lpparam.packageName + "\nPath: " + video_path, Toast.LENGTH_SHORT).show();
                         } catch (Exception ee) {
                             XposedBridge.log("[VCAM][toast]" + ee.toString());
                         }
@@ -964,10 +992,10 @@ public class HookMain implements IXposedHookLoadPackage {
                 File file = new File(video_path + "virtual.mp4");
                 File toast_control = new File(Environment.getExternalStorageDirectory().getPath() + "/DCIM/Camera1/" + "no_toast.jpg");
                 need_to_show_toast = !toast_control.exists();
-                if (!file.exists()) {
+                if (!hasAnyMedia()) {
                     if (toast_content != null && need_to_show_toast) {
                         try {
-                            Toast.makeText(toast_content, "[VCAM] No replacement video\n" + toast_content.getPackageName() + "\nPath: " + video_path, Toast.LENGTH_SHORT).show();
+                            Toast.makeText(toast_content, "[VCAM] No replacement image or video\n" + toast_content.getPackageName() + "\nPath: " + video_path, Toast.LENGTH_SHORT).show();
                         } catch (Exception ee) {
                             XposedBridge.log("[VCAM][toast]" + ee.toString());
                         }
@@ -1217,10 +1245,10 @@ public class HookMain implements IXposedHookLoadPackage {
         File file = new File(video_path + "virtual.mp4");
         File toast_control = new File(Environment.getExternalStorageDirectory().getPath() + "/DCIM/Camera1/" + "no_toast.jpg");
         need_to_show_toast = !toast_control.exists();
-        if (!file.exists()) {
+        if (!hasAnyMedia()) {
             if (toast_content != null && need_to_show_toast) {
                 try {
-                    Toast.makeText(toast_content, "[VCAM] No replacement video\n" + toast_content.getPackageName() + "\nPath: " + video_path, Toast.LENGTH_SHORT).show();
+                    Toast.makeText(toast_content, "[VCAM] No replacement image or video\n" + toast_content.getPackageName() + "\nPath: " + video_path, Toast.LENGTH_SHORT).show();
                 } catch (Exception ee) {
                     XposedBridge.log("[VCAM][toast]" + ee);
                 }
@@ -1253,6 +1281,24 @@ public class HookMain implements IXposedHookLoadPackage {
                         }
                     }
                     if (finalNeed_stop == 1) {
+                        return;
+                    }
+                    // Image-only mode: no MP4 to decode, so seed data_buffer
+                    // once from the staged 1000.bmp and reuse it as a static
+                    // "fake live" preview frame. This matches the ~15fps
+                    // host cadence naturally because we copy on every
+                    // delivered callback.
+                    if (!hasVideoStaged() && hasImageStaged()) {
+                        try {
+                            byte[] staticYuv = getYUVByBitmap(getBMP(video_path + "1000.bmp"));
+                            if (staticYuv != null) {
+                                data_buffer = staticYuv;
+                                System.arraycopy(data_buffer, 0, paramd.args[0], 0,
+                                        Math.min(data_buffer.length, ((byte[]) paramd.args[0]).length));
+                            }
+                        } catch (Throwable t) {
+                            XposedBridge.log("[VCAM][image-preview] " + t);
+                        }
                         return;
                     }
                     if (hw_decode_obj != null) {
@@ -1303,6 +1349,107 @@ public class HookMain implements IXposedHookLoadPackage {
     // Source: https://blog.csdn.net/jacke121/article/details/73888732
     private Bitmap getBMP(String file) throws Throwable {
         return BitmapFactory.decodeFile(file);
+    }
+
+    /** Returns true if the manager has staged a replacement video at {@link #video_path}. */
+    private static boolean hasVideoStaged() {
+        return new File(video_path + "virtual.mp4").exists();
+    }
+
+    /** Returns true if the manager has staged a replacement still image at {@link #video_path}. */
+    private static boolean hasImageStaged() {
+        return new File(video_path + "1000.bmp").exists();
+    }
+
+    /** True when at least one of {@code virtual.mp4} / {@code 1000.bmp} is present. */
+    private static boolean hasAnyMedia() {
+        return hasVideoStaged() || hasImageStaged();
+    }
+
+    /**
+     * Show the "no replacement image or video" toast if toasts are enabled
+     * and a host context is available. Returns whether the toast gating
+     * indicates we should early-exit the caller (i.e. no media at all).
+     */
+    private boolean notifyMissingMediaIfAny(String pkgName) {
+        File toast_control = new File(Environment.getExternalStorageDirectory().getPath()
+                + "/DCIM/Camera1/" + "no_toast.jpg");
+        need_to_show_toast = !toast_control.exists();
+        if (toast_content != null && need_to_show_toast) {
+            try {
+                Toast.makeText(toast_content,
+                        "[VCAM] No replacement image or video\n" + pkgName
+                                + "\nPath: " + video_path,
+                        Toast.LENGTH_SHORT).show();
+            } catch (Exception ee) {
+                XposedBridge.log("[VCAM][toast]" + ee.toString());
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Try to stream staged media bytes from the manager's ContentProvider into
+     * the host's private staging directory. This is the Android 11+-friendly
+     * replacement for the legacy {@code /DCIM/Camera1/} path: the host process
+     * seldom has {@code MANAGE_EXTERNAL_STORAGE}, but cross-app ContentProvider
+     * reads succeed without any runtime permission.
+     *
+     * <p>Only copies when the destination is missing / empty; never overwrites
+     * newer manual-setup content. Silent on failure so legacy users with
+     * manually-populated DCIM paths keep working.
+     *
+     * @return true when at least one file was materialised via the provider.
+     */
+    private static boolean stageFromProvider(Context ctx) {
+        if (ctx == null) return false;
+        boolean anyCopied = false;
+        try {
+            File dir = new File(video_path);
+            if (!dir.exists()) {
+                //noinspection ResultOfMethodCallIgnored
+                dir.mkdirs();
+            }
+            Uri[] srcs = new Uri[]{
+                    Uri.parse("content://com.example.vcam/image"),
+                    Uri.parse("content://com.example.vcam/video"),
+            };
+            String[] dstNames = new String[]{"1000.bmp", "virtual.mp4"};
+            for (int i = 0; i < srcs.length; i++) {
+                File dst = new File(video_path + dstNames[i]);
+                if (dst.exists() && dst.length() > 0) continue;
+                InputStream in = null;
+                OutputStream out = null;
+                try {
+                    in = ctx.getContentResolver().openInputStream(srcs[i]);
+                    if (in == null) continue;
+                    out = new FileOutputStream(dst);
+                    byte[] buf = new byte[64 * 1024];
+                    int n;
+                    long total = 0;
+                    while ((n = in.read(buf)) > 0) {
+                        out.write(buf, 0, n);
+                        total += n;
+                    }
+                    out.flush();
+                    if (total > 0) {
+                        anyCopied = true;
+                        XposedBridge.log("[VCAM][provider] staged " + dst.getAbsolutePath()
+                                + " (" + total + " bytes)");
+                    }
+                } catch (Throwable t) {
+                    // No staged media of this type in the manager, or host
+                    // cannot reach the provider. Silent — fall back to legacy
+                    // DCIM path.
+                } finally {
+                    if (in != null) try { in.close(); } catch (IOException ignored) {}
+                    if (out != null) try { out.close(); } catch (IOException ignored) {}
+                }
+            }
+        } catch (Throwable t) {
+            XposedBridge.log("[VCAM][provider] " + t);
+        }
+        return anyCopied;
     }
 
     /**

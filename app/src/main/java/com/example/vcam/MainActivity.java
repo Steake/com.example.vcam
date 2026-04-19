@@ -5,16 +5,27 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.graphics.Canvas;
+import android.graphics.Rect;
+import android.graphics.SurfaceTexture;
+import android.media.MediaMetadataRetriever;
+import android.media.MediaPlayer;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
+import android.os.Handler;
+import android.os.Looper;
 import android.provider.MediaStore;
 import android.provider.Settings;
 import android.text.TextUtils;
 import android.util.Log;
+import android.view.Surface;
+import android.view.TextureView;
 import android.view.View;
 import android.widget.ImageView;
+import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.activity.result.ActivityResultLauncher;
@@ -59,6 +70,15 @@ public class MainActivity extends AppCompatActivity {
     private Chip chipModule, chipImage, chipVideo, chipRes, chipSize;
     private ImageView preview;
     private TextInputEditText pkgFilter, customImagePath, customVideoPath;
+
+    // Demo card (Bug 4)
+    private TextureView demoTexture;
+    private Chip demoOkChip;
+    private TextView demoReport;
+    private MediaPlayer demoPlayer;
+    private Handler demoHandler;
+    private Runnable demoImageLoop;
+    private Surface demoSurface;
 
     private ActivityResultLauncher<String> pickImageLauncher;
     private ActivityResultLauncher<String> pickVideoLauncher;
@@ -150,7 +170,7 @@ public class MainActivity extends AppCompatActivity {
         });
 
         findViewById(R.id.btn_clear).setOnClickListener(v -> clearMedia());
-        findViewById(R.id.btn_test).setOnClickListener(v -> openSystemCamera());
+        findViewById(R.id.btn_test).setOnClickListener(v -> launchVerifier());
 
         findViewById(R.id.btn_save_paths).setOnClickListener(v -> savePaths());
 
@@ -164,6 +184,7 @@ public class MainActivity extends AppCompatActivity {
         });
 
         wireSwitchesToFiles();
+        wireDemoCard();
 
         if (!hasStoragePermission()) {
             // Don't block; just surface once so the user isn't left wondering why imports fail.
@@ -183,8 +204,164 @@ public class MainActivity extends AppCompatActivity {
 
     @Override
     protected void onDestroy() {
+        stopDemo();
         ioExecutor.shutdownNow();
         super.onDestroy();
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        stopDemo();
+    }
+
+    // ---------------------------------------------------------------------
+    // Demo card: exercises the same MediaPlayer / bitmap pipeline the hook
+    // uses so the user can confirm media is decodable before launching a
+    // host app. (Bug 4)
+    // ---------------------------------------------------------------------
+
+    private void wireDemoCard() {
+        demoTexture = findViewById(R.id.demo_texture);
+        demoOkChip = findViewById(R.id.demo_chip_ok);
+        demoReport = findViewById(R.id.demo_report);
+        demoHandler = new Handler(Looper.getMainLooper());
+
+        findViewById(R.id.demo_btn_validate).setOnClickListener(v -> validateStagedMedia());
+
+        demoTexture.setSurfaceTextureListener(new TextureView.SurfaceTextureListener() {
+            @Override public void onSurfaceTextureAvailable(@NonNull SurfaceTexture s, int w, int h) {
+                startDemoPlayback();
+            }
+            @Override public void onSurfaceTextureSizeChanged(@NonNull SurfaceTexture s, int w, int h) {}
+            @Override public boolean onSurfaceTextureDestroyed(@NonNull SurfaceTexture s) {
+                stopDemo();
+                return true;
+            }
+            @Override public void onSurfaceTextureUpdated(@NonNull SurfaceTexture s) {}
+        });
+    }
+
+    private void startDemoPlayback() {
+        stopDemo();
+        SurfaceTexture tex = demoTexture.getSurfaceTexture();
+        if (tex == null) return;
+        demoSurface = new Surface(tex);
+
+        File vid = MediaPaths.getVideoTarget(this);
+        File img = MediaPaths.getImageTarget(this);
+        if (vid.exists() && vid.length() > 0) {
+            demoPlayer = new MediaPlayer();
+            demoPlayer.setSurface(demoSurface);
+            demoPlayer.setLooping(prefs.getBoolean(VCAMApp.KEY_LOOP_VIDEO, true));
+            if (prefs.getBoolean(VCAMApp.KEY_MUTE_VIDEO, false)) {
+                demoPlayer.setVolume(0f, 0f);
+            }
+            demoPlayer.setOnPreparedListener(MediaPlayer::start);
+            try {
+                demoPlayer.setDataSource(vid.getAbsolutePath());
+                demoPlayer.prepareAsync();
+            } catch (IOException e) {
+                Log.w(TAG, "demo video prepare failed", e);
+            }
+        } else if (img.exists() && img.length() > 0) {
+            // Render the staged bitmap onto the demo surface at ~15fps,
+            // matching the image-only fallback behaviour documented in
+            // HookMain#process_callback.
+            final Bitmap bmp = BitmapFactory.decodeFile(img.getAbsolutePath());
+            if (bmp == null) return;
+            demoImageLoop = new Runnable() {
+                @Override public void run() {
+                    try {
+                        Surface s = demoSurface;
+                        if (s == null || !s.isValid()) return;
+                        Canvas c = s.lockCanvas(null);
+                        if (c != null) {
+                            Rect dst = new Rect(0, 0, c.getWidth(), c.getHeight());
+                            c.drawBitmap(bmp, null, dst, null);
+                            s.unlockCanvasAndPost(c);
+                        }
+                    } catch (Throwable t) {
+                        Log.w(TAG, "demo image loop", t);
+                    } finally {
+                        if (demoHandler != null) {
+                            demoHandler.postDelayed(this, 66L /* ~15fps */);
+                        }
+                    }
+                }
+            };
+            demoHandler.post(demoImageLoop);
+        }
+    }
+
+    private void stopDemo() {
+        if (demoHandler != null && demoImageLoop != null) {
+            demoHandler.removeCallbacks(demoImageLoop);
+            demoImageLoop = null;
+        }
+        if (demoPlayer != null) {
+            try { demoPlayer.stop(); } catch (Throwable ignored) {}
+            demoPlayer.release();
+            demoPlayer = null;
+        }
+        if (demoSurface != null) {
+            demoSurface.release();
+            demoSurface = null;
+        }
+    }
+
+    private void validateStagedMedia() {
+        File vid = MediaPaths.getVideoTarget(this);
+        File img = MediaPaths.getImageTarget(this);
+        StringBuilder report = new StringBuilder();
+        boolean anyOk = false;
+        boolean warn = false;
+
+        if (img.exists() && img.length() > 0) {
+            int[] res = MediaPaths.imageResolution(img);
+            String codec = "bitmap";
+            if (res != null) {
+                report.append(getString(R.string.demo_report_image_format,
+                        codec, res[0], res[1], MediaPaths.humanBytes(img.length()))).append('\n');
+                anyOk = true;
+                if (res[0] < 160 || res[1] < 120 || res[0] > 4096 || res[1] > 4096) warn = true;
+            }
+        }
+        if (vid.exists() && vid.length() > 0) {
+            MediaMetadataRetriever r = new MediaMetadataRetriever();
+            try {
+                r.setDataSource(vid.getAbsolutePath());
+                String mime = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_MIMETYPE);
+                String bitrate = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_BITRATE);
+                int[] res = MediaPaths.videoResolution(vid);
+                int w = res != null ? res[0] : 0;
+                int h = res != null ? res[1] : 0;
+                String rate = bitrate != null
+                        ? MediaPaths.humanBytes(Long.parseLong(bitrate) / 8) + "/s" : "?";
+                report.append(getString(R.string.demo_report_video_format,
+                        mime == null ? "video" : mime, w, h, rate)).append('\n');
+                anyOk = true;
+                if (w < 160 || h < 120 || w > 4096 || h > 4096) warn = true;
+            } catch (Throwable t) {
+                Log.w(TAG, "validate video", t);
+            } finally {
+                try { r.release(); } catch (Throwable ignored) {}
+            }
+        }
+        if (!anyOk) {
+            demoReport.setText(R.string.demo_no_media);
+            demoOkChip.setVisibility(View.GONE);
+            return;
+        }
+        if (warn) report.append(getString(R.string.demo_warn_resolution));
+        demoReport.setText(report.toString().trim());
+        demoOkChip.setVisibility(View.VISIBLE);
+
+        new AlertDialog.Builder(this)
+                .setTitle(R.string.demo_validate)
+                .setMessage(report.toString().trim())
+                .setPositiveButton(android.R.string.ok, null)
+                .show();
     }
 
     // ---------------------------------------------------------------------
@@ -328,6 +505,16 @@ public class MainActivity extends AppCompatActivity {
         } else {
             Toast.makeText(this, R.string.test_camera_failed, Toast.LENGTH_SHORT).show();
         }
+    }
+
+    /**
+     * Launch the in-manager {@link CameraVerifyActivity} which opens Camera2
+     * inside this process so the VCAM hook — always scoped to its own
+     * manager — applies and the user can visually confirm injection without
+     * needing to add the external system camera to LSPosed scope.
+     */
+    private void launchVerifier() {
+        startActivity(new Intent(this, CameraVerifyActivity.class));
     }
 
     private void savePaths() {

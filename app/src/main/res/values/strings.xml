@@ -30,6 +30,25 @@
     <string name="clear">Clear</string>
     <string name="test_camera">Test camera</string>
     <string name="test_camera_failed">No camera app available</string>
+    <string name="verify_camera_title">VCAM verifier</string>
+    <string name="verify_camera_launch">Verify with camera</string>
+    <string name="verify_hook_active">Hook active — preview replaced</string>
+    <string name="verify_hook_inactive">Hook inactive</string>
+    <string name="verify_launch_system_camera">Launch system camera</string>
+    <string name="verify_capture">Capture still</string>
+    <string name="verify_scope_warning_title">Add target to LSPosed scope</string>
+    <string name="verify_scope_warning_body">The system camera app must be added to the VCAM module scope in LSPosed for the hook to apply there. Open LSPosed → Modules → Virtual Camera → Scope and enable your camera app.</string>
+    <string name="verify_permission_denied">Camera permission denied — the verifier cannot run.</string>
+    <string name="verify_hash_format">1000.bmp sha256: %1$s</string>
+    <string name="verify_no_staged_image">No staged 1000.bmp yet — import an image first.</string>
+
+    <string name="demo_section">Live demo</string>
+    <string name="demo_validate">Validate</string>
+    <string name="demo_pipeline_ok">Pipeline OK</string>
+    <string name="demo_no_media">Stage an image or video first</string>
+    <string name="demo_report_image_format">Image — %1$s — %2$dx%3$d — %4$s</string>
+    <string name="demo_report_video_format">Video — %1$s — %2$dx%3$d — bitrate %4$s</string>
+    <string name="demo_warn_resolution">Unusual resolution — the hook expects preview dimensions matching the host.</string>
     <string name="save_paths">Save</string>
     <string name="saved">Saved</string>
     <string name="cleared">Cleared</string>
