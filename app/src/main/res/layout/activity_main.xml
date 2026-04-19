@@ -119,8 +119,14 @@
                         android:text="@string/demo_section"
                         android:textAppearance="?attr/textAppearanceTitleMedium" />
 
-                    <TextureView
-                        android:id="@+id/demo_texture"
+                    <!-- TextureView is added programmatically inside this
+                         FrameLayout so a failed instantiation (e.g. on a
+                         software-rendered window under LSPosed on some
+                         LineageOS builds, which throws InflateException
+                         during XML inflation) degrades gracefully instead
+                         of taking down the whole MainActivity. -->
+                    <FrameLayout
+                        android:id="@+id/demo_texture_container"
                         android:layout_width="match_parent"
                         android:layout_height="220dp"
                         android:layout_marginTop="12dp"

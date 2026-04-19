@@ -120,6 +120,11 @@ public final class MediaMappings {
     @Nullable
     public static String resolve(@NonNull Context ctx, @NonNull String pkg,
                                  @NonNull String facing, @NonNull String type) {
+        // Defend against typos / new-type additions: unknown type values
+        // silently routing to TYPE_VIDEO would be very hard to debug.
+        if (!TYPE_IMAGE.equals(type) && !TYPE_VIDEO.equals(type)) {
+            return null;
+        }
         facing = normalizeFacing(facing);
         List<Mapping> all = all(ctx);
         String[][] probes = new String[][] {

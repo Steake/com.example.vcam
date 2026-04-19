@@ -65,10 +65,34 @@ public class PerAppMappingActivity extends AppCompatActivity {
         });
     }
 
+    /** Snapshot of mappings + library taken once per refresh, used by {@link #summary}. */
+    private java.util.Map<String, MediaMappings.Mapping> mappingCache = java.util.Collections.emptyMap();
+    private java.util.Map<String, MediaLibrary.Entry> libraryCache = java.util.Collections.emptyMap();
+
     @Override
     protected void onResume() {
         super.onResume();
+        rebuildCaches();
         adapter.setItems(loadApps());
+    }
+
+    /**
+     * Refresh the per-screen cache of mappings and library entries so
+     * {@link #summary(String)} doesn't re-parse SharedPreferences JSON
+     * (and re-sort the library) for every RecyclerView row binding.
+     */
+    private void rebuildCaches() {
+        java.util.Map<String, MediaMappings.Mapping> m = new java.util.HashMap<>();
+        for (MediaMappings.Mapping e : MediaMappings.all(this)) {
+            m.put(e.pkg + "|" + e.facing, e);
+        }
+        mappingCache = m;
+
+        java.util.Map<String, MediaLibrary.Entry> lib = new java.util.HashMap<>();
+        for (MediaLibrary.Entry e : MediaLibrary.list(this)) {
+            lib.put(e.uri().toString(), e);
+        }
+        libraryCache = lib;
     }
 
     private List<AppRow> loadApps() {
@@ -193,9 +217,9 @@ public class PerAppMappingActivity extends AppCompatActivity {
     /** Compact human-readable mapping summary for the row badge. */
     @NonNull
     private String summary(@NonNull String pkg) {
-        MediaMappings.Mapping any = MediaMappings.get(this, pkg, MediaMappings.FACING_ANY);
-        MediaMappings.Mapping back = MediaMappings.get(this, pkg, MediaMappings.FACING_BACK);
-        MediaMappings.Mapping front = MediaMappings.get(this, pkg, MediaMappings.FACING_FRONT);
+        MediaMappings.Mapping any = mappingCache.get(pkg + "|" + MediaMappings.FACING_ANY);
+        MediaMappings.Mapping back = mappingCache.get(pkg + "|" + MediaMappings.FACING_BACK);
+        MediaMappings.Mapping front = mappingCache.get(pkg + "|" + MediaMappings.FACING_FRONT);
         if (any == null && back == null && front == null) {
             return getString(R.string.map_using_default);
         }
@@ -220,7 +244,7 @@ public class PerAppMappingActivity extends AppCompatActivity {
     @NonNull
     private String shortFor(@Nullable String uri) {
         if (TextUtils.isEmpty(uri)) return getString(R.string.map_default_short);
-        MediaLibrary.Entry e = MediaLibrary.fromUri(this, uri);
+        MediaLibrary.Entry e = libraryCache.get(uri);
         return e != null ? e.name : uri;
     }
 }

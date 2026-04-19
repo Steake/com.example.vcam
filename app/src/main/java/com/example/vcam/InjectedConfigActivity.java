@@ -5,6 +5,7 @@ import android.graphics.Bitmap;
 import android.net.Uri;
 import android.os.Bundle;
 import android.text.TextUtils;
+import android.view.View;
 import android.widget.ImageView;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -39,12 +40,13 @@ public class InjectedConfigActivity extends AppCompatActivity {
     /** Optional: pre-select the scope chip matching the facing the host is currently using. */
     public static final String EXTRA_CURRENT_FACING = "current_facing";
 
-    private static final int CHIP_THIS_BOTH = 1;
-    private static final int CHIP_THIS_BACK = 2;
-    private static final int CHIP_THIS_FRONT = 3;
-    private static final int CHIP_GLOBAL_BOTH = 4;
-    private static final int CHIP_GLOBAL_BACK = 5;
-    private static final int CHIP_GLOBAL_FRONT = 6;
+    /** Scope tag values stored on each chip via {@link View#setTag}. */
+    private static final String SCOPE_THIS_BOTH   = "this_both";
+    private static final String SCOPE_THIS_BACK   = "this_back";
+    private static final String SCOPE_THIS_FRONT  = "this_front";
+    private static final String SCOPE_GLOBAL_BOTH  = "global_both";
+    private static final String SCOPE_GLOBAL_BACK  = "global_back";
+    private static final String SCOPE_GLOBAL_FRONT = "global_front";
 
     private ImageView preview;
     private TextView subtitle;
@@ -106,49 +108,47 @@ public class InjectedConfigActivity extends AppCompatActivity {
     private void populateScopeChips() {
         scopeChips.removeAllViews();
         boolean hasCaller = !TextUtils.isEmpty(callerPackage);
+        Chip preselect = null;
         if (hasCaller) {
-            addScopeChip(CHIP_THIS_BOTH, getString(R.string.injected_scope_this_both));
-            addScopeChip(CHIP_THIS_BACK, getString(R.string.injected_scope_this_back));
-            addScopeChip(CHIP_THIS_FRONT, getString(R.string.injected_scope_this_front));
+            Chip both  = addScopeChip(SCOPE_THIS_BOTH,  getString(R.string.injected_scope_this_both));
+            Chip back  = addScopeChip(SCOPE_THIS_BACK,  getString(R.string.injected_scope_this_back));
+            Chip front = addScopeChip(SCOPE_THIS_FRONT, getString(R.string.injected_scope_this_front));
+            if (MediaMappings.FACING_FRONT.equals(currentFacing))      preselect = front;
+            else if (MediaMappings.FACING_BACK.equals(currentFacing))  preselect = back;
+            else                                                        preselect = both;
         }
-        addScopeChip(CHIP_GLOBAL_BOTH, getString(R.string.injected_scope_global_both));
-        addScopeChip(CHIP_GLOBAL_BACK, getString(R.string.injected_scope_global_back));
-        addScopeChip(CHIP_GLOBAL_FRONT, getString(R.string.injected_scope_global_front));
-
-        // Preselect: caller's currently-open facing, else "this both", else global both.
-        int preselect;
-        if (hasCaller) {
-            if (MediaMappings.FACING_FRONT.equals(currentFacing)) preselect = CHIP_THIS_FRONT;
-            else if (MediaMappings.FACING_BACK.equals(currentFacing)) preselect = CHIP_THIS_BACK;
-            else preselect = CHIP_THIS_BOTH;
-        } else {
-            preselect = CHIP_GLOBAL_BOTH;
-        }
-        scopeChips.check(preselect);
+        Chip gBoth  = addScopeChip(SCOPE_GLOBAL_BOTH,  getString(R.string.injected_scope_global_both));
+        addScopeChip(SCOPE_GLOBAL_BACK,  getString(R.string.injected_scope_global_back));
+        addScopeChip(SCOPE_GLOBAL_FRONT, getString(R.string.injected_scope_global_front));
+        if (preselect == null) preselect = gBoth;
+        scopeChips.check(preselect.getId());
     }
 
-    private void addScopeChip(int id, @NonNull String text) {
+    private Chip addScopeChip(@NonNull String tag, @NonNull String text) {
         Chip c = new Chip(this);
-        c.setId(id);
+        // Use a generated id to avoid collisions with other views in the
+        // hierarchy; semantic lookup happens via the chip's tag instead.
+        c.setId(View.generateViewId());
+        c.setTag(tag);
         c.setText(text);
         c.setCheckable(true);
         scopeChips.addView(c);
+        return c;
     }
 
     /** Return the {@code (pkg, facing)} tuple selected via the scope chips. */
     @NonNull
     private String[] selectedScope() {
-        int id = scopeChips.getCheckedChipId();
+        int checkedId = scopeChips.getCheckedChipId();
+        View v = checkedId != View.NO_ID ? scopeChips.findViewById(checkedId) : null;
+        Object tag = v != null ? v.getTag() : null;
         String pkg, facing;
-        switch (id) {
-            case CHIP_THIS_BACK:    pkg = safePkg(); facing = MediaMappings.FACING_BACK; break;
-            case CHIP_THIS_FRONT:   pkg = safePkg(); facing = MediaMappings.FACING_FRONT; break;
-            case CHIP_THIS_BOTH:    pkg = safePkg(); facing = MediaMappings.FACING_ANY; break;
-            case CHIP_GLOBAL_BACK:  pkg = MediaMappings.PKG_GLOBAL; facing = MediaMappings.FACING_BACK; break;
-            case CHIP_GLOBAL_FRONT: pkg = MediaMappings.PKG_GLOBAL; facing = MediaMappings.FACING_FRONT; break;
-            case CHIP_GLOBAL_BOTH:
-            default:                pkg = MediaMappings.PKG_GLOBAL; facing = MediaMappings.FACING_ANY; break;
-        }
+        if (SCOPE_THIS_BACK.equals(tag))         { pkg = safePkg(); facing = MediaMappings.FACING_BACK; }
+        else if (SCOPE_THIS_FRONT.equals(tag))   { pkg = safePkg(); facing = MediaMappings.FACING_FRONT; }
+        else if (SCOPE_THIS_BOTH.equals(tag))    { pkg = safePkg(); facing = MediaMappings.FACING_ANY; }
+        else if (SCOPE_GLOBAL_BACK.equals(tag))  { pkg = MediaMappings.PKG_GLOBAL; facing = MediaMappings.FACING_BACK; }
+        else if (SCOPE_GLOBAL_FRONT.equals(tag)) { pkg = MediaMappings.PKG_GLOBAL; facing = MediaMappings.FACING_FRONT; }
+        else                                     { pkg = MediaMappings.PKG_GLOBAL; facing = MediaMappings.FACING_ANY; }
         return new String[]{pkg, facing};
     }
 

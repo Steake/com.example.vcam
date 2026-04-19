@@ -236,13 +236,29 @@ public class MainActivity extends AppCompatActivity {
     // ---------------------------------------------------------------------
 
     private void wireDemoCard() {
-        demoTexture = findViewById(R.id.demo_texture);
         demoOkChip = findViewById(R.id.demo_chip_ok);
         demoReport = findViewById(R.id.demo_report);
         demoHandler = new Handler(Looper.getMainLooper());
 
         findViewById(R.id.demo_btn_validate).setOnClickListener(v -> validateStagedMedia());
 
+        // TextureView construction can throw on software-rendered windows
+        // (some LSPosed / LineageOS setups end up here). Try once; if we
+        // can't build it, leave the demo placeholder in place — the
+        // validate button still works, it just has no live preview.
+        android.widget.FrameLayout container = findViewById(R.id.demo_texture_container);
+        try {
+            demoTexture = new TextureView(this);
+            container.addView(demoTexture,
+                    new android.widget.FrameLayout.LayoutParams(
+                            android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+                            android.widget.FrameLayout.LayoutParams.MATCH_PARENT));
+        } catch (Throwable t) {
+            Log.w(TAG, "TextureView unavailable, disabling live demo preview", t);
+            demoTexture = null;
+        }
+
+        if (demoTexture == null) return;
         demoTexture.setSurfaceTextureListener(new TextureView.SurfaceTextureListener() {
             @Override public void onSurfaceTextureAvailable(@NonNull SurfaceTexture s, int w, int h) {
                 startDemoPlayback();
@@ -258,6 +274,7 @@ public class MainActivity extends AppCompatActivity {
 
     private void startDemoPlayback() {
         stopDemo();
+        if (demoTexture == null) return;
         SurfaceTexture tex = demoTexture.getSurfaceTexture();
         if (tex == null) return;
         demoSurface = new Surface(tex);

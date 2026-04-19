@@ -5,7 +5,10 @@ import android.content.Intent;
 import android.graphics.Bitmap;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.text.TextUtils;
+import android.util.LruCache;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
@@ -25,7 +28,11 @@ import androidx.recyclerview.widget.RecyclerView;
 import com.google.android.material.appbar.MaterialToolbar;
 
 import java.io.File;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /**
  * Manager-side "Media library" screen: lists every imported image / video
@@ -46,6 +53,13 @@ public class MediaLibraryActivity extends AppCompatActivity {
     private TextView emptyView;
     private ActivityResultLauncher<String> pickImage;
     private ActivityResultLauncher<String> pickVideo;
+
+    /** LRU thumbnail cache, keyed by "{type}:{id}:{mtime}". */
+    private final LruCache<String, Bitmap> thumbCache = new LruCache<>(32);
+    /** Precomputed resolution labels keyed by "{type}:{id}" — decoded once per entry. */
+    private final Map<String, String> resolutionCache = new HashMap<>();
+    private ExecutorService thumbExecutor;
+    private Handler mainHandler;
 
     private boolean isPickMode() {
         return !TextUtils.isEmpty(getIntent().getStringExtra(EXTRA_PICK_TYPE));
@@ -85,6 +99,16 @@ public class MediaLibraryActivity extends AppCompatActivity {
 
         findViewById(R.id.btn_import_image).setOnClickListener(v -> pickImage.launch("image/*"));
         findViewById(R.id.btn_import_video).setOnClickListener(v -> pickVideo.launch("video/*"));
+
+        mainHandler = new Handler(Looper.getMainLooper());
+        thumbExecutor = Executors.newSingleThreadExecutor(
+                r -> new Thread(r, "VCAM-LibraryThumbs"));
+    }
+
+    @Override
+    protected void onDestroy() {
+        if (thumbExecutor != null) thumbExecutor.shutdownNow();
+        super.onDestroy();
     }
 
     @Override
@@ -164,19 +188,29 @@ public class MediaLibraryActivity extends AppCompatActivity {
             MediaLibrary.Entry e = items.get(position);
             h.title.setText(e.name);
             File f = MediaLibrary.fileFor(MediaLibraryActivity.this, e);
-            int[] res = MediaLibrary.TYPE_IMAGE.equals(e.type)
-                    ? MediaPaths.imageResolution(f) : MediaPaths.videoResolution(f);
-            String resStr = res != null
-                    ? getString(R.string.chip_resolution_format, res[0], res[1])
-                    : getString(R.string.lib_resolution_unknown);
-            h.subtitle.setText(getString(R.string.lib_entry_meta_format,
-                    e.type, resStr, MediaPaths.humanBytes(e.size)));
 
-            Bitmap thumb = MediaLibrary.TYPE_IMAGE.equals(e.type)
-                    ? MediaPaths.decodeImageThumb(f, 256)
-                    : MediaPaths.decodeVideoFrame(f);
-            if (thumb != null) h.thumb.setImageBitmap(thumb);
-            else h.thumb.setImageResource(android.R.drawable.ic_menu_gallery);
+            // Resolution: compute once, then memoise. MediaMetadataRetriever
+            // is expensive enough that pulling it on every bind during
+            // scroll causes visible jank.
+            String resKey = e.type + ":" + e.id;
+            String resStr = resolutionCache.get(resKey);
+            h.subtitle.setText(getString(R.string.lib_entry_meta_format,
+                    e.type,
+                    resStr != null ? resStr : getString(R.string.lib_resolution_unknown),
+                    MediaPaths.humanBytes(e.size)));
+
+            // Thumbnail: try cache; otherwise decode off-thread and swap in.
+            String thumbKey = e.type + ":" + e.id + ":" + f.lastModified();
+            h.thumbKey = thumbKey;
+            Bitmap cached = thumbCache.get(thumbKey);
+            if (cached != null) {
+                h.thumb.setImageBitmap(cached);
+            } else {
+                h.thumb.setImageResource(android.R.drawable.ic_menu_gallery);
+                if (resStr == null || thumbExecutor != null) {
+                    loadThumbAsync(e, f, h, resKey, thumbKey);
+                }
+            }
 
             h.itemView.setOnClickListener(v -> {
                 if (isPickMode()) pickResult(e);
@@ -187,6 +221,36 @@ public class MediaLibraryActivity extends AppCompatActivity {
             h.btnSetDefault.setOnClickListener(v -> setAsDefault(e));
         }
 
+        private void loadThumbAsync(@NonNull MediaLibrary.Entry e, @NonNull File f,
+                                    @NonNull VH h, @NonNull String resKey,
+                                    @NonNull String thumbKey) {
+            if (thumbExecutor == null || thumbExecutor.isShutdown()) return;
+            thumbExecutor.execute(() -> {
+                Bitmap bmp = MediaLibrary.TYPE_IMAGE.equals(e.type)
+                        ? MediaPaths.decodeImageThumb(f, 256)
+                        : MediaPaths.decodeVideoFrame(f);
+                int[] res = MediaLibrary.TYPE_IMAGE.equals(e.type)
+                        ? MediaPaths.imageResolution(f) : MediaPaths.videoResolution(f);
+                String resStr = res != null
+                        ? getString(R.string.chip_resolution_format, res[0], res[1])
+                        : null;
+                mainHandler.post(() -> {
+                    if (isFinishing() || isDestroyed()) return;
+                    if (bmp != null) thumbCache.put(thumbKey, bmp);
+                    if (resStr != null) resolutionCache.put(resKey, resStr);
+                    // Only swap if this ViewHolder is still bound to the
+                    // same entry (it may have been recycled during scroll).
+                    if (thumbKey.equals(h.thumbKey)) {
+                        if (bmp != null) h.thumb.setImageBitmap(bmp);
+                        h.subtitle.setText(getString(R.string.lib_entry_meta_format,
+                                e.type,
+                                resStr != null ? resStr : getString(R.string.lib_resolution_unknown),
+                                MediaPaths.humanBytes(e.size)));
+                    }
+                });
+            });
+        }
+
         @Override public int getItemCount() { return items.size(); }
 
         final class VH extends RecyclerView.ViewHolder {
@@ -195,6 +259,8 @@ public class MediaLibraryActivity extends AppCompatActivity {
             final TextView subtitle;
             final View btnDelete;
             final View btnSetDefault;
+            /** Key of the thumbnail currently requested for this view holder. */
+            @Nullable String thumbKey;
 
             VH(@NonNull View v) {
                 super(v);

@@ -190,6 +190,15 @@ public class MediaProvider extends ContentProvider {
     @Override
     public Cursor query(@NonNull Uri uri, @Nullable String[] projection, @Nullable String selection,
                         @Nullable String[] selectionArgs, @Nullable String sortOrder) {
+        // Same caller gate as openFile(): mapping state / file sizes are
+        // not privacy-safe to leak to arbitrary processes, so require the
+        // caller to hold CAMERA (i.e. a plausibly-hooked camera app) or
+        // be our own UID.
+        try {
+            enforceCallerIsCameraApp();
+        } catch (FileNotFoundException denied) {
+            return null;
+        }
         int match = MATCHER.match(uri);
         if (match == MATCH_RESOLVE) {
             return resolveCursor(uri);
