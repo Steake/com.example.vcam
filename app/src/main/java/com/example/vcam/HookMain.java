@@ -90,6 +90,13 @@ public class HookMain implements IXposedHookLoadPackage {
     public static Surface c2_reader_Surfcae_1;
     public static MediaPlayer c2_player;
     public static MediaPlayer c2_player_1;
+    // Static-image feeders used when only 1000.bmp is staged (no virtual.mp4);
+    // they push the bitmap into the reader / preview surfaces so Camera2
+    // still-capture and continuous preview both produce the injected frame.
+    public static StaticBitmapFeeder c2_still_feeder;
+    public static StaticBitmapFeeder c2_still_feeder_1;
+    public static StaticBitmapFeeder c2_preview_feeder;
+    public static StaticBitmapFeeder c2_preview_feeder_1;
     public static Surface c2_virtual_surface;
     public static SurfaceTexture c2_virtual_surfaceTexture;
     public boolean need_recreate;
@@ -848,6 +855,44 @@ public class HookMain implements IXposedHookLoadPackage {
     }
 
     private void process_camera2_play() {
+        // When the manager staged an image but no MP4, drive the Camera2
+        // output surfaces from that bitmap via ImageWriter / lockCanvas
+        // instead of the MediaCodec-backed VideoToFrames pipeline. This
+        // makes Camera2 still-capture (JPEG ImageReader) and continuous
+        // preview both inject the staged bitmap — the historical
+        // "Camera1 takePicture-only" still-capture fallback is gone.
+        boolean imageOnly = !hasVideoStaged() && hasImageStaged();
+        if (imageOnly) {
+            stopCamera2Feeders();
+            String bmpPath = video_path + "1000.bmp";
+            if (c2_reader_Surfcae != null) {
+                c2_still_feeder = new StaticBitmapFeeder(
+                        c2_reader_Surfcae, imageReaderFormat,
+                        c2_ori_width, c2_ori_height, bmpPath);
+                c2_still_feeder.start();
+            }
+            if (c2_reader_Surfcae_1 != null) {
+                c2_still_feeder_1 = new StaticBitmapFeeder(
+                        c2_reader_Surfcae_1, imageReaderFormat,
+                        c2_ori_width, c2_ori_height, bmpPath);
+                c2_still_feeder_1.start();
+            }
+            if (c2_preview_Surfcae != null) {
+                c2_preview_feeder = new StaticBitmapFeeder(
+                        c2_preview_Surfcae, StaticBitmapFeeder.FORMAT_PREVIEW,
+                        c2_ori_width, c2_ori_height, bmpPath);
+                c2_preview_feeder.start();
+            }
+            if (c2_preview_Surfcae_1 != null) {
+                c2_preview_feeder_1 = new StaticBitmapFeeder(
+                        c2_preview_Surfcae_1, StaticBitmapFeeder.FORMAT_PREVIEW,
+                        c2_ori_width, c2_ori_height, bmpPath);
+                c2_preview_feeder_1.start();
+            }
+            XposedBridge.log("[VCAM] Camera2 image-only feeders started");
+            return;
+        }
+        stopCamera2Feeders();
 
         if (c2_reader_Surfcae != null) {
             if (c2_hw_decode_obj != null) {
@@ -946,6 +991,26 @@ public class HookMain implements IXposedHookLoadPackage {
         XposedBridge.log("[VCAM] Camera2 processing fully executed");
     }
 
+    /** Tear down any static-bitmap feeders started by an earlier play(). */
+    private static void stopCamera2Feeders() {
+        if (c2_still_feeder != null) {
+            try { c2_still_feeder.stop(); } catch (Throwable ignored) {}
+            c2_still_feeder = null;
+        }
+        if (c2_still_feeder_1 != null) {
+            try { c2_still_feeder_1.stop(); } catch (Throwable ignored) {}
+            c2_still_feeder_1 = null;
+        }
+        if (c2_preview_feeder != null) {
+            try { c2_preview_feeder.stop(); } catch (Throwable ignored) {}
+            c2_preview_feeder = null;
+        }
+        if (c2_preview_feeder_1 != null) {
+            try { c2_preview_feeder_1.stop(); } catch (Throwable ignored) {}
+            c2_preview_feeder_1 = null;
+        }
+    }
+
     private Surface create_virtual_surface() {
         if (need_recreate) {
             if (c2_virtual_surfaceTexture != null) {
@@ -990,6 +1055,7 @@ public class HookMain implements IXposedHookLoadPackage {
                     c2_hw_decode_obj.stopDecode();
                     c2_hw_decode_obj = null;
                 }
+                stopCamera2Feeders();
                 if (c2_player_1 != null) {
                     c2_player_1.stop();
                     c2_player_1.reset();
