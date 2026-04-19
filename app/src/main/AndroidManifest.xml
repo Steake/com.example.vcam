@@ -13,6 +13,23 @@
          under /sdcard/DCIM/Camera1/. Users must grant this once via system settings. -->
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
         tools:ignore="ScopedStorage" />
+    <!-- Camera permission is required by the in-manager verifier activity
+         (CameraVerifyActivity) which opens the device camera so the user
+         can confirm the hook replaces live preview / still captures. The
+         hook itself runs in target processes and does not rely on this. -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+
+    <!-- Signature-level permission for the module/manager to guard
+         privileged entry points. The injected-config activity itself is
+         exported without this permission so that the in-host hook can
+         launch it from a notification (PendingIntent is constructed in the
+         host process), which would otherwise be dropped by the platform. -->
+    <permission
+        android:name="com.example.vcam.permission.CONFIGURE"
+        android:protectionLevel="signature" />
+    <uses-permission android:name="com.example.vcam.permission.CONFIGURE" />
+
     <queries>
         <intent>
             <action android:name="android.media.action.IMAGE_CAPTURE" />
@@ -55,9 +72,43 @@
 
         <activity
             android:name=".InjectedConfigActivity"
-            android:exported="false"
+            android:exported="true"
             android:label="@string/injected_title"
-            android:theme="@style/Theme.VCAM.Translucent" />
+            android:excludeFromRecents="true"
+            android:theme="@style/Theme.VCAM.Translucent">
+            <!--
+                Exported so that the in-host VCAM hook can launch this activity
+                via a PendingIntent attached to the per-app "pick another
+                image" notification. The PendingIntent is constructed in the
+                host process, so without android:exported="true" the platform
+                drops the launch on Android 10+.
+                Launches are always explicit (via ComponentName from HookMain
+                or an explicit Intent from MainActivity) — we deliberately
+                omit an intent-filter to avoid exposing the config UI to
+                arbitrary apps via implicit custom actions.
+            -->
+        </activity>
+
+        <activity
+            android:name=".CameraVerifyActivity"
+            android:exported="false"
+            android:label="@string/verify_camera_title"
+            android:theme="@style/Theme.VCAM" />
+
+        <!--
+            Exposes the manager's staged image / video for the in-host VCAM
+            hook. Must be exported because the hook runs inside arbitrary
+            host processes (host UIDs are unknown in advance and not signed
+            by us, so neither allow-lists nor signature permissions apply).
+            Instead, MediaProvider.openFile() verifies the calling UID holds
+            android.permission.CAMERA before returning bytes — the only
+            legitimate consumer is a camera-using hooked app.
+        -->
+        <provider
+            android:name=".MediaProvider"
+            android:authorities="com.example.vcam"
+            android:exported="true"
+            android:grantUriPermissions="true" />
 
         <meta-data
             android:name="xposedmodule"
