@@ -238,6 +238,32 @@
                             android:minHeight="48dp"
                             android:text="@string/test_camera" />
                     </LinearLayout>
+
+                    <!-- Phase 4: quick links to the library / mapping / defaults screens -->
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btn_open_library"
+                        style="@style/Widget.Material3.Button.TextButton"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:gravity="start|center_vertical"
+                        android:text="@string/main_open_library" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btn_open_mapping"
+                        style="@style/Widget.Material3.Button.TextButton"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:gravity="start|center_vertical"
+                        android:text="@string/main_open_mapping" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btn_open_defaults"
+                        style="@style/Widget.Material3.Button.TextButton"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:gravity="start|center_vertical"
+                        android:text="@string/main_open_defaults" />
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
 

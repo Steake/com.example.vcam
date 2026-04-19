@@ -173,6 +173,21 @@ public class MainActivity extends AppCompatActivity {
 
         findViewById(R.id.btn_save_paths).setOnClickListener(v -> savePaths());
 
+        findViewById(R.id.btn_open_library).setOnClickListener(v ->
+                startActivity(new Intent(this, MediaLibraryActivity.class)));
+        findViewById(R.id.btn_open_mapping).setOnClickListener(v ->
+                startActivity(new Intent(this, PerAppMappingActivity.class)));
+        findViewById(R.id.btn_open_defaults).setOnClickListener(v -> {
+            Intent i = new Intent(this, AppMappingEditActivity.class);
+            i.putExtra(AppMappingEditActivity.EXTRA_PKG, MediaMappings.PKG_GLOBAL);
+            startActivity(i);
+        });
+
+        // First-launch migration: move legacy DCIM-staged media into the
+        // new MediaLibrary and wire them up as the global default. No-op
+        // after the first successful run; legacy files stay in place.
+        MediaMigration.migrateIfNeeded(this);
+
         findViewById(R.id.button).setOnClickListener(v -> {
             Uri uri = Uri.parse("https://github.com/w2016561536/android_virtual_cam");
             startActivity(new Intent(Intent.ACTION_VIEW, uri));
