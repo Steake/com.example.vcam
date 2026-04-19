@@ -63,7 +63,8 @@ public class InjectedConfigActivity extends AppCompatActivity {
     @Override
     protected void onCreate(@Nullable Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        setTheme(R.style.Theme_VCAM_Translucent);
+        // Theme is set via manifest (@style/Theme.VCAM.Translucent) so the
+        // window is already drawn translucent by the time we get here.
         setContentView(R.layout.activity_injected_config);
 
         callerPackage = getIntent().getStringExtra(EXTRA_CALLER_PACKAGE);

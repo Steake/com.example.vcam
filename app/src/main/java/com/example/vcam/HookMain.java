@@ -469,27 +469,38 @@ public class HookMain implements IXposedHookLoadPackage {
                     postInAppConfigNotification(toast_content, lpparam.packageName);
                     File force_private = new File(Environment.getExternalStorageDirectory().getAbsolutePath() + "/DCIM/Camera1/private_dir.jpg");
                     if (toast_content != null) {// force private directory path
-                        int auth_statue = 0;
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                            try {
-                                auth_statue += (toast_content.checkSelfPermission(Manifest.permission.READ_EXTERNAL_STORAGE) + 1);
-                            } catch (Exception ee) {
-                                XposedBridge.log("[VCAM] [permission-check]" + ee.toString());
-                            }
-                            try {
-                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                                    auth_statue += (toast_content.checkSelfPermission(Manifest.permission.MANAGE_EXTERNAL_STORAGE) + 1);
-                                }
-                            } catch (Exception ee) {
-                                XposedBridge.log("[VCAM] [permission-check]" + ee.toString());
-                            }
-                        }else {
-                            if (toast_content.checkCallingPermission(Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED ){
-                                auth_statue = 2;
-                            }
+                        // Our spoofed-permission set makes
+                        // checkSelfPermission() return GRANTED even when the
+                        // host has no real access to /sdcard/DCIM/. Probe
+                        // actual writability instead — write a tiny sentinel
+                        // into the public path and see if it sticks. On
+                        // Android 11+ this fails for almost every host, so we
+                        // transparently fall back to the host-private
+                        // getExternalFilesDir() path where writes always
+                        // succeed.
+                        boolean canUsePublicDcim;
+                        try {
+                            File publicDir = new File(Environment.getExternalStorageDirectory().getPath() + "/DCIM/Camera1/");
+                            if (!publicDir.exists()) publicDir.mkdirs();
+                            File probe = new File(publicDir, ".vcam_write_probe");
+                            FileOutputStream probeFos = new FileOutputStream(probe);
+                            probeFos.write(0);
+                            probeFos.flush();
+                            probeFos.close();
+                            canUsePublicDcim = probe.exists() && probe.length() > 0;
+                            //noinspection ResultOfMethodCallIgnored
+                            probe.delete();
+                        } catch (Throwable probeFail) {
+                            canUsePublicDcim = false;
+                        }
+                        // Android 11+: never trust the public path, even if
+                        // the probe happened to succeed in this particular
+                        // process (MediaStore quirks). Force private.
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                            canUsePublicDcim = false;
                         }
                         // permissions resolved
-                        if (auth_statue < 1 || force_private.exists()) {
+                        if (!canUsePublicDcim || force_private.exists()) {
                             File shown_file = new File(toast_content.getExternalFilesDir(null).getAbsolutePath() + "/Camera1/");
                             if ((!shown_file.isDirectory()) && shown_file.exists()) {
                                 shown_file.delete();
@@ -501,7 +512,7 @@ public class HookMain implements IXposedHookLoadPackage {
                             File toast_force_file = new File(Environment.getExternalStorageDirectory().getPath()+ "/DCIM/Camera1/force_show.jpg");
                             if ((!lpparam.packageName.equals(BuildConfig.APPLICATION_ID)) && ((!shown_file.exists()) || toast_force_file.exists())) {
                                 try {
-                                    Toast.makeText(toast_content, lpparam.packageName + " has no storage permission\nCamera1 is redirected to " + toast_content.getExternalFilesDir(null).getAbsolutePath() + "/Camera1/", Toast.LENGTH_SHORT).show();
+                                    Toast.makeText(toast_content, "VCAM: Camera1 redirected to private storage for " + lpparam.packageName, Toast.LENGTH_SHORT).show();
                                     FileOutputStream fos = new FileOutputStream(toast_content.getExternalFilesDir(null).getAbsolutePath() + "/Camera1/" + "has_shown");
                                     String info = "shown";
                                     fos.write(info.getBytes());
@@ -1633,7 +1644,7 @@ public class HookMain implements IXposedHookLoadPackage {
             configIntent.putExtra("caller_package", targetPackage);
             configIntent.putExtra("current_facing", currentFacing);
             configIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
-                    | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+                    | Intent.FLAG_ACTIVITY_NO_ANIMATION);
 
             int piFlags = PendingIntent.FLAG_UPDATE_CURRENT;
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
@@ -1800,12 +1811,13 @@ public class HookMain implements IXposedHookLoadPackage {
         } catch (Throwable ignored) {}
         String imgUri = queryResolve(ctx, pkg, facing, MediaMappings.TYPE_IMAGE);
         String vidUri = queryResolve(ctx, pkg, facing, MediaMappings.TYPE_VIDEO);
-        if (imgUri != null) {
-            copyProviderUri(ctx, Uri.parse(imgUri), new File(video_path + "1000.bmp"));
-        }
-        if (vidUri != null) {
-            copyProviderUri(ctx, Uri.parse(vidUri), new File(video_path + "virtual.mp4"));
-        }
+        // Fall back to the legacy provider roots when no mapping resolves.
+        // This covers fresh installs where the user staged a single
+        // image/video in the manager but never configured mappings.
+        if (imgUri == null) imgUri = "content://com.example.vcam/image";
+        if (vidUri == null) vidUri = "content://com.example.vcam/video";
+        copyProviderUri(ctx, Uri.parse(imgUri), new File(video_path + "1000.bmp"));
+        copyProviderUri(ctx, Uri.parse(vidUri), new File(video_path + "virtual.mp4"));
     }
 
     private static String queryResolve(Context ctx, String pkg, String facing, String type) {

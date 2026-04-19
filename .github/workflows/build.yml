@@ -18,6 +18,8 @@ jobs:
     outputs:
       apk_path: ${{ steps.apk.outputs.apk_path }}
       apk_sha256: ${{ steps.apk.outputs.apk_sha256 }}
+      release_apk_path: ${{ steps.apk.outputs.release_apk_path }}
+      release_apk_sha256: ${{ steps.apk.outputs.release_apk_sha256 }}
 
     steps:
       - name: Checkout
@@ -47,6 +49,14 @@ jobs:
       - name: Build debug APK
         run: ./gradlew :app:assembleDebug --no-daemon --stacktrace
 
+      # Tag pushes also produce a release-build APK (debug-keystore signed —
+      # the project doesn't ship a release signing key, and this is an
+      # LSPosed module, not a Play target). Keeps tag artifacts usable by
+      # end users via `adb install` / sideload without rebuilding locally.
+      - name: Build release APK (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: ./gradlew :app:assembleRelease --no-daemon --stacktrace
+
       - name: Locate APK
         id: apk
         run: |
@@ -63,6 +73,21 @@ jobs:
           echo "apk_path=$DEST" >> "$GITHUB_OUTPUT"
           echo "apk_sha256=$APK_SHA256" >> "$GITHUB_OUTPUT"
 
+          # Tag-only: locate the release APK as well.
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            REL_APK=$(find app/build/outputs/apk/release -name "*.apk" | head -n1)
+            if [ -z "$REL_APK" ]; then
+              echo "Tag build but no release APK produced" >&2
+              exit 1
+            fi
+            REL_DEST="vcam-${VERSION}-release.apk"
+            cp "$REL_APK" "$REL_DEST"
+            REL_SHA256=$(sha256sum "$REL_DEST" | awk '{print $1}')
+            printf '%s  %s\n' "$REL_SHA256" "$REL_DEST" | tee "${REL_DEST}.sha256"
+            echo "release_apk_path=$REL_DEST" >> "$GITHUB_OUTPUT"
+            echo "release_apk_sha256=$REL_SHA256" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
@@ -70,6 +95,17 @@ jobs:
           path: |
             ${{ steps.apk.outputs.apk_path }}
             ${{ steps.apk.outputs.apk_path }}.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload release APK artifact (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4
+        with:
+          name: vcam-release-apk
+          path: |
+            ${{ steps.apk.outputs.release_apk_path }}
+            ${{ steps.apk.outputs.release_apk_path }}.sha256
           if-no-files-found: error
           retention-days: 30
 
@@ -82,10 +118,16 @@ jobs:
       contents: write
 
     steps:
-      - name: Download APK artifact
+      - name: Download debug APK artifact
         uses: actions/download-artifact@v4
         with:
           name: vcam-debug-apk
+          path: release-artifacts
+
+      - name: Download release APK artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: vcam-release-apk
           path: release-artifacts
 
       - name: Create GitHub Release
@@ -94,10 +136,13 @@ jobs:
           files: |
             release-artifacts/${{ needs.build.outputs.apk_path }}
             release-artifacts/${{ needs.build.outputs.apk_path }}.sha256
+            release-artifacts/${{ needs.build.outputs.release_apk_path }}
+            release-artifacts/${{ needs.build.outputs.release_apk_path }}.sha256
           generate_release_notes: true
           body: |
             Automated build of `${{ github.ref_name }}`.
 
-            **APK SHA-256:** `${{ needs.build.outputs.apk_sha256 }}`
+            **Debug APK SHA-256:** `${{ needs.build.outputs.apk_sha256 }}`
+            **Release APK SHA-256:** `${{ needs.build.outputs.release_apk_sha256 }}`
 
-            Debug APK signed with the Android debug keystore. Install via `adb install` or sideload, enable in LSPosed, scope to target apps.
+            Install either APK via `adb install` or sideload, enable in LSPosed, scope to target apps. The release APK is signed with the Android debug keystore (this is an LSPosed module, not a Play target).

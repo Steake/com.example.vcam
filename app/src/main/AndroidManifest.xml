@@ -82,6 +82,10 @@
             android:exported="true"
             android:label="@string/injected_title"
             android:excludeFromRecents="true"
+            android:taskAffinity=""
+            android:launchMode="singleInstance"
+            android:finishOnTaskLaunch="true"
+            android:noHistory="true"
             android:theme="@style/Theme.VCAM.Translucent">
             <!--
                 Exported so that the in-host VCAM hook can launch this activity
