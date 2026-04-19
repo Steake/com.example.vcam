@@ -33,7 +33,7 @@ The hooks redirect reads from the sensor to a staged file on disk. Two files do 
 | Replacement **video** for preview | `/[internal-storage]/DCIM/Camera1/virtual.mp4` | Must match the preview resolution the target app requests (it toasts this on first open). |
 | Replacement **still image** for capture | `/[internal-storage]/DCIM/Camera1/1000.bmp` | Extension is nominal; any BitmapFactory-decodable image renamed to `.bmp` works. |
 
-A small set of empty marker files beside them toggle behaviour: `disable.jpg`, `force_show.jpg`, `no-silent.jpg`, `private_dir.jpg`, `no_toast.jpg`. These are *flag files* — the hook's runtime reads their existence, not their contents. The v4.5 UI writes and deletes them for you; nostalgic users may continue to `touch` them by hand, and nothing will stop them.
+A small set of empty marker files beside them toggle behaviour: `disable.jpg`, `force_show.jpg`, `no-silent.jpg`, `private_dir.jpg`, `no_toast.jpg`. These are *flag files* — the hook's runtime reads their existence, not their contents. The UI writes and deletes them for you; nostalgic users may continue to `touch` them by hand, and nothing will stop them.
 
 ### Architecture, drawn rather than waffled
 
@@ -91,7 +91,7 @@ Observe what is *not* here: no daemon, no content provider, no IPC contract you 
 
 ## 3. What Phase 2 changed
 
-Phase 1 (issue #1) moved the project onto an English-default string catalogue with Chinese mirrors. Phase 2 (this release, `4.5`) is a companion-app overhaul. The hook is untouched.
+Phase 1 (issue #1) moved the project onto an English-default string catalogue with Chinese mirrors. Phase 2 (this release, `4.8`) is a companion-app overhaul. The hook is untouched.
 
 - **Material 3 UI** (`Theme.Material3.DayNight`), dynamic color on Android 12+, `MaterialToolbar` + `CoordinatorLayout` + `MaterialCardView` sections for *Status*, *Source media*, and *Advanced*. `MaterialButton` and `MaterialSwitch` throughout. Light/dark follow the system.
 - **Image/video picker** using `ActivityResultContracts.GetContent` — which, on Android 13+, transparently delegates to the system Photo Picker. No `READ_EXTERNAL_STORAGE` broadside is required on modern Android. The selected URI is streamed into the hook's expected target file; the last-chosen URI is persisted in `SharedPreferences`.
