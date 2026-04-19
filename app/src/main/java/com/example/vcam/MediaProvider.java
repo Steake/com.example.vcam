@@ -2,10 +2,13 @@ package com.example.vcam;
 
 import android.content.ContentProvider;
 import android.content.ContentValues;
+import android.content.Context;
 import android.content.UriMatcher;
+import android.content.pm.PackageManager;
 import android.database.Cursor;
 import android.database.MatrixCursor;
 import android.net.Uri;
+import android.os.Binder;
 import android.os.ParcelFileDescriptor;
 import android.provider.OpenableColumns;
 
@@ -61,11 +64,41 @@ public class MediaProvider extends ContentProvider {
     @Override
     public ParcelFileDescriptor openFile(@NonNull Uri uri, @NonNull String mode)
             throws FileNotFoundException {
+        enforceCallerIsCameraApp();
         File f = resolveFile(uri);
         if (f == null || !f.exists() || f.length() == 0) {
             throw new FileNotFoundException("No staged media for " + uri);
         }
         return ParcelFileDescriptor.open(f, ParcelFileDescriptor.MODE_READ_ONLY);
+    }
+
+    /**
+     * The provider has to be exported so the VCAM hook can read it from
+     * arbitrary host processes (host UIDs aren't known in advance and aren't
+     * signed by us, ruling out allow-lists and signature permissions). As a
+     * privacy guardrail, require the calling UID to hold
+     * {@code android.permission.CAMERA}: the only legitimate consumer is a
+     * camera-using app that VCAM is injecting into. Manager-side callers
+     * (our own UID) are always allowed.
+     */
+    private void enforceCallerIsCameraApp() throws FileNotFoundException {
+        Context ctx = getContext();
+        if (ctx == null) return;
+        int callingUid = Binder.getCallingUid();
+        if (callingUid == android.os.Process.myUid()) return;
+        if (ctx.getPackageManager().checkPermission(
+                android.Manifest.permission.CAMERA,
+                firstPackageForUid(ctx, callingUid))
+                != PackageManager.PERMISSION_GRANTED) {
+            throw new FileNotFoundException("Caller uid=" + callingUid
+                    + " lacks CAMERA permission — staged media not shared.");
+        }
+    }
+
+    @NonNull
+    private static String firstPackageForUid(@NonNull Context ctx, int uid) {
+        String[] pkgs = ctx.getPackageManager().getPackagesForUid(uid);
+        return (pkgs != null && pkgs.length > 0) ? pkgs[0] : "";
     }
 
     @Nullable

@@ -480,8 +480,22 @@ public class HookMain implements IXposedHookLoadPackage {
                     // directory. Query the manager's MediaProvider and copy
                     // staged media into video_path so the File-based hook
                     // pipeline below can keep working unchanged.
-                    if (!hasAnyMedia()) {
-                        stageFromProvider(toast_content);
+                    //
+                    // Run the copy on a background thread — this hook fires
+                    // on the host's main thread during Application startup,
+                    // and a multi-MB virtual.mp4 copy here would add visible
+                    // latency or even risk ANRs.
+                    if (!hasAnyMedia() && toast_content != null) {
+                        final Context appContext = toast_content;
+                        new Thread(new Runnable() {
+                            @Override public void run() {
+                                try {
+                                    stageFromProvider(appContext);
+                                } catch (Throwable t) {
+                                    XposedBridge.log("[VCAM][stage] " + t);
+                                }
+                            }
+                        }, "vcam-stage-provider").start();
                     }
                 }
             }
@@ -1289,15 +1303,11 @@ public class HookMain implements IXposedHookLoadPackage {
                     // host cadence naturally because we copy on every
                     // delivered callback.
                     if (!hasVideoStaged() && hasImageStaged()) {
-                        try {
-                            byte[] staticYuv = getYUVByBitmap(getBMP(video_path + "1000.bmp"));
-                            if (staticYuv != null) {
-                                data_buffer = staticYuv;
-                                System.arraycopy(data_buffer, 0, paramd.args[0], 0,
-                                        Math.min(data_buffer.length, ((byte[]) paramd.args[0]).length));
-                            }
-                        } catch (Throwable t) {
-                            XposedBridge.log("[VCAM][image-preview] " + t);
+                        byte[] staticYuv = getCachedImageYuv();
+                        if (staticYuv != null) {
+                            data_buffer = staticYuv;
+                            System.arraycopy(data_buffer, 0, paramd.args[0], 0,
+                                    Math.min(data_buffer.length, ((byte[]) paramd.args[0]).length));
                         }
                         return;
                     }
@@ -1351,14 +1361,16 @@ public class HookMain implements IXposedHookLoadPackage {
         return BitmapFactory.decodeFile(file);
     }
 
-    /** Returns true if the manager has staged a replacement video at {@link #video_path}. */
+    /** Returns true if the manager has staged a non-empty replacement video at {@link #video_path}. */
     private static boolean hasVideoStaged() {
-        return new File(video_path + "virtual.mp4").exists();
+        File f = new File(video_path + "virtual.mp4");
+        return f.exists() && f.length() > 0;
     }
 
-    /** Returns true if the manager has staged a replacement still image at {@link #video_path}. */
+    /** Returns true if the manager has staged a non-empty still image at {@link #video_path}. */
     private static boolean hasImageStaged() {
-        return new File(video_path + "1000.bmp").exists();
+        File f = new File(video_path + "1000.bmp");
+        return f.exists() && f.length() > 0;
     }
 
     /** True when at least one of {@code virtual.mp4} / {@code 1000.bmp} is present. */
@@ -1366,24 +1378,42 @@ public class HookMain implements IXposedHookLoadPackage {
         return hasVideoStaged() || hasImageStaged();
     }
 
+    // Cache for the image-only preview YUV so we don't re-decode the bitmap
+    // and re-convert to YUV on every new Camera instance. Invalidated when
+    // the source bitmap's mtime changes (user swaps images via the manager).
+    private static byte[] cachedImageYuv;
+    private static long cachedImageYuvMtime;
+    private static long cachedImageYuvSize;
+
     /**
-     * Show the "no replacement image or video" toast if toasts are enabled
-     * and a host context is available. No-op when media is actually staged.
+     * Lazily decode {@code 1000.bmp} and convert to YUV once, reusing the
+     * buffer until the underlying file is replaced (detected via mtime +
+     * length). The preview callback can then {@code arraycopy} a cached
+     * buffer instead of paying a bitmap-decode + YUV-convert on every
+     * new camera instance.
      */
-    private void showMissingMediaToast(String pkgName) {
-        if (hasAnyMedia()) return;
-        File toast_control = new File(Environment.getExternalStorageDirectory().getPath()
-                + "/DCIM/Camera1/" + "no_toast.jpg");
-        need_to_show_toast = !toast_control.exists();
-        if (toast_content != null && need_to_show_toast) {
-            try {
-                Toast.makeText(toast_content,
-                        "[VCAM] No replacement image or video\n" + pkgName
-                                + "\nPath: " + video_path,
-                        Toast.LENGTH_SHORT).show();
-            } catch (Exception ee) {
-                XposedBridge.log("[VCAM][toast]" + ee.toString());
-            }
+    private static byte[] getCachedImageYuv() {
+        File f = new File(video_path + "1000.bmp");
+        if (!f.exists() || f.length() == 0) {
+            return null;
+        }
+        long mtime = f.lastModified();
+        long size = f.length();
+        byte[] cur = cachedImageYuv;
+        if (cur != null && mtime == cachedImageYuvMtime && size == cachedImageYuvSize) {
+            return cur;
+        }
+        try {
+            Bitmap bmp = BitmapFactory.decodeFile(f.getAbsolutePath());
+            if (bmp == null) return null;
+            byte[] yuv = getYUVByBitmap(bmp);
+            cachedImageYuv = yuv;
+            cachedImageYuvMtime = mtime;
+            cachedImageYuvSize = size;
+            return yuv;
+        } catch (Throwable t) {
+            XposedBridge.log("[VCAM][image-cache] " + t);
+            return null;
         }
     }
 

@@ -82,17 +82,11 @@
                 image" notification. The PendingIntent is constructed in the
                 host process, so without android:exported="true" the platform
                 drops the launch on Android 10+.
-                The intent-filter makes implicit launches robust even when the
-                ComponentName cannot be resolved (e.g. if the manager is
-                obfuscated by LSPosed). We deliberately do NOT guard with a
-                signature permission here because the caller is the host
-                process, which is never signed by us.
+                Launches are always explicit (via ComponentName from HookMain
+                or an explicit Intent from MainActivity) — we deliberately
+                omit an intent-filter to avoid exposing the config UI to
+                arbitrary apps via implicit custom actions.
             -->
-            <intent-filter>
-                <action android:name="com.example.vcam.action.OPEN_INJECTED_CONFIG" />
-                <action android:name="com.example.vcam.action.CONFIGURE" />
-                <category android:name="android.intent.category.DEFAULT" />
-            </intent-filter>
         </activity>
 
         <activity
@@ -102,12 +96,13 @@
             android:theme="@style/Theme.VCAM" />
 
         <!--
-            Exposes the manager's staged image / video so the hook running in
-            a host process can stream bytes even when the host has no storage
-            permission. See MediaProvider and HookMain#stageFromProvider.
-            Exported with no read permission because the staged media is the
-            user's own injected content, not sensitive; scoped storage makes
-            any other distribution path prohibitively fragile.
+            Exposes the manager's staged image / video for the in-host VCAM
+            hook. Must be exported because the hook runs inside arbitrary
+            host processes (host UIDs are unknown in advance and not signed
+            by us, so neither allow-lists nor signature permissions apply).
+            Instead, MediaProvider.openFile() verifies the calling UID holds
+            android.permission.CAMERA before returning bytes — the only
+            legitimate consumer is a camera-using hooked app.
         -->
         <provider
             android:name=".MediaProvider"

@@ -5,7 +5,6 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
-import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
 import android.graphics.Rect;
 import android.graphics.SurfaceTexture;
@@ -248,50 +247,77 @@ public class MainActivity extends AppCompatActivity {
         if (tex == null) return;
         demoSurface = new Surface(tex);
 
-        File vid = MediaPaths.getVideoTarget(this);
-        File img = MediaPaths.getImageTarget(this);
+        final File vid = MediaPaths.getVideoTarget(this);
+        final File img = MediaPaths.getImageTarget(this);
         if (vid.exists() && vid.length() > 0) {
-            demoPlayer = new MediaPlayer();
-            demoPlayer.setSurface(demoSurface);
-            demoPlayer.setLooping(prefs.getBoolean(VCAMApp.KEY_LOOP_VIDEO, true));
+            final MediaPlayer player = new MediaPlayer();
+            demoPlayer = player;
+            player.setSurface(demoSurface);
+            player.setLooping(prefs.getBoolean(VCAMApp.KEY_LOOP_VIDEO, true));
             if (prefs.getBoolean(VCAMApp.KEY_MUTE_VIDEO, false)) {
-                demoPlayer.setVolume(0f, 0f);
+                player.setVolume(0f, 0f);
             }
-            demoPlayer.setOnPreparedListener(MediaPlayer::start);
+            // Guard against async prepare completing after stopDemo() —
+            // player may have been released, or a newer player may have
+            // replaced it. Only start when we're still the active one.
+            player.setOnPreparedListener(mp -> {
+                if (demoPlayer != mp) return;
+                try {
+                    mp.start();
+                } catch (IllegalStateException e) {
+                    Log.w(TAG, "demo video start skipped after lifecycle cleanup", e);
+                }
+            });
             try {
-                demoPlayer.setDataSource(vid.getAbsolutePath());
-                demoPlayer.prepareAsync();
+                player.setDataSource(vid.getAbsolutePath());
+                player.prepareAsync();
             } catch (IOException e) {
                 Log.w(TAG, "demo video prepare failed", e);
             }
         } else if (img.exists() && img.length() > 0) {
             // Render the staged bitmap onto the demo surface at ~15fps,
             // matching the image-only fallback behaviour documented in
-            // HookMain#process_callback.
-            final Bitmap bmp = BitmapFactory.decodeFile(img.getAbsolutePath());
-            if (bmp == null) return;
-            demoImageLoop = new Runnable() {
-                @Override public void run() {
-                    try {
-                        Surface s = demoSurface;
-                        if (s == null || !s.isValid()) return;
-                        Canvas c = s.lockCanvas(null);
-                        if (c != null) {
-                            Rect dst = new Rect(0, 0, c.getWidth(), c.getHeight());
-                            c.drawBitmap(bmp, null, dst, null);
-                            s.unlockCanvasAndPost(c);
-                        }
-                    } catch (Throwable t) {
-                        Log.w(TAG, "demo image loop", t);
-                    } finally {
-                        if (demoHandler != null) {
-                            demoHandler.postDelayed(this, 66L /* ~15fps */);
-                        }
+            // HookMain#process_callback. Decode off the UI thread and
+            // sample down to the TextureView size to avoid OOM / jank on
+            // large staged images.
+            final int maxSide = Math.max(
+                    Math.max(demoTexture.getWidth(), demoTexture.getHeight()),
+                    800);
+            final int requestedSync = syncRequestId;
+            ioExecutor.execute(() -> {
+                final Bitmap bmp = MediaPaths.decodeImageThumb(img, maxSide);
+                if (bmp == null) return;
+                runOnUiThread(() -> {
+                    if (isFinishing() || isDestroyed()) return;
+                    if (requestedSync != syncRequestId && demoSurface == null) return;
+                    startImageLoop(bmp);
+                });
+            });
+        }
+    }
+
+    private void startImageLoop(@NonNull Bitmap bmp) {
+        demoImageLoop = new Runnable() {
+            @Override public void run() {
+                try {
+                    Surface s = demoSurface;
+                    if (s == null || !s.isValid()) return;
+                    Canvas c = s.lockCanvas(null);
+                    if (c != null) {
+                        Rect dst = new Rect(0, 0, c.getWidth(), c.getHeight());
+                        c.drawBitmap(bmp, null, dst, null);
+                        s.unlockCanvasAndPost(c);
+                    }
+                } catch (Throwable t) {
+                    Log.w(TAG, "demo image loop", t);
+                } finally {
+                    if (demoHandler != null && demoImageLoop == this) {
+                        demoHandler.postDelayed(this, 66L /* ~15fps */);
                     }
                 }
-            };
-            demoHandler.post(demoImageLoop);
-        }
+            }
+        };
+        demoHandler.post(demoImageLoop);
     }
 
     private void stopDemo() {
@@ -300,6 +326,7 @@ public class MainActivity extends AppCompatActivity {
             demoImageLoop = null;
         }
         if (demoPlayer != null) {
+            try { demoPlayer.setOnPreparedListener(null); } catch (Throwable ignored) {}
             try { demoPlayer.stop(); } catch (Throwable ignored) {}
             demoPlayer.release();
             demoPlayer = null;

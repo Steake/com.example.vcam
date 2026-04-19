@@ -9,9 +9,12 @@ import android.graphics.BitmapFactory;
 import android.graphics.SurfaceTexture;
 import android.hardware.camera2.CameraAccessException;
 import android.hardware.camera2.CameraCaptureSession;
+import android.hardware.camera2.CameraCharacteristics;
 import android.hardware.camera2.CameraDevice;
 import android.hardware.camera2.CameraManager;
 import android.hardware.camera2.CaptureRequest;
+import android.hardware.camera2.params.StreamConfigurationMap;
+import android.graphics.ImageFormat;
 import android.media.Image;
 import android.media.ImageReader;
 import android.os.Bundle;
@@ -19,6 +22,7 @@ import android.os.Handler;
 import android.os.HandlerThread;
 import android.provider.MediaStore;
 import android.util.Log;
+import android.util.Size;
 import android.view.Surface;
 import android.view.TextureView;
 import android.view.View;
@@ -182,8 +186,10 @@ public class CameraVerifyActivity extends AppCompatActivity {
                 return;
             }
             cameraId = ids[0];
-            captureReader = ImageReader.newInstance(640, 480,
-                    android.graphics.ImageFormat.JPEG, 2);
+            Size jpegSize = pickJpegSize(mgr, cameraId);
+            captureReader = ImageReader.newInstance(
+                    jpegSize.getWidth(), jpegSize.getHeight(),
+                    ImageFormat.JPEG, 2);
             captureReader.setOnImageAvailableListener(this::onStillAvailable, cameraHandler);
             mgr.openCamera(cameraId, new CameraDevice.StateCallback() {
                 @Override public void onOpened(@NonNull CameraDevice camera) {
@@ -199,6 +205,37 @@ public class CameraVerifyActivity extends AppCompatActivity {
         } catch (CameraAccessException | SecurityException e) {
             Log.w(TAG, "openCamera failed", e);
         }
+    }
+
+    /**
+     * Choose a JPEG output size the camera actually supports. Hardcoding
+     * 640x480 trips devices whose camera doesn't list that exact size in
+     * its {@code SCALER_STREAM_CONFIGURATION_MAP}. We pick the smallest
+     * supported size at least ~720p or the largest smaller one, so the
+     * still capture round-trips cleanly without bloating the capture
+     * buffer.
+     */
+    @NonNull
+    private Size pickJpegSize(@NonNull CameraManager mgr, @NonNull String id)
+            throws CameraAccessException {
+        CameraCharacteristics ch = mgr.getCameraCharacteristics(id);
+        StreamConfigurationMap map = ch.get(
+                CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
+        Size fallback = new Size(640, 480);
+        if (map == null) return fallback;
+        Size[] sizes = map.getOutputSizes(ImageFormat.JPEG);
+        if (sizes == null || sizes.length == 0) return fallback;
+        Size best = null;
+        int targetArea = 1280 * 720;
+        int bestDelta = Integer.MAX_VALUE;
+        for (Size s : sizes) {
+            int delta = Math.abs(s.getWidth() * s.getHeight() - targetArea);
+            if (delta < bestDelta) {
+                bestDelta = delta;
+                best = s;
+            }
+        }
+        return best != null ? best : sizes[0];
     }
 
     private void createPreviewSession() {
