@@ -207,9 +207,7 @@ public class MediaLibraryActivity extends AppCompatActivity {
                 h.thumb.setImageBitmap(cached);
             } else {
                 h.thumb.setImageResource(android.R.drawable.ic_menu_gallery);
-                if (resStr == null || thumbExecutor != null) {
-                    loadThumbAsync(e, f, h, resKey, thumbKey);
-                }
+                loadThumbAsync(e, f, h, resKey, thumbKey);
             }
 
             h.itemView.setOnClickListener(v -> {

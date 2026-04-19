@@ -253,7 +253,7 @@ public class MainActivity extends AppCompatActivity {
                     new android.widget.FrameLayout.LayoutParams(
                             android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
                             android.widget.FrameLayout.LayoutParams.MATCH_PARENT));
-        } catch (Throwable t) {
+        } catch (Exception t) {
             Log.w(TAG, "TextureView unavailable, disabling live demo preview", t);
             demoTexture = null;
         }
