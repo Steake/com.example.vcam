@@ -126,8 +126,17 @@ if [[ "$verify_name" != "$NEW_VERSION" || "$verify_code" != "$new_code" ]]; then
     exit 1
 fi
 
-git -C "$repo_root" add app/build.gradle
-git -C "$repo_root" commit -m "chore: bump version to v$NEW_VERSION"
+# Refuse to run if the user has unrelated changes already staged, so the
+# version-bump commit stays pure.
+if ! git -C "$repo_root" diff --cached --quiet; then
+    echo "error: you have staged changes; commit or reset them before running bumpversion.sh" >&2
+    exit 1
+fi
+
+git -C "$repo_root" add -- app/build.gradle
+# Pathspec-limited commit: only include app/build.gradle even if something
+# else sneaks into the index between the check above and now.
+git -C "$repo_root" commit -m "chore: bump version to v$NEW_VERSION" -- app/build.gradle
 
 if [[ $CREATE_TAG -eq 1 ]]; then
     tag="v$NEW_VERSION"

@@ -158,20 +158,31 @@ public class MediaProvider extends ContentProvider {
         if (ctx == null) return;
         int callingUid = Binder.getCallingUid();
         if (callingUid == android.os.Process.myUid()) return;
-        if (ctx.getPackageManager().checkPermission(
-                android.Manifest.permission.CAMERA,
-                firstPackageForUid(ctx, callingUid))
-                != PackageManager.PERMISSION_GRANTED) {
+        // Check CAMERA at the UID level. Iterating every package mapped to
+        // the UID handles shared-UID scenarios (e.g. system apps, vendor
+        // bundles) where firstPackageForUid() could pick a sibling that
+        // happens not to declare CAMERA even though another package in the
+        // same UID does — which would produce false denials.
+        String[] pkgs = ctx.getPackageManager().getPackagesForUid(callingUid);
+        boolean granted = false;
+        if (pkgs != null) {
+            for (String pkg : pkgs) {
+                if (ctx.getPackageManager().checkPermission(
+                        android.Manifest.permission.CAMERA, pkg)
+                        == PackageManager.PERMISSION_GRANTED) {
+                    granted = true;
+                    break;
+                }
+            }
+        }
+        if (!granted) {
             throw new FileNotFoundException("Caller uid=" + callingUid
                     + " lacks CAMERA permission — staged media not shared.");
         }
     }
 
-    @NonNull
-    private static String firstPackageForUid(@NonNull Context ctx, int uid) {
-        String[] pkgs = ctx.getPackageManager().getPackagesForUid(uid);
-        return (pkgs != null && pkgs.length > 0) ? pkgs[0] : "";
-    }
+    // (firstPackageForUid was the old single-package lookup; superseded by
+    // the UID-aware loop in enforceCallerIsCameraApp above.)
 
     @Nullable
     @Override

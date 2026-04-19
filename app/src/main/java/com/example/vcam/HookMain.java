@@ -51,12 +51,15 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
+import android.app.AndroidAppHelper;
 
 public class HookMain implements IXposedHookLoadPackage {
     public static Surface mSurface;
@@ -137,6 +140,20 @@ public class HookMain implements IXposedHookLoadPackage {
      */
     private static volatile String lastStagedKey = null;
     private static volatile boolean mappingReceiverRegistered = false;
+
+    /**
+     * Shared single-threaded executor for provider-backed staging work.
+     * Using one long-lived executor avoids the per-camera-open thread churn
+     * that raw {@code new Thread(...)} created — some host apps open and
+     * close the camera rapidly (e.g. pinch-to-zoom facing swaps), and we
+     * don't want to spin up a fresh OS thread each time.
+     */
+    private static final ExecutorService stagingExecutor =
+            Executors.newSingleThreadExecutor(r -> {
+                Thread t = new Thread(r, "vcam-stage");
+                t.setDaemon(true);
+                return t;
+            });
 
     /**
      * Permissions that are spoofed as {@code PERMISSION_GRANTED} inside every
@@ -483,10 +500,12 @@ public class HookMain implements IXposedHookLoadPackage {
                             File publicDir = new File(Environment.getExternalStorageDirectory().getPath() + "/DCIM/Camera1/");
                             if (!publicDir.exists()) publicDir.mkdirs();
                             File probe = new File(publicDir, ".vcam_write_probe");
-                            FileOutputStream probeFos = new FileOutputStream(probe);
-                            probeFos.write(0);
-                            probeFos.flush();
-                            probeFos.close();
+                            // try-with-resources: guarantees the FD is
+                            // closed even if write() / flush() throws.
+                            try (FileOutputStream probeFos = new FileOutputStream(probe)) {
+                                probeFos.write(0);
+                                probeFos.flush();
+                            }
                             canUsePublicDcim = probe.exists() && probe.length() > 0;
                             //noinspection ResultOfMethodCallIgnored
                             probe.delete();
@@ -550,7 +569,7 @@ public class HookMain implements IXposedHookLoadPackage {
                     if (!hasAnyMedia() && toast_content != null) {
                         final Context appContext = toast_content;
                         final String hostPkg = lpparam.packageName;
-                        new Thread(new Runnable() {
+                        stagingExecutor.execute(new Runnable() {
                             @Override public void run() {
                                 try {
                                     maybeRestage(appContext, hostPkg, currentFacing);
@@ -558,7 +577,7 @@ public class HookMain implements IXposedHookLoadPackage {
                                     XposedBridge.log("[VCAM][stage] " + t);
                                 }
                             }
-                        }, "vcam-stage-provider").start();
+                        });
                     }
                     // Register a broadcast receiver — clears the per-(pkg,facing)
                     // stage cache so the next camera-open re-queries the
@@ -1766,18 +1785,40 @@ public class HookMain implements IXposedHookLoadPackage {
      * tuple. Deduped per camera-open cycle.
      */
     private void restageForHost(final String hostPkg) {
-        final Context ctx = toast_content;
+        // toast_content is set in Instrumentation.callApplicationOnCreate's
+        // afterHookedMethod — which fires *after* Application.onCreate()
+        // returns. Hosts that open the camera during their own
+        // Application.onCreate() would otherwise see ctx==null here and
+        // skip staging, producing an initial black frame. Fall back to
+        // AndroidAppHelper.currentApplication() which resolves via the
+        // ActivityThread and is available from the first moment the host
+        // process has an Application instance.
+        Context ctx = toast_content;
+        if (ctx == null) {
+            try {
+                android.app.Application app = AndroidAppHelper.currentApplication();
+                if (app != null) {
+                    // Don't backfill toast_content here — the Instrumentation
+                    // hook is the single writer and will populate it shortly.
+                    // We only need a local Context for this call.
+                    ctx = app.getApplicationContext();
+                }
+            } catch (Exception e) {
+                XposedBridge.log("[VCAM][stage] currentApplication fallback: " + e);
+            }
+        }
         if (ctx == null || hostPkg == null) return;
+        final Context ctxFinal = ctx;
         final String facing = currentFacing;
-        new Thread(new Runnable() {
+        stagingExecutor.execute(new Runnable() {
             @Override public void run() {
                 try {
-                    maybeRestage(ctx, hostPkg, facing);
+                    maybeRestage(ctxFinal, hostPkg, facing);
                 } catch (Throwable t) {
                     XposedBridge.log("[VCAM][stage] " + t);
                 }
             }
-        }, "vcam-stage-facing").start();
+        });
     }
 
     /**

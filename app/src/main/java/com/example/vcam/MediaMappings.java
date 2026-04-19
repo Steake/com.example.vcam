@@ -179,6 +179,11 @@ public final class MediaMappings {
      */
     public static void setOne(@NonNull Context ctx, @NonNull String pkg, @NonNull String facing,
                               @NonNull String type, @Nullable String uri) {
+        // Match resolve()'s validation: refuse unknown types rather than
+        // silently routing an unexpected value to the video slot.
+        if (!TYPE_IMAGE.equals(type) && !TYPE_VIDEO.equals(type)) {
+            return;
+        }
         Mapping cur = get(ctx, pkg, facing);
         String img = cur == null ? null : cur.imageUri;
         String vid = cur == null ? null : cur.videoUri;

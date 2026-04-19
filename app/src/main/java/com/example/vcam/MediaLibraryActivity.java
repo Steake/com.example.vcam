@@ -210,11 +210,19 @@ public class MediaLibraryActivity extends AppCompatActivity {
                 loadThumbAsync(e, f, h, resKey, thumbKey);
             }
 
-            h.itemView.setOnClickListener(v -> {
-                if (isPickMode()) pickResult(e);
-            });
-            h.btnDelete.setVisibility(isPickMode() ? View.GONE : View.VISIBLE);
-            h.btnSetDefault.setVisibility(isPickMode() ? View.GONE : View.VISIBLE);
+            boolean pick = isPickMode();
+            // Only enable row-level clickability in pick mode; in browse mode
+            // the row click is a no-op, so keep the card inert and avoid
+            // surfacing an unusable touch target / ripple to TalkBack users.
+            h.itemView.setClickable(pick);
+            h.itemView.setFocusable(pick);
+            if (pick) {
+                h.itemView.setOnClickListener(v -> pickResult(e));
+            } else {
+                h.itemView.setOnClickListener(null);
+            }
+            h.btnDelete.setVisibility(pick ? View.GONE : View.VISIBLE);
+            h.btnSetDefault.setVisibility(pick ? View.GONE : View.VISIBLE);
             h.btnDelete.setOnClickListener(v -> confirmDelete(e));
             h.btnSetDefault.setOnClickListener(v -> setAsDefault(e));
         }

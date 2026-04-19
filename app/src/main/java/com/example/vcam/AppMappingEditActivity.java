@@ -143,17 +143,18 @@ public class AppMappingEditActivity extends AppCompatActivity {
 
     private void toggleMode(boolean same) {
         if (same) {
-            // Collapse: merge current back/front into any (prefer back values
-            // if both facings are populated — arbitrary but deterministic).
+            // Collapse: merge current back/front into any. Prefer back
+            // values over front; fall back to a pre-existing any value only
+            // when neither per-facing slot is populated.
             MediaMappings.Mapping back = MediaMappings.get(this, pkg, MediaMappings.FACING_BACK);
             MediaMappings.Mapping front = MediaMappings.get(this, pkg, MediaMappings.FACING_FRONT);
             MediaMappings.Mapping any = MediaMappings.get(this, pkg, MediaMappings.FACING_ANY);
-            String imgUri = pick(any == null ? null : any.imageUri,
-                    back == null ? null : back.imageUri,
-                    front == null ? null : front.imageUri);
-            String vidUri = pick(any == null ? null : any.videoUri,
-                    back == null ? null : back.videoUri,
-                    front == null ? null : front.videoUri);
+            String imgUri = pick(back == null ? null : back.imageUri,
+                    front == null ? null : front.imageUri,
+                    any == null ? null : any.imageUri);
+            String vidUri = pick(back == null ? null : back.videoUri,
+                    front == null ? null : front.videoUri,
+                    any == null ? null : any.videoUri);
             MediaMappings.clear(this, pkg, MediaMappings.FACING_BACK);
             MediaMappings.clear(this, pkg, MediaMappings.FACING_FRONT);
             if (imgUri != null || vidUri != null) {
