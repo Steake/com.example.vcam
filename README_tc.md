@@ -33,7 +33,7 @@ VCAM 是一個典型的 Xposed 模組。在具備可用框架（LSPosed、EdXpos
 | 預覽用**影片** | `/[內部儲存]/DCIM/Camera1/virtual.mp4` | 解析度需符合目標 App 首次開啟時 Toast 顯示的數值。 |
 | 拍照用**靜態圖片** | `/[內部儲存]/DCIM/Camera1/1000.bmp` | 副檔名僅為約定，任何 BitmapFactory 可解碼的圖片改名 `.bmp` 皆可。 |
 
-旁邊還有若干「標記檔」開關：`disable.jpg`、`force_show.jpg`、`no-silent.jpg`、`private_dir.jpg`、`no_toast.jpg`。掛鉤只關心它們**是否存在**，並不讀內容。4.5 版的 UI 會替你建立／刪除；懷舊派繼續用 `touch` 完全合法。
+旁邊還有若干「標記檔」開關：`disable.jpg`、`force_show.jpg`、`no-silent.jpg`、`private_dir.jpg`、`no_toast.jpg`。掛鉤只關心它們**是否存在**，並不讀內容。UI 會替你建立／刪除；懷舊派繼續用 `touch` 完全合法。
 
 ### 與其囉嗦，不如作圖
 
@@ -91,7 +91,7 @@ flowchart LR
 
 ## 3. 第二階段改了什麼
 
-第一階段（issue #1）將專案遷為英文預設、中文鏡像的字串目錄。第二階段（本次 `4.5` 發布）是配套 App 的全面整修。掛鉤本身未動。
+第一階段（issue #1）將專案遷為英文預設、中文鏡像的字串目錄。第二階段（本次 `4.8` 發布）是配套 App 的全面整修。掛鉤本身未動。
 
 - **Material 3 UI**：`Theme.Material3.DayNight`；Android 12+ 啟用動態取色；`MaterialToolbar + CoordinatorLayout + MaterialCardView` 把介面分為「狀態」「來源媒體」「進階」三張卡；全面採用 `MaterialButton` / `MaterialSwitch`；淺色／深色跟隨系統。
 - **圖片／影片選取器**：以 `ActivityResultContracts.GetContent` 為基礎，Android 13+ 會自動走系統 Photo Picker。現代 Android 上不再粗暴索取 `READ_EXTERNAL_STORAGE`。所選 URI 以串流方式寫入掛鉤期望的目標檔；上次選擇的 URI 寫入 `SharedPreferences`。
