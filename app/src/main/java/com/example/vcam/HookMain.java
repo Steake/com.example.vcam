@@ -260,20 +260,39 @@ public class HookMain implements IXposedHookLoadPackage {
 
         // Camera1: Camera.open(int) — detect facing from the camera id so
         // the per-(pkg,facing) mapping resolution knows which media to stage.
-        // The no-arg Camera.open() overload defaults the id to 0 which is
-        // the back camera on virtually every device, so the default
-        // {@link #currentFacing} of "back" is already correct there.
+        // Stage synchronously here so hasAnyMedia() gates further down the
+        // pipeline (setPreviewTexture, startPreview) see a populated
+        // {@link #video_path} on the very first camera-open. maybeRestage
+        // dedupes via lastStagedKey, so this costs one file copy per
+        // (pkg,facing) per process.
         try {
             XposedHelpers.findAndHookMethod("android.hardware.Camera", lpparam.classLoader,
                     "open", int.class, new XC_MethodHook() {
                         @Override
                         protected void beforeHookedMethod(MethodHookParam param) {
                             detectFacingCamera1(param);
-                            restageForHost(lpparam.packageName);
+                            ensureStagedNow(lpparam.packageName);
                         }
                     });
         } catch (Throwable t) {
             XposedBridge.log("[VCAM][facing] Camera.open(int) hook failed: " + t);
+        }
+
+        // Camera1: Camera.open() no-arg — defaults to camera id 0 (back on
+        // virtually every device). Explicitly reset currentFacing to "back"
+        // so a stale "front" value from a prior open(int) call in the same
+        // process doesn't resolve the wrong (pkg,facing) mapping.
+        try {
+            XposedHelpers.findAndHookMethod("android.hardware.Camera", lpparam.classLoader,
+                    "open", new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+                            currentFacing = MediaMappings.FACING_BACK;
+                            ensureStagedNow(lpparam.packageName);
+                        }
+                    });
+        } catch (Throwable t) {
+            XposedBridge.log("[VCAM][facing] Camera.open() hook failed: " + t);
         }
 
         XposedHelpers.findAndHookMethod("android.hardware.Camera", lpparam.classLoader, "setPreviewTexture", SurfaceTexture.class, new XC_MethodHook() {
@@ -332,7 +351,7 @@ public class HookMain implements IXposedHookLoadPackage {
             @Override
             protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
                 detectFacingCamera2(param);
-                restageForHost(lpparam.packageName);
+                ensureStagedNow(lpparam.packageName);
                 if (param.args[1] == null) {
                     return;
                 }
@@ -370,7 +389,7 @@ public class HookMain implements IXposedHookLoadPackage {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                     detectFacingCamera2(param);
-                    restageForHost(lpparam.packageName);
+                    ensureStagedNow(lpparam.packageName);
                     if (param.args[2] == null) {
                         return;
                     }
@@ -1779,46 +1798,46 @@ public class HookMain implements IXposedHookLoadPackage {
     }
 
     /**
-     * Invoked from every camera-open hook. Kicks the stage-from-provider
-     * flow on a background thread so the next preview / still-capture
-     * picks up the correct media for the current {@code (host, facing)}
-     * tuple. Deduped per camera-open cycle.
+     * Synchronously stage media for the current host on the caller thread
+     * so the gates that follow in the same {@code beforeHookedMethod}
+     * (e.g. {@link #hasAnyMedia()}) see the populated {@link #video_path}
+     * on the very first camera-open in a host process. {@link #maybeRestage}
+     * is deduped via {@link #lastStagedKey}, so subsequent opens for the
+     * same {@code (pkg, facing)} tuple return immediately.
+     *
+     * <p>A prior fire-and-forget background-thread variant raced these
+     * gate checks. That race was harmless when {@code video_path} still
+     * pointed at the manager-populated public {@code /DCIM/Camera1/}, but
+     * on API 30+ the probe-based fallback forces a host-private directory
+     * that starts empty, so the gate would fail and the hook would bail
+     * out before staging completed — leaving the host showing its real
+     * camera feed.
+     *
+     * <p>{@code toast_content} is set in
+     * {@code Instrumentation.callApplicationOnCreate}'s afterHookedMethod,
+     * which fires after {@code Application.onCreate()} returns. Hosts
+     * that open the camera during their own {@code Application.onCreate()}
+     * would otherwise see {@code ctx==null} and skip staging; fall back to
+     * {@link AndroidAppHelper#currentApplication()} which resolves via the
+     * ActivityThread and is available from the first moment the host has
+     * an Application instance.
      */
-    private void restageForHost(final String hostPkg) {
-        // toast_content is set in Instrumentation.callApplicationOnCreate's
-        // afterHookedMethod — which fires *after* Application.onCreate()
-        // returns. Hosts that open the camera during their own
-        // Application.onCreate() would otherwise see ctx==null here and
-        // skip staging, producing an initial black frame. Fall back to
-        // AndroidAppHelper.currentApplication() which resolves via the
-        // ActivityThread and is available from the first moment the host
-        // process has an Application instance.
+    private void ensureStagedNow(String hostPkg) {
         Context ctx = toast_content;
         if (ctx == null) {
             try {
                 android.app.Application app = AndroidAppHelper.currentApplication();
-                if (app != null) {
-                    // Don't backfill toast_content here — the Instrumentation
-                    // hook is the single writer and will populate it shortly.
-                    // We only need a local Context for this call.
-                    ctx = app.getApplicationContext();
-                }
+                if (app != null) ctx = app.getApplicationContext();
             } catch (Exception e) {
-                XposedBridge.log("[VCAM][stage] currentApplication fallback: " + e);
+                XposedBridge.log("[VCAM][stage-sync] currentApplication: " + e);
             }
         }
         if (ctx == null || hostPkg == null) return;
-        final Context ctxFinal = ctx;
-        final String facing = currentFacing;
-        stagingExecutor.execute(new Runnable() {
-            @Override public void run() {
-                try {
-                    maybeRestage(ctxFinal, hostPkg, facing);
-                } catch (Throwable t) {
-                    XposedBridge.log("[VCAM][stage] " + t);
-                }
-            }
-        });
+        try {
+            maybeRestage(ctx, hostPkg, currentFacing);
+        } catch (Throwable t) {
+            XposedBridge.log("[VCAM][stage-sync] " + t);
+        }
     }
 
     /**
@@ -1826,23 +1845,33 @@ public class HookMain implements IXposedHookLoadPackage {
      * staged the same tuple in this process. Always writes to the legacy
      * {@link #video_path} filenames so the existing File-based hook
      * pipeline picks them up unchanged.
+     *
+     * <p>Only updates {@link #lastStagedKey} when staging actually wrote
+     * at least one file. This prevents a failed early stage (e.g. when
+     * {@link #video_path} hasn't been switched to host-private yet and
+     * the default public path is unwritable on API 30+) from poisoning
+     * the dedupe key and blocking a later successful restage after
+     * {@code callApplicationOnCreate} resolves the correct path.
      */
     private static synchronized void maybeRestage(Context ctx, String pkg, String facing) {
         if (ctx == null) return;
         String key = pkg + "|" + facing;
         if (key.equals(lastStagedKey)) return;
-        stageFromProviderFor(ctx, pkg, facing);
-        lastStagedKey = key;
+        boolean wrote = stageFromProviderFor(ctx, pkg, facing);
+        if (wrote) {
+            lastStagedKey = key;
+        }
     }
 
     /**
      * Query {@code content://com.example.vcam/resolve?pkg=&facing=&type=}
      * for both image and video, and copy whatever bytes the manager returns
-     * into the host's staging files. Silent on failure — we retain the
-     * previously-staged content and let the legacy DCIM fallback apply.
+     * into the host's staging files. Returns {@code true} if at least one
+     * file was successfully written; {@code false} on total failure so the
+     * caller can avoid poisoning the dedupe key.
      */
-    private static void stageFromProviderFor(Context ctx, String pkg, String facing) {
-        if (ctx == null) return;
+    private static boolean stageFromProviderFor(Context ctx, String pkg, String facing) {
+        if (ctx == null) return false;
         try {
             File dir = new File(video_path);
             if (!dir.exists()) {
@@ -1857,8 +1886,9 @@ public class HookMain implements IXposedHookLoadPackage {
         // image/video in the manager but never configured mappings.
         if (imgUri == null) imgUri = "content://com.example.vcam/image";
         if (vidUri == null) vidUri = "content://com.example.vcam/video";
-        copyProviderUri(ctx, Uri.parse(imgUri), new File(video_path + "1000.bmp"));
-        copyProviderUri(ctx, Uri.parse(vidUri), new File(video_path + "virtual.mp4"));
+        boolean imgOk = copyProviderUri(ctx, Uri.parse(imgUri), new File(video_path + "1000.bmp"));
+        boolean vidOk = copyProviderUri(ctx, Uri.parse(vidUri), new File(video_path + "virtual.mp4"));
+        return imgOk || vidOk;
     }
 
     private static String queryResolve(Context ctx, String pkg, String facing, String type) {
@@ -1885,12 +1915,12 @@ public class HookMain implements IXposedHookLoadPackage {
         return null;
     }
 
-    private static void copyProviderUri(Context ctx, Uri src, File dst) {
+    private static boolean copyProviderUri(Context ctx, Uri src, File dst) {
         InputStream in = null;
         OutputStream out = null;
         try {
             in = ctx.getContentResolver().openInputStream(src);
-            if (in == null) return;
+            if (in == null) return false;
             File tmp = new File(dst.getAbsolutePath() + ".tmp");
             out = new FileOutputStream(tmp);
             byte[] buf = new byte[64 * 1024];
@@ -1908,12 +1938,15 @@ public class HookMain implements IXposedHookLoadPackage {
                 tmp.renameTo(dst);
                 XposedBridge.log("[VCAM][provider] staged " + dst.getAbsolutePath()
                         + " (" + total + " bytes) from " + src);
+                return true;
             } else {
                 //noinspection ResultOfMethodCallIgnored
                 tmp.delete();
+                return false;
             }
         } catch (Throwable t) {
             // Keep previous staged content on failure.
+            return false;
         } finally {
             if (in != null) try { in.close(); } catch (IOException ignored) {}
             if (out != null) try { out.close(); } catch (IOException ignored) {}
