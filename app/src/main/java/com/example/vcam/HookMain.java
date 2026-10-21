@@ -675,6 +675,11 @@ public class HookMain implements IXposedHookLoadPackage {
             VirtualAudioFeeder.installHooks();
         }
 
+        // Install Anti-Detection Callstack & Reflection Cloaking hooks
+        if (!isSelfManager) {
+            installAntiDetectionHooks(lpparam.classLoader);
+        }
+
         // Install ImageReader surface dimension/format tracking & CPU fallback hooks (Bypass Vector #3 & #4)
         installImageReaderHooks(lpparam.classLoader);
 
@@ -721,12 +726,87 @@ public class HookMain implements IXposedHookLoadPackage {
     }
 
     // ---------------------------------------------------------------------
+    // Evasion & Anti-Detection Hooks (Callstack & Reflection Cloaking)
+    // ---------------------------------------------------------------------
+    private void installAntiDetectionHooks(ClassLoader classLoader) {
+        XC_MethodHook stackFilterHook = new XC_MethodHook() {
+            @Override
+            protected void afterHookedMethod(MethodHookParam param) {
+                Object res = param.getResult();
+                if (res instanceof StackTraceElement[]) {
+                    param.setResult(filterStackTrace((StackTraceElement[]) res));
+                }
+            }
+        };
+
+        try {
+            XposedHelpers.findAndHookMethod(Thread.class, "getStackTrace", stackFilterHook);
+        } catch (Throwable ignored) {}
+
+        try {
+            XposedHelpers.findAndHookMethod(Throwable.class, "getStackTrace", stackFilterHook);
+        } catch (Throwable ignored) {}
+
+        try {
+            XposedHelpers.findAndHookMethod(java.lang.reflect.Method.class, "getModifiers", new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    if (param.thisObject instanceof java.lang.reflect.Method) {
+                        java.lang.reflect.Method m = (java.lang.reflect.Method) param.thisObject;
+                        Class<?> declaring = m.getDeclaringClass();
+                        if (declaring != null) {
+                            String name = declaring.getName();
+                            if (name.startsWith("android.hardware.") || name.startsWith("android.media.ImageReader")) {
+                                int mod = (int) param.getResult();
+                                String mName = m.getName();
+                                if (java.lang.reflect.Modifier.isNative(mod) && !isNaturallyNativeMethod(mName)) {
+                                    param.setResult(mod & ~java.lang.reflect.Modifier.NATIVE);
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        } catch (Throwable ignored) {}
+    }
+
+    private static StackTraceElement[] filterStackTrace(StackTraceElement[] orig) {
+        if (orig == null || orig.length == 0) return orig;
+        List<StackTraceElement> cleaned = new ArrayList<>(orig.length);
+        for (StackTraceElement elem : orig) {
+            String cn = elem.getClassName();
+            if (cn != null && (cn.contains("xposed") || cn.contains("lspd")
+                    || cn.contains("com.example.vcam") || cn.contains("sandhook")
+                    || cn.contains("edxposed"))) {
+                continue;
+            }
+            cleaned.add(elem);
+        }
+        return cleaned.toArray(new StackTraceElement[0]);
+    }
+
+    private static boolean isNaturallyNativeMethod(String methodName) {
+        return methodName != null && (methodName.startsWith("native_")
+                || "native_setup".equals(methodName) || "native_init".equals(methodName)
+                || "native_release".equals(methodName));
+    }
+
+    // ---------------------------------------------------------------------
     // ImageReader Hooks (Exact Surface Dimensions, Formats & CPU Fallback)
     // ---------------------------------------------------------------------
     private void installImageReaderHooks(ClassLoader classLoader) {
         try {
             XposedHelpers.findAndHookMethod(ImageReader.class, "newInstance",
                     int.class, int.class, int.class, int.class, new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+                            // Evasion bypass: coerce ImageFormat.PRIVATE (0x22) to YUV_420_888 (0x23)
+                            // so ImageWriter and CPU planes can access and feed frames without GPU vendor rejection
+                            if ((int) param.args[2] == 0x22) {
+                                param.args[2] = ImageFormat.YUV_420_888;
+                            }
+                        }
+
                         @Override
                         protected void afterHookedMethod(MethodHookParam param) {
                             int w = (int) param.args[0];
@@ -750,6 +830,13 @@ public class HookMain implements IXposedHookLoadPackage {
                 XposedHelpers.findAndHookMethod(ImageReader.class, "newInstance",
                         int.class, int.class, int.class, int.class, long.class, new XC_MethodHook() {
                             @Override
+                            protected void beforeHookedMethod(MethodHookParam param) {
+                                if ((int) param.args[2] == 0x22) {
+                                    param.args[2] = ImageFormat.YUV_420_888;
+                                }
+                            }
+
+                            @Override
                             protected void afterHookedMethod(MethodHookParam param) {
                                 int w = (int) param.args[0];
                                 int h = (int) param.args[1];
@@ -768,6 +855,18 @@ public class HookMain implements IXposedHookLoadPackage {
         }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            try {
+                XposedHelpers.findAndHookMethod(ImageReader.Builder.class, "setImageFormat", int.class, new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        if ((int) param.args[0] == 0x22) {
+                            param.args[0] = ImageFormat.YUV_420_888;
+                        }
+                    }
+                });
+            } catch (Throwable ignored) {
+            }
+
             try {
                 XposedHelpers.findAndHookMethod(ImageReader.Builder.class, "build", new XC_MethodHook() {
                     @Override
@@ -1065,6 +1164,7 @@ public class HookMain implements IXposedHookLoadPackage {
                         cameraSessionActive = true;
                         InAppOverlayManager.onCameraSessionActive(true);
                         maybePostInAppNotification(toast_content, lpparam.packageName);
+                        showInjectedHookToast("Camera1", mwidth, mhight);
                         startCamera1PreviewFeed(start_preview_camera);
                     }
                 });
@@ -1457,9 +1557,12 @@ public class HookMain implements IXposedHookLoadPackage {
                     @Override
                     protected void beforeHookedMethod(MethodHookParam param) {
                         if (!isInjectionActive() || !hasAnyMedia()) return;
-                        // Clear physical camera ID when virtual surface replaces logical session outputs
-                        if (param.args.length > 0) {
-                            param.args[0] = null;
+                        // Only clear physical camera ID when virtual surface replaces logical session outputs
+                        if (param.args.length > 0 && param.thisObject instanceof OutputConfiguration) {
+                            OutputConfiguration oc = (OutputConfiguration) param.thisObject;
+                            if (oc.getSurface() == c2_virtual_surface) {
+                                param.args[0] = null;
+                            }
                         }
                     }
                 });
@@ -1518,6 +1621,7 @@ public class HookMain implements IXposedHookLoadPackage {
                 cameraSessionActive = true;
                 InAppOverlayManager.onCameraSessionActive(true);
                 maybePostInAppNotification(toast_content, currentHostPackage);
+                showInjectedHookToast("Camera2", c2_ori_width, c2_ori_height);
 
                 Object cameraDeviceObj = param.args[0];
                 if (cameraDeviceObj == null) {
@@ -2122,6 +2226,31 @@ public class HookMain implements IXposedHookLoadPackage {
                         Toast.LENGTH_SHORT).show();
             } catch (Throwable ignored) {
             }
+        }
+    }
+
+    private static volatile long lastHookToastTime = 0L;
+
+    private void showInjectedHookToast(String camType, int width, int height) {
+        long now = System.currentTimeMillis();
+        if (now - lastHookToastTime < 4000L) {
+            return;
+        }
+        lastHookToastTime = now;
+        File toastControl = new File(Environment.getExternalStorageDirectory().getPath()
+                + "/DCIM/Camera1/no_toast.jpg");
+        need_to_show_toast = cfgToastEnabled && !toastControl.exists();
+        Context ctx = toast_content != null ? toast_content : resolveHostContext();
+        if (ctx != null && need_to_show_toast) {
+            new Handler(Looper.getMainLooper()).post(() -> {
+                try {
+                    String facing = currentFacing != null ? currentFacing : "back";
+                    String res = (width > 0 && height > 0) ? (width + "x" + height) : "";
+                    String msg = "[VCAM] Injected: " + camType + " (" + facing + ") " + res;
+                    Toast.makeText(ctx, msg.trim(), Toast.LENGTH_SHORT).show();
+                } catch (Throwable ignored) {
+                }
+            });
         }
     }
 

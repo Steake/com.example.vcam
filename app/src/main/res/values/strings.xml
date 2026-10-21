@@ -143,4 +143,34 @@
     <string name="injected_facing_front">front</string>
     <string name="injected_facing_any">unknown</string>
     <string name="injected_effective_format">Effective image: %1$s · video: %2$s</string>
+
+    <!-- Subsystem menu items -->
+    <string name="menu_verify_camera">Verify with camera</string>
+    <string name="menu_global_defaults">Global defaults</string>
+    <string name="menu_diagnostics">System diagnostics</string>
+    <string name="menu_reset_all">Reset &amp; clear cache</string>
+    <string name="menu_repo">GitHub repository</string>
+
+    <string name="reset_all_confirm_title">Reset VCAM?</string>
+    <string name="reset_all_confirm_body">This will clear all staged media, per-app mappings, and custom paths. Continue?</string>
+    <string name="reset_all_done">VCAM reset completed</string>
+
+    <!-- Toggle toast notifications -->
+    <string name="toast_loop_enabled">Video loop enabled</string>
+    <string name="toast_loop_disabled">Video loop disabled</string>
+    <string name="toast_mute_enabled">Video audio muted</string>
+    <string name="toast_mute_disabled">Video audio unmuted</string>
+    <string name="toast_hud_enabled">In-app HUD enabled</string>
+    <string name="toast_hud_disabled">In-app HUD disabled</string>
+    <string name="toast_sensor_grain_enabled">Sensor grain enabled (KYC noise mode)</string>
+    <string name="toast_sensor_grain_disabled">Sensor grain disabled</string>
+    <string name="toast_metadata_patch_enabled">EXIF &amp; metadata patcher enabled</string>
+    <string name="toast_metadata_patch_disabled">EXIF &amp; metadata patcher disabled</string>
+    <string name="toast_passthrough_enabled">Real camera pass-through enabled</string>
+    <string name="toast_passthrough_disabled">Virtual camera replacement active</string>
+    <string name="toast_virtual_mic_enabled">Virtual mic enabled</string>
+    <string name="toast_virtual_mic_disabled">Virtual mic disabled</string>
+    <string name="toast_intercept_intents_enabled">External camera capture interception enabled</string>
+    <string name="toast_intercept_intents_disabled">External camera capture interception disabled</string>
+    <string name="toast_anti_detection_enabled">Anti-detection callstack &amp; reflection cloaking active</string>
 </resources>

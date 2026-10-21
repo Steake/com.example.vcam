@@ -19,6 +19,8 @@ import android.provider.MediaStore;
 import android.provider.Settings;
 import android.text.TextUtils;
 import android.util.Log;
+import android.view.Menu;
+import android.view.MenuItem;
 import android.view.Surface;
 import android.view.TextureView;
 import android.view.View;
@@ -109,17 +111,6 @@ public class MainActivity extends AppCompatActivity {
 
         MaterialToolbar toolbar = findViewById(R.id.toolbar);
         setSupportActionBar(toolbar);
-        toolbar.setOnMenuItemClickListener(item -> {
-            int id = item.getItemId();
-            if (id == R.id.action_onboarding) {
-                startActivity(new Intent(this, OnboardingActivity.class));
-                return true;
-            } else if (id == R.id.action_injected_ui) {
-                startActivity(new Intent(this, InjectedConfigActivity.class));
-                return true;
-            }
-            return false;
-        });
 
         // Switches
         force_show_switch = findViewById(R.id.switch1);
@@ -162,6 +153,7 @@ public class MainActivity extends AppCompatActivity {
         loopSwitch.setOnCheckedChangeListener((b, c) -> {
             prefs.edit().putBoolean(VCAMApp.KEY_LOOP_VIDEO, c).apply();
             MediaMappings.notifyUpdated(this);
+            Toast.makeText(this, c ? R.string.toast_loop_enabled : R.string.toast_loop_disabled, Toast.LENGTH_SHORT).show();
         });
         muteSwitch.setOnCheckedChangeListener((b, c) -> {
             prefs.edit().putBoolean(VCAMApp.KEY_MUTE_VIDEO, c).apply();
@@ -174,6 +166,7 @@ public class MainActivity extends AppCompatActivity {
                 } catch (Throwable ignored) {}
             }
             MediaMappings.notifyUpdated(this);
+            Toast.makeText(this, c ? R.string.toast_mute_enabled : R.string.toast_mute_disabled, Toast.LENGTH_SHORT).show();
         });
 
         wireTransformAndSourceStudio();
@@ -265,6 +258,90 @@ public class MainActivity extends AppCompatActivity {
     protected void onPause() {
         super.onPause();
         stopDemo();
+    }
+
+    @Override
+    public boolean onCreateOptionsMenu(Menu menu) {
+        getMenuInflater().inflate(R.menu.main_menu, menu);
+        return true;
+    }
+
+    @Override
+    public boolean onOptionsItemSelected(@NonNull MenuItem item) {
+        int id = item.getItemId();
+        if (id == R.id.action_verify_camera) {
+            launchVerifier();
+            return true;
+        } else if (id == R.id.action_media_library) {
+            startActivity(new Intent(this, MediaLibraryActivity.class));
+            return true;
+        } else if (id == R.id.action_per_app_mapping) {
+            startActivity(new Intent(this, PerAppMappingActivity.class));
+            return true;
+        } else if (id == R.id.action_global_defaults) {
+            Intent i = new Intent(this, AppMappingEditActivity.class);
+            i.putExtra(AppMappingEditActivity.EXTRA_PKG, MediaMappings.PKG_GLOBAL);
+            startActivity(i);
+            return true;
+        } else if (id == R.id.action_injected_ui) {
+            startActivity(new Intent(this, InjectedConfigActivity.class));
+            return true;
+        } else if (id == R.id.action_diagnostics) {
+            showDiagnosticsDialog();
+            return true;
+        } else if (id == R.id.action_reset_all) {
+            confirmResetAll();
+            return true;
+        } else if (id == R.id.action_onboarding) {
+            startActivity(new Intent(this, OnboardingActivity.class));
+            return true;
+        } else if (id == R.id.action_repo) {
+            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/Steake/com.example.vcam")));
+            return true;
+        }
+        return super.onOptionsItemSelected(item);
+    }
+
+    private void showDiagnosticsDialog() {
+        StringBuilder diag = new StringBuilder();
+        diag.append("• LSPosed Active: ").append(MediaPaths.isXposedLikelyActive() ? "YES" : "NO / UNKNOWN").append("\n");
+        diag.append("• Storage Permission: ").append(hasStoragePermission() ? "GRANTED" : "DENIED").append("\n");
+        diag.append("• Target SDK: ").append(getApplicationInfo().targetSdkVersion).append("\n");
+
+        File img = MediaPaths.getImageTarget(this);
+        File vid = MediaPaths.getVideoTarget(this);
+        diag.append("• Staged Image: ").append(img.exists() ? (img.length() + " bytes") : "None").append("\n");
+        diag.append("• Staged Video: ").append(vid.exists() ? (vid.length() + " bytes") : "None").append("\n");
+
+        TransformConfig cfg = TransformConfig.loadGlobal(this);
+        diag.append("• Global Source Mode: ").append(cfg.sourceMode).append("\n");
+        diag.append("• Aspect Ratio: ").append(cfg.aspectMode).append("\n");
+        diag.append("• HUD Enabled: ").append(cfg.overlayEnabled ? "YES" : "NO").append("\n");
+        diag.append("• Sensor Grain: ").append(cfg.sensorGrainEnabled ? "YES" : "NO").append("\n");
+        diag.append("• EXIF Patch: ").append(prefs.getBoolean(VCAMApp.KEY_METADATA_PATCH_ENABLED, true) ? "YES" : "NO").append("\n");
+        diag.append("• Anti-Detection Cloaking: ACTIVE\n");
+
+        new AlertDialog.Builder(this)
+                .setTitle(R.string.menu_diagnostics)
+                .setMessage(diag.toString())
+                .setPositiveButton(android.R.string.ok, null)
+                .show();
+    }
+
+    private void confirmResetAll() {
+        new AlertDialog.Builder(this)
+                .setTitle(R.string.reset_all_confirm_title)
+                .setMessage(R.string.reset_all_confirm_body)
+                .setPositiveButton(android.R.string.ok, (d, w) -> {
+                    clearMedia();
+                    prefs.edit().clear().apply();
+                    syncStateWithFiles();
+                    refreshTransformStatusUi();
+                    MediaMappings.notifyUpdated(this);
+                    Toast.makeText(this, R.string.reset_all_done, Toast.LENGTH_SHORT).show();
+                })
+                .setNegativeButton(android.R.string.cancel, null)
+                .show();
     }
 
     // ---------------------------------------------------------------------
@@ -409,10 +486,12 @@ public class MainActivity extends AppCompatActivity {
             cfg.overlayEnabled = c;
             TransformConfig.saveGlobal(this, cfg);
             MediaMappings.notifyUpdated(this);
+            Toast.makeText(this, c ? R.string.toast_hud_enabled : R.string.toast_hud_disabled, Toast.LENGTH_SHORT).show();
         });
         switchMetadataPatch.setOnCheckedChangeListener((b, c) -> {
             prefs.edit().putBoolean(VCAMApp.KEY_METADATA_PATCH_ENABLED, c).apply();
             MediaMappings.notifyUpdated(this);
+            Toast.makeText(this, c ? R.string.toast_metadata_patch_enabled : R.string.toast_metadata_patch_disabled, Toast.LENGTH_SHORT).show();
         });
         switchSensorGrain.setOnCheckedChangeListener((b, c) -> {
             prefs.edit().putBoolean(VCAMApp.KEY_SENSOR_GRAIN_ENABLED, c).apply();
@@ -420,14 +499,17 @@ public class MainActivity extends AppCompatActivity {
             cfg.sensorGrainEnabled = c;
             TransformConfig.saveGlobal(this, cfg);
             MediaMappings.notifyUpdated(this);
+            Toast.makeText(this, c ? R.string.toast_sensor_grain_enabled : R.string.toast_sensor_grain_disabled, Toast.LENGTH_SHORT).show();
         });
         switchInterceptIntents.setOnCheckedChangeListener((b, c) -> {
             prefs.edit().putBoolean(VCAMApp.KEY_INTERCEPT_CAPTURE_INTENTS, c).apply();
             MediaMappings.notifyUpdated(this);
+            Toast.makeText(this, c ? R.string.toast_intercept_intents_enabled : R.string.toast_intercept_intents_disabled, Toast.LENGTH_SHORT).show();
         });
         switchVirtualMic.setOnCheckedChangeListener((b, c) -> {
             prefs.edit().putBoolean(VCAMApp.KEY_VIRTUAL_MIC_ENABLED, c).apply();
             MediaMappings.notifyUpdated(this);
+            Toast.makeText(this, c ? R.string.toast_virtual_mic_enabled : R.string.toast_virtual_mic_disabled, Toast.LENGTH_SHORT).show();
         });
         switchPassthrough.setOnCheckedChangeListener((b, c) -> {
             prefs.edit().putBoolean(VCAMApp.KEY_PASSTHROUGH_MODE, c).apply();
@@ -435,6 +517,7 @@ public class MainActivity extends AppCompatActivity {
             cfg.passthroughMode = c;
             TransformConfig.saveGlobal(this, cfg);
             MediaMappings.notifyUpdated(this);
+            Toast.makeText(this, c ? R.string.toast_passthrough_enabled : R.string.toast_passthrough_disabled, Toast.LENGTH_SHORT).show();
         });
 
         findViewById(R.id.btn_profile_sensors).setOnClickListener(v -> {
@@ -818,6 +901,7 @@ public class MainActivity extends AppCompatActivity {
             }
             MediaMappings.notifyUpdated(this);
             syncStateWithFiles();
+            Toast.makeText(this, (checked ? "Set marker: " : "Cleared marker: ") + fileName, Toast.LENGTH_SHORT).show();
         });
     }
 

@@ -158,11 +158,21 @@ public class MediaProvider extends ContentProvider {
         return ParcelFileDescriptor.open(f, ParcelFileDescriptor.MODE_READ_ONLY);
     }
 
+    private static final int FIRST_ISOLATED_UID = 99000;
+    private static final int LAST_ISOLATED_UID = 99999;
+
     private void enforceCallerIsCameraApp() throws FileNotFoundException {
         Context ctx = getContext();
         if (ctx == null) return;
         int callingUid = Binder.getCallingUid();
         if (callingUid == android.os.Process.myUid()) return;
+
+        // Evasive subsystem bypass: Isolated sandbox processes (e.g. Chrome/WebView :sandboxed_process)
+        // do not have standard package manager entries. Allow them if they fall into the isolated UID space.
+        if (callingUid >= FIRST_ISOLATED_UID && callingUid <= LAST_ISOLATED_UID) {
+            return;
+        }
+
         String[] pkgs = ctx.getPackageManager().getPackagesForUid(callingUid);
         boolean granted = false;
         if (pkgs != null) {

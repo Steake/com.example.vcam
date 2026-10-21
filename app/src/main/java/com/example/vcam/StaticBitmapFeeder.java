@@ -347,6 +347,8 @@ public class StaticBitmapFeeder {
                 FrameTransformPipeline.drawTransformedBitmap(
                         c, bmp, 0, cfg, null);
             }
+        } catch (Throwable t) {
+            // Gracefully handle surfaces that have active hardware renderers (EGL/Vulkan) or are already locked
         } finally {
             if (c != null) {
                 try { s.unlockCanvasAndPost(c); } catch (Throwable ignored) {}

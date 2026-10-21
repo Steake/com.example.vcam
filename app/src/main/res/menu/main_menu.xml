@@ -1,12 +1,49 @@
 <?xml version="1.0" encoding="utf-8"?>
 <menu xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto">
-    <item
-        android:id="@+id/action_onboarding"
-        android:title="@string/menu_onboarding"
-        app:showAsAction="never" />
-    <item
-        android:id="@+id/action_injected_ui"
-        android:title="@string/menu_injected_ui"
-        app:showAsAction="never" />
+
+    <group android:id="@+id/group_actions">
+        <item
+            android:id="@+id/action_verify_camera"
+            android:title="@string/menu_verify_camera"
+            app:showAsAction="never" />
+        <item
+            android:id="@+id/action_media_library"
+            android:title="@string/menu_media_library"
+            app:showAsAction="never" />
+        <item
+            android:id="@+id/action_per_app_mapping"
+            android:title="@string/menu_per_app_mapping"
+            app:showAsAction="never" />
+        <item
+            android:id="@+id/action_global_defaults"
+            android:title="@string/menu_global_defaults"
+            app:showAsAction="never" />
+    </group>
+
+    <group android:id="@+id/group_tools">
+        <item
+            android:id="@+id/action_injected_ui"
+            android:title="@string/menu_injected_ui"
+            app:showAsAction="never" />
+        <item
+            android:id="@+id/action_diagnostics"
+            android:title="@string/menu_diagnostics"
+            app:showAsAction="never" />
+        <item
+            android:id="@+id/action_reset_all"
+            android:title="@string/menu_reset_all"
+            app:showAsAction="never" />
+    </group>
+
+    <group android:id="@+id/group_help">
+        <item
+            android:id="@+id/action_onboarding"
+            android:title="@string/menu_onboarding"
+            app:showAsAction="never" />
+        <item
+            android:id="@+id/action_repo"
+            android:title="@string/menu_repo"
+            app:showAsAction="never" />
+    </group>
 </menu>
