@@ -1039,7 +1039,11 @@ public class HookMain implements IXposedHookLoadPackage {
                         }
                         c1_fake_surface = new Surface(c1_fake_texture);
                         is_hooked = true;
-                        mcamera1.setPreviewTexture(c1_fake_texture);
+                        try {
+                            mcamera1.setPreviewTexture(c1_fake_texture);
+                        } catch (IOException e) {
+                            XposedBridge.log("[VCAM] " + e);
+                        }
                         param.setResult(null);
 
                         if (cameraSessionActive && start_preview_camera != null
@@ -2406,7 +2410,7 @@ public class HookMain implements IXposedHookLoadPackage {
                         pkg, apiType, facing, w, h, fmt, 30, 30, System.currentTimeMillis());
                 Bundle extras = new Bundle();
                 extras.putString("pkg", pkg);
-                extras.putString("telemetry_json", ht.toJson());
+                extras.putString("telemetry_json", ht.toJson().toString());
                 ctx.getContentResolver().call(MediaProvider.CONTENT_URI,
                         MediaProvider.METHOD_REPORT_TELEMETRY, null, extras);
             } catch (Throwable ignored) {

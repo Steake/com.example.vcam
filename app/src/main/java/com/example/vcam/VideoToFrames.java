@@ -47,6 +47,8 @@ public class VideoToFrames implements Runnable {
     private volatile long currentPositionMs = 0L;
     private volatile long durationMs = 0L;
     private long lastHandledSeekTimestamp = 0L;
+    private volatile boolean explicitPaused = false;
+    private volatile long explicitSeekMs = -1L;
 
     private Callback callback;
 
@@ -67,6 +69,14 @@ public class VideoToFrames implements Runnable {
     public void setTargetDimensions(int width, int height) {
         this.targetWidth = width & ~1;
         this.targetHeight = height & ~1;
+    }
+
+    public void setPaused(boolean paused) {
+        this.explicitPaused = paused;
+    }
+
+    public void seekToMs(long positionMs) {
+        this.explicitSeekMs = Math.max(0L, positionMs);
     }
 
     public long getCurrentPositionMs() {
@@ -98,6 +108,22 @@ public class VideoToFrames implements Runnable {
         this.videoFilePath = videoFilePath;
         if (childThread == null) {
             childThread = new Thread(this, "decode");
+            childThread.setDaemon(true);
+            childThread.start();
+            if (throwable != null) {
+                throw throwable;
+            }
+        }
+    }
+
+    public void decode(FileDescriptor fd) throws Throwable {
+        decodeFd(fd, "");
+    }
+
+    public void decodeStream(String streamUrl) throws Throwable {
+        this.videoFilePath = streamUrl;
+        if (childThread == null) {
+            childThread = new Thread(this, "decode-stream");
             childThread.setDaemon(true);
             childThread.start();
             if (throwable != null) {
@@ -138,6 +164,9 @@ public class VideoToFrames implements Runnable {
             if (TransformConfig.SOURCE_STREAM.equals(initCfg.sourceMode)
                     && initCfg.streamUrl != null && !initCfg.streamUrl.isEmpty()) {
                 extractor.setDataSource(initCfg.streamUrl);
+            } else if (videoFilePath != null && (videoFilePath.startsWith("http://")
+                    || videoFilePath.startsWith("https://") || videoFilePath.startsWith("rtsp://"))) {
+                extractor.setDataSource(videoFilePath);
             } else if (videoFd != null && videoFd.valid()) {
                 extractor.setDataSource(videoFd);
             } else {
@@ -220,7 +249,7 @@ public class VideoToFrames implements Runnable {
             TransformConfig cfg = HookMain.getActiveTransformConfig();
 
             // 1. Handle pause (freeze-frame): keep HookMain.data_buffer alive with sensor grain
-            if (cfg.paused) {
+            if (cfg.paused || explicitPaused) {
                 if (cfg.sensorGrainEnabled && HookMain.data_buffer != null && HookMain.data_buffer.length > 16) {
                     int w = targetWidth > 0 ? targetWidth : width;
                     int h = targetHeight > 0 ? targetHeight : height;
@@ -237,7 +266,14 @@ public class VideoToFrames implements Runnable {
             }
 
             // 2. Handle explicit seek requests or active CuePoint boundaries
-            if (cfg.seekRequestMs >= 0 && cfg.seekRequestTimestamp > lastHandledSeekTimestamp) {
+            long reqSeekMs = explicitSeekMs;
+            if (reqSeekMs >= 0) {
+                explicitSeekMs = -1L;
+                extractor.seekTo(reqSeekMs * 1000L, MediaExtractor.SEEK_TO_CLOSEST_SYNC);
+                try { decoder.flush(); } catch (Throwable ignored) {}
+                sawInputEOS = false;
+                is_first = false;
+            } else if (cfg.seekRequestMs >= 0 && cfg.seekRequestTimestamp > lastHandledSeekTimestamp) {
                 lastHandledSeekTimestamp = cfg.seekRequestTimestamp;
                 long seekUs = cfg.seekRequestMs * 1000L;
                 extractor.seekTo(seekUs, MediaExtractor.SEEK_TO_CLOSEST_SYNC);

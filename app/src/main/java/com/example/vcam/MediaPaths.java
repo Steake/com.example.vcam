@@ -94,6 +94,26 @@ public final class MediaPaths {
         return total;
     }
 
+    public static long copyFile(@NonNull File src, @NonNull File dst) throws Exception {
+        File parent = dst.getParentFile();
+        if (parent != null && !parent.exists()) {
+            //noinspection ResultOfMethodCallIgnored
+            parent.mkdirs();
+        }
+        long total = 0;
+        try (InputStream in = new java.io.FileInputStream(src);
+             OutputStream out = new FileOutputStream(dst)) {
+            byte[] buf = new byte[64 * 1024];
+            int n;
+            while ((n = in.read(buf)) > 0) {
+                out.write(buf, 0, n);
+                total += n;
+            }
+            out.flush();
+        }
+        return total;
+    }
+
     /**
      * Read the EXIF clockwise rotation (0, 90, 180, 270) of an image file.
      */

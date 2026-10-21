@@ -60,10 +60,15 @@ import java.util.List;
 public class MediaProvider extends ContentProvider {
 
     public static final String AUTHORITY = "com.example.vcam";
+    public static final Uri CONTENT_URI = Uri.parse("content://" + AUTHORITY);
     public static final Uri URI_IMAGE = Uri.parse("content://" + AUTHORITY + "/image");
     public static final Uri URI_VIDEO = Uri.parse("content://" + AUTHORITY + "/video");
     public static final Uri URI_RESOLVE = Uri.parse("content://" + AUTHORITY + "/resolve");
     public static final Uri URI_CONFIG = Uri.parse("content://" + AUTHORITY + "/config");
+
+    public static final String METHOD_REPORT_TELEMETRY = "report_telemetry";
+    public static final String METHOD_UPDATE_TRANSFORM = "update_transform";
+    public static final String METHOD_SAVE_CUES = "save_cues";
 
     public static final String STATUS_OK = "OK";
     public static final String STATUS_UNSET = "UNSET";
@@ -292,9 +297,11 @@ public class MediaProvider extends ContentProvider {
     @NonNull
     private Cursor configCursor(@NonNull Uri uri) {
         String[] cols = new String[]{
-                "disabled", "loop", "playAudio", "forcePrivateDir",
-                "forceShowToast", "disableToast", "transformJson",
-                "sensorProfileJson", "cuesJson", "librarySummaryJson"
+                "enabled", "mute", "loop", "toastEnabled", "inAppUiEnabled",
+                "overlayHudEnabled", "passthroughMode", "virtualMicEnabled",
+                "interceptCaptureIntents", "metadataPatchEnabled", "sensorGrainEnabled",
+                "transformJson", "sensorProfileJson", "librarySummaryJson",
+                "cuesJson", "allowedByFilter"
         };
         MatrixCursor c = new MatrixCursor(cols);
         Context ctx = getContext();
@@ -311,21 +318,27 @@ public class MediaProvider extends ContentProvider {
         boolean markerDisabled = new File(dcim, "disable.jpg").exists()
                 || sp.getBoolean("pref_disable_module", false);
         boolean pkgAllowed = isPackageAllowedByFilter(sp.getString(VCAMApp.KEY_PACKAGE_FILTER, ""), pkg);
-        boolean effectiveDisabled = markerDisabled || !pkgAllowed;
+        boolean enabled = !markerDisabled && pkgAllowed;
 
         boolean loop = sp.getBoolean(VCAMApp.KEY_LOOP_VIDEO, true);
         boolean markerPlaySound = new File(dcim, "no-silent.jpg").exists();
         boolean prefMute = sp.getBoolean(VCAMApp.KEY_MUTE_VIDEO, true);
-        boolean playAudio = markerPlaySound || !prefMute;
+        boolean mute = !markerPlaySound && prefMute;
 
-        boolean forcePrivate = new File(dcim, "private_dir.jpg").exists()
-                || sp.getBoolean("pref_force_private_dir", false);
         boolean forceShow = new File(dcim, "force_show.jpg").exists()
                 || sp.getBoolean("pref_force_show", false);
         boolean noToast = new File(dcim, "no_toast.jpg").exists()
                 || sp.getBoolean("pref_disable_toast", false);
+        boolean toastEnabled = !noToast;
 
         TransformConfig tc = TransformConfig.resolve(ctx, pkg, facing);
+        boolean overlayHud = sp.getBoolean(VCAMApp.KEY_OVERLAY_HUD_ENABLED, tc.overlayEnabled);
+        boolean passthrough = sp.getBoolean(VCAMApp.KEY_PASSTHROUGH_MODE, tc.passthroughRealCamera);
+        boolean virtualMic = sp.getBoolean(VCAMApp.KEY_VIRTUAL_MIC_ENABLED, tc.virtualMicEnabled);
+        boolean interceptIntents = sp.getBoolean(VCAMApp.KEY_INTERCEPT_CAPTURE_INTENTS, tc.interceptCaptureIntents);
+        boolean metadataPatch = sp.getBoolean(VCAMApp.KEY_METADATA_PATCH_ENABLED, tc.metadataPatchEnabled);
+        boolean sensorGrain = sp.getBoolean(VCAMApp.KEY_SENSOR_GRAIN_ENABLED, tc.sensorGrainEnabled);
+
         SensorProfiler.LensProfile lp = SensorProfiler.getProfileForFacing(ctx, facing);
 
         String resolvedVidUri = MediaMappings.resolve(ctx, pkg, facing, MediaMappings.TYPE_VIDEO);
@@ -349,16 +362,22 @@ public class MediaProvider extends ContentProvider {
         } catch (Throwable ignored) {}
 
         c.addRow(new Object[]{
-                effectiveDisabled ? 1 : 0,
+                enabled ? 1 : 0,
+                mute ? 1 : 0,
                 loop ? 1 : 0,
-                playAudio ? 1 : 0,
-                forcePrivate ? 1 : 0,
+                toastEnabled ? 1 : 0,
                 forceShow ? 1 : 0,
-                noToast ? 1 : 0,
+                overlayHud ? 1 : 0,
+                passthrough ? 1 : 0,
+                virtualMic ? 1 : 0,
+                interceptIntents ? 1 : 0,
+                metadataPatch ? 1 : 0,
+                sensorGrain ? 1 : 0,
                 tc.toJson().toString(),
                 lp.toJson().toString(),
+                libArr.toString(),
                 cuesArr.toString(),
-                libArr.toString()
+                pkgAllowed ? 1 : 0
         });
         return c;
     }

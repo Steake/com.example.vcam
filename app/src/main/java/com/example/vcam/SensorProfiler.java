@@ -65,6 +65,8 @@ public final class SensorProfiler {
         public int sensorOrientation = 90;
         public int activeArrayWidth = 4032;
         public int activeArrayHeight = 3024;
+        public int activeWidth = 4032;
+        public int activeHeight = 3024;
         public float physicalWidthMm = 5.6f;
         public float physicalHeightMm = 4.2f;
         public float focalLengthMm = 4.25f;
@@ -85,14 +87,37 @@ public final class SensorProfiler {
         public long profiledAt = 0L;
 
         @NonNull
+        public static LensProfile defaultForFacing(@Nullable String facing) {
+            LensProfile p = new LensProfile();
+            if (MediaMappings.FACING_FRONT.equals(facing)) {
+                p.cameraId = "1";
+                p.facing = MediaMappings.FACING_FRONT;
+                p.sensorOrientation = 270;
+                p.activeArrayWidth = 3264;
+                p.activeArrayHeight = 2448;
+                p.activeWidth = 3264;
+                p.activeHeight = 2448;
+                p.focalLengthMm = 2.85f;
+                p.apertureFNumber = 2.2f;
+            } else {
+                p.cameraId = "0";
+                p.facing = MediaMappings.FACING_BACK;
+                p.sensorOrientation = 90;
+            }
+            return p;
+        }
+
+        @NonNull
         public JSONObject toJson() {
             JSONObject o = new JSONObject();
             try {
+                int w = activeArrayWidth > 0 ? activeArrayWidth : activeWidth;
+                int h = activeArrayHeight > 0 ? activeArrayHeight : activeHeight;
                 o.put("cameraId", cameraId);
                 o.put("facing", facing);
                 o.put("sensorOrientation", sensorOrientation);
-                o.put("activeArrayWidth", activeArrayWidth);
-                o.put("activeArrayHeight", activeArrayHeight);
+                o.put("activeArrayWidth", w);
+                o.put("activeArrayHeight", h);
                 o.put("physicalWidthMm", (double) physicalWidthMm);
                 o.put("physicalHeightMm", (double) physicalHeightMm);
                 o.put("focalLengthMm", (double) focalLengthMm);
@@ -120,6 +145,16 @@ public final class SensorProfiler {
         }
 
         @NonNull
+        public static LensProfile fromJson(@Nullable String raw) {
+            if (TextUtils.isEmpty(raw)) return new LensProfile();
+            try {
+                return fromJson(new JSONObject(raw));
+            } catch (Throwable t) {
+                return new LensProfile();
+            }
+        }
+
+        @NonNull
         public static LensProfile fromJson(@Nullable JSONObject o) {
             LensProfile p = new LensProfile();
             if (o == null) return p;
@@ -128,6 +163,8 @@ public final class SensorProfiler {
             p.sensorOrientation = o.optInt("sensorOrientation", 90);
             p.activeArrayWidth = o.optInt("activeArrayWidth", 4032);
             p.activeArrayHeight = o.optInt("activeArrayHeight", 3024);
+            p.activeWidth = p.activeArrayWidth;
+            p.activeHeight = p.activeArrayHeight;
             p.physicalWidthMm = (float) o.optDouble("physicalWidthMm", 5.6);
             p.physicalHeightMm = (float) o.optDouble("physicalHeightMm", 4.2);
             p.focalLengthMm = (float) o.optDouble("focalLengthMm", 4.25);
@@ -169,6 +206,11 @@ public final class SensorProfiler {
         }
 
         @NonNull
+        public String summary() {
+            return summaryLine();
+        }
+
+        @NonNull
         public String summaryLine() {
             return String.format(Locale.US,
                     "%s (ID %s): %dx%d · %.2fmm f/%.1f · ISO %d–%d · %d° · %d–%dfps",
@@ -207,6 +249,12 @@ public final class SensorProfiler {
             this.sensorOrientation = sensorOrientation;
             this.targetFps = targetFps;
             this.updatedAt = updatedAt;
+        }
+
+        public HostTelemetry(@NonNull String pkg, @NonNull String api, @NonNull String facing,
+                             int width, int height, int imageFormat, int minFps, int maxFps, long updatedAt) {
+            this(pkg, facing, api, width, height, width, height, imageFormat,
+                    MediaMappings.FACING_FRONT.equals(facing) ? 270 : 90, maxFps, updatedAt);
         }
 
         @NonNull
@@ -343,6 +391,8 @@ public final class SensorProfiler {
             if (active != null && active.width() > 0 && active.height() > 0) {
                 p.activeArrayWidth = active.width();
                 p.activeArrayHeight = active.height();
+                p.activeWidth = p.activeArrayWidth;
+                p.activeHeight = p.activeArrayHeight;
             }
 
             SizeF phys = cc.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE);
@@ -412,6 +462,21 @@ public final class SensorProfiler {
         }
     }
 
+    public static boolean hasSavedProfiles(@NonNull Context ctx) {
+        SharedPreferences sp = ctx.getSharedPreferences(VCAMApp.PREFS, Context.MODE_PRIVATE);
+        String raw = sp.getString(KEY_SENSOR_PROFILES, null);
+        return !TextUtils.isEmpty(raw);
+    }
+
+    public static int profileAndSaveAllCameras(@NonNull Context ctx) {
+        return profileDeviceCameras(ctx).size();
+    }
+
+    @NonNull
+    public static LensProfile loadProfile(@NonNull Context ctx, @Nullable String facing) {
+        return getProfileForFacing(ctx, facing);
+    }
+
     @NonNull
     public static List<LensProfile> getProfiles(@NonNull Context ctx) {
         SharedPreferences sp = ctx.getSharedPreferences(VCAMApp.PREFS, Context.MODE_PRIVATE);
@@ -437,12 +502,18 @@ public final class SensorProfiler {
         for (LensProfile p : all) {
             if (want.equals(p.facing)) return p;
         }
-        return all.isEmpty() ? new LensProfile() : all.get(0);
+        return all.isEmpty() ? LensProfile.defaultForFacing(want) : all.get(0);
     }
 
     // ------------------------------------------------------------------
     // Host Telemetry Persistence
     // ------------------------------------------------------------------
+
+    @Nullable
+    public static HostTelemetry loadTelemetry(@NonNull Context ctx, @Nullable String pkg) {
+        if (TextUtils.isEmpty(pkg)) return null;
+        return getAllHostTelemetry(ctx).get(pkg);
+    }
 
     public static synchronized void recordHostTelemetry(@NonNull Context ctx,
                                                         @NonNull HostTelemetry t) {

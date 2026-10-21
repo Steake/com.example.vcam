@@ -38,6 +38,7 @@ public final class TransformConfig {
 
     // Rotation modes
     public static final int ROT_AUTO = -1; // Auto-compensate using host SENSOR_ORIENTATION + media rotation
+    public static final int ROTATION_AUTO = ROT_AUTO;
     public static final int ROT_0 = 0;
     public static final int ROT_90 = 90;
     public static final int ROT_180 = 180;
@@ -48,6 +49,7 @@ public final class TransformConfig {
     public static final String SOURCE_STREAM = "stream";             // Network URL (HTTP/HLS/RTSP/MJPEG)
     public static final String SOURCE_TEST_PATTERN = "test_pattern"; // Diagnostic pattern with aspect gauge
     public static final String SOURCE_QR_CODE = "qr_code";           // Live projected QR code
+    public static final String SOURCE_QR = SOURCE_QR_CODE;
 
     // Simul-Cam / PIP modes
     public static final String PIP_OFF = "off";
@@ -56,6 +58,7 @@ public final class TransformConfig {
 
     @NonNull public String aspectMode = ASPECT_FIT;
     public int rotationMode = ROT_AUTO;
+    public int rotationDegrees = ROT_AUTO;
     public boolean mirrorH = false;
     public boolean mirrorV = false;
     public float zoom = 1.0f;       // 0.25f .. 5.0f
@@ -65,6 +68,7 @@ public final class TransformConfig {
     // Photometric & Sensor Fingerprinting Alignment
     public float wbKelvinShift = 0.0f;   // -1.0f (cool/blue) .. +1.0f (warm/amber)
     public float brightnessShift = 0.0f; // -0.5f .. +0.5f
+    public float grainStrength = 1.2f;
     public boolean sensorGrainEnabled = true;
     public boolean exifSynthEnabled = true;
     public boolean metadataPatchEnabled = true;
@@ -73,6 +77,7 @@ public final class TransformConfig {
     // Playback & Live Control
     public boolean paused = false;
     public boolean passthroughRealCamera = false;
+    public boolean passthroughMode = false;
     @NonNull public String pipMode = PIP_OFF;
     @NonNull public String sourceMode = SOURCE_MEDIA;
     @NonNull public String streamUrl = "";
@@ -88,18 +93,39 @@ public final class TransformConfig {
 
     /** One video bookmark / loop cue point. */
     public static final class CuePoint {
+        public static final int ACTION_SEEK = 0;
+        public static final int ACTION_PAUSE_AT_START = 1;
+        public static final int ACTION_LOOP_SEGMENT = 2;
+
         public final int id;
         @NonNull public final String label;
         public final long startMs;
+        public final long timestampMs;
         public final long endMs; // <= startMs means single-point seek
+        public final long loopEndMs;
         public final boolean loop;
+        public final int action;
 
         public CuePoint(int id, @NonNull String label, long startMs, long endMs, boolean loop) {
             this.id = id;
             this.label = label;
             this.startMs = Math.max(0L, startMs);
+            this.timestampMs = this.startMs;
             this.endMs = endMs;
+            this.loopEndMs = endMs;
             this.loop = loop;
+            this.action = loop ? ACTION_LOOP_SEGMENT : ACTION_SEEK;
+        }
+
+        public CuePoint(int id, @NonNull String label, long startMs, long endMs, int action) {
+            this.id = id;
+            this.label = label;
+            this.startMs = Math.max(0L, startMs);
+            this.timestampMs = this.startMs;
+            this.endMs = endMs;
+            this.loopEndMs = endMs;
+            this.action = action;
+            this.loop = (action == ACTION_LOOP_SEGMENT);
         }
 
         @NonNull
@@ -111,6 +137,7 @@ public final class TransformConfig {
                 o.put("startMs", startMs);
                 o.put("endMs", endMs);
                 o.put("loop", loop);
+                o.put("action", action);
             } catch (Throwable ignored) {}
             return o;
         }
@@ -118,12 +145,14 @@ public final class TransformConfig {
         @Nullable
         public static CuePoint fromJson(@Nullable JSONObject o) {
             if (o == null) return null;
+            boolean lp = o.optBoolean("loop", false);
+            int act = o.optInt("action", lp ? ACTION_LOOP_SEGMENT : ACTION_SEEK);
             return new CuePoint(
                     o.optInt("id", 1),
                     o.optString("label", "Cue"),
                     o.optLong("startMs", 0L),
                     o.optLong("endMs", 0L),
-                    o.optBoolean("loop", false)
+                    act
             );
         }
     }
@@ -146,6 +175,7 @@ public final class TransformConfig {
     public void resetSpatial() {
         aspectMode = ASPECT_FIT;
         rotationMode = ROT_AUTO;
+        rotationDegrees = ROT_AUTO;
         mirrorH = false;
         mirrorV = false;
         zoom = 1.0f;
@@ -155,10 +185,18 @@ public final class TransformConfig {
         brightnessShift = 0.0f;
     }
 
+    public void resetPhotometric() {
+        wbKelvinShift = 0.0f;
+        brightnessShift = 0.0f;
+        grainStrength = 1.2f;
+        sensorGrainEnabled = true;
+    }
+
     /** True when no geometric or color adjustment is required if dimensions already match. */
     public boolean isIdentityTransform() {
+        int effRot = rotationDegrees != ROT_AUTO ? rotationDegrees : rotationMode;
         return ASPECT_STRETCH.equals(aspectMode)
-                && rotationMode == ROT_0
+                && effRot == ROT_0
                 && !mirrorH
                 && !mirrorV
                 && Math.abs(zoom - 1.0f) < 0.001f
@@ -173,8 +211,11 @@ public final class TransformConfig {
     public JSONObject toJson() {
         JSONObject o = new JSONObject();
         try {
+            int effRot = rotationDegrees != ROT_AUTO ? rotationDegrees : rotationMode;
+            boolean effPass = passthroughMode || passthroughRealCamera;
             o.put("aspectMode", aspectMode);
-            o.put("rotationMode", rotationMode);
+            o.put("rotationMode", effRot);
+            o.put("rotationDegrees", effRot);
             o.put("mirrorH", mirrorH);
             o.put("mirrorV", mirrorV);
             o.put("zoom", (double) zoom);
@@ -182,12 +223,14 @@ public final class TransformConfig {
             o.put("panY", (double) panY);
             o.put("wbKelvinShift", (double) wbKelvinShift);
             o.put("brightnessShift", (double) brightnessShift);
+            o.put("grainStrength", (double) grainStrength);
             o.put("sensorGrainEnabled", sensorGrainEnabled);
             o.put("exifSynthEnabled", exifSynthEnabled);
             o.put("metadataPatchEnabled", metadataPatchEnabled);
             o.put("fpsMatchEnabled", fpsMatchEnabled);
             o.put("paused", paused);
-            o.put("passthroughRealCamera", passthroughRealCamera);
+            o.put("passthroughRealCamera", effPass);
+            o.put("passthroughMode", effPass);
             o.put("pipMode", pipMode);
             o.put("sourceMode", sourceMode);
             o.put("streamUrl", streamUrl);
@@ -210,7 +253,9 @@ public final class TransformConfig {
         if (ASPECT_FIT.equals(aspect) || ASPECT_FILL.equals(aspect) || ASPECT_STRETCH.equals(aspect)) {
             c.aspectMode = aspect;
         }
-        c.rotationMode = o.optInt("rotationMode", ROT_AUTO);
+        int rot = o.optInt("rotationMode", o.optInt("rotationDegrees", ROT_AUTO));
+        c.rotationMode = rot;
+        c.rotationDegrees = rot;
         c.mirrorH = o.optBoolean("mirrorH", false);
         c.mirrorV = o.optBoolean("mirrorV", false);
         c.zoom = clamp((float) o.optDouble("zoom", 1.0), 0.25f, 5.0f);
@@ -218,12 +263,15 @@ public final class TransformConfig {
         c.panY = clamp((float) o.optDouble("panY", 0.0), -1.0f, 1.0f);
         c.wbKelvinShift = clamp((float) o.optDouble("wbKelvinShift", 0.0), -1.0f, 1.0f);
         c.brightnessShift = clamp((float) o.optDouble("brightnessShift", 0.0), -0.5f, 0.5f);
+        c.grainStrength = clamp((float) o.optDouble("grainStrength", 1.2), 0.0f, 5.0f);
         c.sensorGrainEnabled = o.optBoolean("sensorGrainEnabled", true);
         c.exifSynthEnabled = o.optBoolean("exifSynthEnabled", true);
         c.metadataPatchEnabled = o.optBoolean("metadataPatchEnabled", true);
         c.fpsMatchEnabled = o.optBoolean("fpsMatchEnabled", true);
         c.paused = o.optBoolean("paused", false);
-        c.passthroughRealCamera = o.optBoolean("passthroughRealCamera", false);
+        boolean pass = o.optBoolean("passthroughRealCamera", o.optBoolean("passthroughMode", false));
+        c.passthroughRealCamera = pass;
+        c.passthroughMode = pass;
         c.pipMode = o.optString("pipMode", PIP_OFF);
         c.sourceMode = o.optString("sourceMode", SOURCE_MEDIA);
         c.streamUrl = o.optString("streamUrl", "");
@@ -235,6 +283,11 @@ public final class TransformConfig {
         c.interceptCaptureIntents = o.optBoolean("interceptCaptureIntents", false);
         c.overlayEnabled = o.optBoolean("overlayEnabled", true);
         return c;
+    }
+
+    @NonNull
+    public static TransformConfig fromJson(@Nullable String raw) {
+        return fromJsonString(raw);
     }
 
     @NonNull
@@ -372,11 +425,19 @@ public final class TransformConfig {
     // ------------------------------------------------------------------
 
     @NonNull
-    public static List<CuePoint> listCues(@NonNull Context ctx, @Nullable String mediaKey) {
-        String key = KEY_CUES_PREFIX + (TextUtils.isEmpty(mediaKey) ? "default" : mediaKey);
-        SharedPreferences sp = ctx.getSharedPreferences(VCAMApp.PREFS, Context.MODE_PRIVATE);
-        String raw = sp.getString(key, null);
-        if (TextUtils.isEmpty(raw)) return Collections.emptyList();
+    public static String cuesToJson(@Nullable List<CuePoint> cues) {
+        JSONArray arr = new JSONArray();
+        if (cues != null) {
+            for (CuePoint cp : cues) {
+                if (cp != null) arr.put(cp.toJson());
+            }
+        }
+        return arr.toString();
+    }
+
+    @NonNull
+    public static List<CuePoint> cuesFromJson(@Nullable String raw) {
+        if (TextUtils.isEmpty(raw)) return new ArrayList<>();
         List<CuePoint> out = new ArrayList<>();
         try {
             JSONArray arr = new JSONArray(raw);
@@ -388,15 +449,25 @@ public final class TransformConfig {
         return out;
     }
 
+    @NonNull
+    public static List<CuePoint> loadCues(@NonNull Context ctx, @Nullable String mediaKey) {
+        return new ArrayList<>(listCues(ctx, mediaKey));
+    }
+
+    @NonNull
+    public static List<CuePoint> listCues(@NonNull Context ctx, @Nullable String mediaKey) {
+        String key = KEY_CUES_PREFIX + (TextUtils.isEmpty(mediaKey) ? "default" : mediaKey);
+        SharedPreferences sp = ctx.getSharedPreferences(VCAMApp.PREFS, Context.MODE_PRIVATE);
+        String raw = sp.getString(key, null);
+        if (TextUtils.isEmpty(raw)) return Collections.emptyList();
+        return cuesFromJson(raw);
+    }
+
     public static synchronized void saveCues(@NonNull Context ctx, @Nullable String mediaKey,
                                              @NonNull List<CuePoint> cues) {
         String key = KEY_CUES_PREFIX + (TextUtils.isEmpty(mediaKey) ? "default" : mediaKey);
-        JSONArray arr = new JSONArray();
-        for (CuePoint cp : cues) {
-            arr.put(cp.toJson());
-        }
         ctx.getSharedPreferences(VCAMApp.PREFS, Context.MODE_PRIVATE)
-                .edit().putString(key, arr.toString()).apply();
+                .edit().putString(key, cuesToJson(cues)).apply();
         notifyUpdated(ctx);
     }
 

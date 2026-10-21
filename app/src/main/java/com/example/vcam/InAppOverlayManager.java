@@ -71,12 +71,18 @@ import de.robv.android.xposed.XposedBridge;
 public final class InAppOverlayManager {
 
     private static volatile boolean lifecycleRegistered = false;
+    private static volatile boolean overlayEnabledFlag = true;
     private static WeakReference<Activity> currentActivityRef;
     private static WeakReference<OverlayRootView> activeOverlayRef;
     private static boolean sessionStealthHidden = false;
     private static final Handler mainHandler = new Handler(Looper.getMainLooper());
 
     private InAppOverlayManager() {}
+
+    public static synchronized void registerLifecycle(@NonNull Application app) {
+        String pkg = app.getPackageName();
+        registerLifecycle(app, pkg != null ? pkg : HookMain.getCurrentHostPackage());
+    }
 
     public static synchronized void registerLifecycle(@NonNull Application app,
                                                       @NonNull final String hostPkg) {
@@ -97,7 +103,8 @@ public final class InAppOverlayManager {
                     return;
                 }
                 currentActivityRef = new WeakReference<>(activity);
-                if (HookMain.isCameraSessionActive() && HookMain.getActiveTransformConfig().overlayEnabled) {
+                if (HookMain.isCameraSessionActive() && overlayEnabledFlag
+                        && HookMain.getActiveTransformConfig().overlayEnabled) {
                     attachToActivity(activity, hostPkg);
                 }
             }
@@ -118,10 +125,29 @@ public final class InAppOverlayManager {
         });
     }
 
+    public static void setOverlayEnabled(final boolean enabled) {
+        overlayEnabledFlag = enabled;
+        mainHandler.post(() -> {
+            if (!enabled) {
+                detachCurrentOverlay();
+            } else if (HookMain.isCameraSessionActive()) {
+                onCameraSessionStarted(HookMain.getCurrentHostPackage());
+            }
+        });
+    }
+
+    public static void onCameraSessionActive(final boolean active) {
+        if (active) {
+            onCameraSessionStarted(HookMain.getCurrentHostPackage());
+        } else {
+            mainHandler.post(InAppOverlayManager::detachCurrentOverlay);
+        }
+    }
+
     /** Called by {@link HookMain} when a camera opens in the host process. */
     public static void onCameraSessionStarted(@NonNull final String hostPkg) {
         mainHandler.post(() -> {
-            if (!HookMain.getActiveTransformConfig().overlayEnabled || sessionStealthHidden) return;
+            if (!overlayEnabledFlag || !HookMain.getActiveTransformConfig().overlayEnabled || sessionStealthHidden) return;
             Activity act = currentActivityRef != null ? currentActivityRef.get() : null;
             if (act != null && !act.isFinishing() && !act.isDestroyed()) {
                 attachToActivity(act, hostPkg);
@@ -131,7 +157,7 @@ public final class InAppOverlayManager {
 
     private static void attachToActivity(@NonNull final Activity activity,
                                          @NonNull final String hostPkg) {
-        if (sessionStealthHidden || !HookMain.getActiveTransformConfig().overlayEnabled) return;
+        if (sessionStealthHidden || !overlayEnabledFlag || !HookMain.getActiveTransformConfig().overlayEnabled) return;
         OverlayRootView existing = activeOverlayRef != null ? activeOverlayRef.get() : null;
         if (existing != null && existing.hostActivity == activity && existing.isAttachedToWindow()) {
             existing.refreshUiFromState();

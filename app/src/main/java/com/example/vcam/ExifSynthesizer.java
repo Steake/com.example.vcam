@@ -126,6 +126,15 @@ public final class ExifSynthesizer {
         CURRENT_PHOTOMETRY.frameNumber++;
     }
 
+    @NonNull
+    public static byte[] injectExifIntoJpeg(@NonNull byte[] jpegBytes,
+                                            int width,
+                                            int height,
+                                            @Nullable SensorProfiler.LensProfile profile,
+                                            @Nullable FramePhotometry photometry) {
+        return injectExif(jpegBytes, width, height, profile);
+    }
+
     /**
      * Inject a standard TIFF/EXIF APP1 segment into a compressed JPEG byte array
      * so any {@code ExifInterface} inspection sees authentic camera hardware tags.

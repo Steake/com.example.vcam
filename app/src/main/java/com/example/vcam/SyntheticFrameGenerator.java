@@ -42,6 +42,27 @@ public final class SyntheticFrameGenerator {
 
     private SyntheticFrameGenerator() {}
 
+    @NonNull
+    public static synchronized Bitmap renderTestPattern(int width, int height,
+                                                        @Nullable String pkg,
+                                                        @Nullable String facing,
+                                                        float fps,
+                                                        @NonNull TransformConfig cfg) {
+        TransformConfig tmp = cfg.copy();
+        tmp.sourceMode = TransformConfig.SOURCE_TEST_PATTERN;
+        Bitmap b = renderFrame(width, height, tmp);
+        return b != null ? b : Bitmap.createBitmap(Math.max(2, width), Math.max(2, height), Bitmap.Config.ARGB_8888);
+    }
+
+    @NonNull
+    public static synchronized Bitmap renderQrFrame(int width, int height, @Nullable String payload) {
+        TransformConfig tmp = new TransformConfig();
+        tmp.sourceMode = TransformConfig.SOURCE_QR_CODE;
+        tmp.qrPayload = payload != null ? payload : "";
+        Bitmap b = renderFrame(width, height, tmp);
+        return b != null ? b : Bitmap.createBitmap(Math.max(2, width), Math.max(2, height), Bitmap.Config.ARGB_8888);
+    }
+
     @Nullable
     public static synchronized Bitmap renderFrame(int width, int height,
                                                   @NonNull TransformConfig cfg) {

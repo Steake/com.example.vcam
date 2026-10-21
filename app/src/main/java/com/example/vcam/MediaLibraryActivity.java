@@ -236,7 +236,12 @@ public class MediaLibraryActivity extends AppCompatActivity {
     }
 
     private void showCueEditorDialog(@NonNull MediaLibrary.Entry e) {
-        final List<TransformConfig.CuePoint> cues = TransformConfig.loadCues(this, "global");
+        final String mediaKey = e.uri().toString();
+        List<TransformConfig.CuePoint> loaded = TransformConfig.loadCues(this, mediaKey);
+        if (loaded.isEmpty()) {
+            loaded = TransformConfig.loadCues(this, "global");
+        }
+        final List<TransformConfig.CuePoint> cues = loaded;
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         int pad = (int) (16 * getResources().getDisplayMetrics().density);
@@ -298,7 +303,7 @@ public class MediaLibraryActivity extends AppCompatActivity {
                                 i + 1, "Cue " + (char) ('A' + i), stMs, enMs, action));
                     }
                     TransformConfig.saveCues(this, "global", updated);
-                    TransformConfig.saveCues(this, e.id, updated);
+                    TransformConfig.saveCues(this, mediaKey, updated);
                     MediaMappings.notifyUpdated(this);
                     Toast.makeText(this, "Cue points saved", Toast.LENGTH_SHORT).show();
                 })

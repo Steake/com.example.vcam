@@ -81,9 +81,9 @@ public class ExampleUnitTest {
 
     @Test
     public void packageFilter_evaluatesCorrectly() {
-        assertTrue(MediaProvider.isPackageAllowedByFilter("com.whatsapp", ""));
-        assertTrue(MediaProvider.isPackageAllowedByFilter("com.whatsapp", "com.whatsapp, org.telegram.messenger"));
-        assertFalse(MediaProvider.isPackageAllowedByFilter("com.instagram.android", "com.whatsapp, org.telegram.messenger"));
-        assertTrue(MediaProvider.isPackageAllowedByFilter(BuildConfig.APPLICATION_ID, "com.whatsapp"));
+        assertTrue(MediaProvider.isPackageAllowedByFilter("", "com.whatsapp"));
+        assertTrue(MediaProvider.isPackageAllowedByFilter("com.whatsapp, org.telegram.messenger", "com.whatsapp"));
+        assertFalse(MediaProvider.isPackageAllowedByFilter("com.whatsapp, org.telegram.messenger", "com.instagram.android"));
+        assertTrue(MediaProvider.isPackageAllowedByFilter("com.whatsapp", BuildConfig.APPLICATION_ID));
     }
 }

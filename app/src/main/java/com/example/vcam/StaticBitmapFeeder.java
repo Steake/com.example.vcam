@@ -63,6 +63,9 @@ public class StaticBitmapFeeder {
     private long cachedSize = -1L;
     private String cachedTransformSig = "";
 
+    private static volatile long cacheInvalidationCounter = 0L;
+    private long observedInvalidationCounter = -1L;
+
     public StaticBitmapFeeder(Surface surface, int surfaceFormat, int width,
                               int height, String bitmapPath) {
         this.surface = surface;
@@ -70,6 +73,20 @@ public class StaticBitmapFeeder {
         this.width = Math.max(2, width & ~1);
         this.height = Math.max(2, height & ~1);
         this.bitmapPath = bitmapPath;
+    }
+
+    public StaticBitmapFeeder(Surface surface, File bitmapFile, int width, int height) {
+        this(surface, FORMAT_PREVIEW, width > 0 ? width : 1280, height > 0 ? height : 720,
+                bitmapFile != null ? bitmapFile.getAbsolutePath() : "");
+        start();
+    }
+
+    public boolean isRunning() {
+        return running;
+    }
+
+    public static void invalidateAllCaches() {
+        cacheInvalidationCounter++;
     }
 
     public synchronized void start() {
@@ -167,11 +184,13 @@ public class StaticBitmapFeeder {
         if (!f.exists() || f.length() == 0) return false;
         long mtime = f.lastModified();
         long size = f.length();
+        long inv = cacheInvalidationCounter;
         String sig = buildTransformSignature(cfg);
 
         if (cachedTransformedBitmap != null && !cachedTransformedBitmap.isRecycled()
                 && cachedJpeg != null && cachedI420 != null
                 && mtime == cachedMtime && size == cachedSize
+                && inv == observedInvalidationCounter
                 && sig.equals(cachedTransformSig)) {
             if (cfg.sensorGrainEnabled) {
                 // Apply lightweight in-place luma grain so consecutive frames differ
@@ -181,7 +200,7 @@ public class StaticBitmapFeeder {
         }
 
         if (rawSourceBitmap == null || rawSourceBitmap.isRecycled()
-                || mtime != cachedMtime || size != cachedSize) {
+                || mtime != cachedMtime || size != cachedSize || inv != observedInvalidationCounter) {
             if (rawSourceBitmap != null && !rawSourceBitmap.isRecycled()) {
                 rawSourceBitmap.recycle();
             }
@@ -196,6 +215,7 @@ public class StaticBitmapFeeder {
 
         cachedMtime = mtime;
         cachedSize = size;
+        observedInvalidationCounter = inv;
         cachedTransformSig = sig;
         return cachedJpeg != null && cachedI420 != null;
     }

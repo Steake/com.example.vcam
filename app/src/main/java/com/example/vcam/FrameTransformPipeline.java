@@ -66,8 +66,9 @@ public final class FrameTransformPipeline {
                                                int hostSensorOrientation,
                                                boolean isHostBufferTarget) {
         int baseRot = ((mediaRotationDegrees % 360) + 360) % 360;
-        if (cfg.rotationMode != TransformConfig.ROT_AUTO) {
-            return (baseRot + cfg.rotationMode) % 360;
+        int userRot = cfg.rotationDegrees != TransformConfig.ROT_AUTO ? cfg.rotationDegrees : cfg.rotationMode;
+        if (userRot != TransformConfig.ROT_AUTO) {
+            return (baseRot + userRot) % 360;
         }
         // In AUTO mode, we honor the source media's intrinsic rotation metadata.
         return baseRot;
@@ -143,6 +144,13 @@ public final class FrameTransformPipeline {
         return m;
     }
 
+    public static void applyTextureViewTransform(@Nullable TextureView textureView,
+                                                 int contentWidth,
+                                                 int contentHeight,
+                                                 @NonNull TransformConfig cfg) {
+        applyTextureViewTransform(textureView, contentWidth, contentHeight, 0, cfg);
+    }
+
     /**
      * Build and apply a {@link TextureView#setTransform(Matrix)} matrix so a video or
      * camera preview played into a {@link TextureView} preserves its true aspect ratio
@@ -151,7 +159,7 @@ public final class FrameTransformPipeline {
     public static void applyTextureViewTransform(@Nullable TextureView textureView,
                                                  int contentWidth,
                                                  int contentHeight,
-                                              int contentRotationDegrees,
+                                                 int contentRotationDegrees,
                                                  @NonNull TransformConfig cfg) {
         if (textureView == null) return;
         int viewW = textureView.getWidth();
@@ -240,6 +248,16 @@ public final class FrameTransformPipeline {
         return paint;
     }
 
+    public static void drawTransformedBitmap(@NonNull Canvas canvas,
+                                             @NonNull Bitmap src,
+                                             int dstW,
+                                             int dstH,
+                                             @NonNull TransformConfig cfg,
+                                             int srcRotationDegrees,
+                                             int hostSensorOrientation) {
+        drawTransformedBitmap(canvas, src, srcRotationDegrees, cfg, null);
+    }
+
     /**
      * Render a source {@link Bitmap} onto a target {@link Canvas} using the active
      * {@link TransformConfig} (letterboxing with black background, PTZ, rotation,
@@ -274,6 +292,16 @@ public final class FrameTransformPipeline {
         }
     }
 
+    @NonNull
+    public static Bitmap renderTransformedBitmap(@NonNull Bitmap src,
+                                                 int dstW,
+                                                 int dstH,
+                                                 @NonNull TransformConfig cfg,
+                                                 int srcRotationDegrees,
+                                                 int hostSensorOrientation) {
+        return renderToBitmap(src, srcRotationDegrees, dstW, dstH, cfg, null);
+    }
+
     /**
      * Render a transformed bitmap into a reusable target {@link Bitmap} of exact
      * dimensions {@code (dstW, dstH)}.
@@ -297,9 +325,68 @@ public final class FrameTransformPipeline {
         return out;
     }
 
+    public static void applyTemporalGrainBitmap(@Nullable Bitmap bmp, float strength) {
+        if (bmp == null || bmp.isRecycled() || !bmp.isMutable() || strength <= 0.01f) return;
+        int w = bmp.getWidth();
+        int h = bmp.getHeight();
+        if (w <= 0 || h <= 0) return;
+        int offset = (++grainFrameCounter * 251) & 4095;
+        int step = Math.max(2, Math.min(w, h) / 32);
+        for (int y = (grainFrameCounter % step); y < h; y += step) {
+            for (int x = (grainFrameCounter % step); x < w; x += step) {
+                int c = bmp.getPixel(x, y);
+                int delta = GRAIN_LUT[(x + y * w + offset) & 4095];
+                if (delta == 0) continue;
+                int a = (c >>> 24) & 0xFF;
+                int r = Math.max(0, Math.min(255, ((c >> 16) & 0xFF) + delta));
+                int g = Math.max(0, Math.min(255, ((c >> 8) & 0xFF) + delta));
+                int b = Math.max(0, Math.min(255, (c & 0xFF) + delta));
+                bmp.setPixel(x, y, (a << 24) | (r << 16) | (g << 8) | b);
+            }
+        }
+    }
+
     // ------------------------------------------------------------------
     // Fast ARGB -> NV21 & I420 Encoders (Correct BT.601 + Temporal Grain)
     // ------------------------------------------------------------------
+
+    @NonNull
+    public static byte[] bitmapToNv21(@NonNull Bitmap bmp) {
+        return bitmapToNv21(bmp, true, null, null);
+    }
+
+    @NonNull
+    public static byte[] argbToNv21(@NonNull int[] argb, int width, int height) {
+        int w = Math.max(2, width & ~1);
+        int h = Math.max(2, height & ~1);
+        int ySize = w * h;
+        int totalSize = ySize * 3 / 2;
+        byte[] yuv = new byte[totalSize];
+
+        int uvIndex = ySize;
+        for (int j = 0; j < h; j++) {
+            int rowStart = j * w;
+            boolean evenRow = (j & 1) == 0;
+            for (int i = 0; i < w; i++) {
+                int idx = rowStart + i;
+                int c = idx < argb.length ? argb[idx] : 0;
+                int r = (c >> 16) & 0xFF;
+                int g = (c >> 8) & 0xFF;
+                int b = c & 0xFF;
+
+                int y = ((66 * r + 129 * g + 25 * b + 128) >> 8) + 16;
+                yuv[idx] = (byte) (y < 16 ? 16 : (y > 255 ? 255 : y));
+
+                if (evenRow && (i & 1) == 0 && uvIndex + 1 < totalSize) {
+                    int u = ((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128;
+                    int v = ((112 * r - 94 * g - 18 * b + 128) >> 8) + 128;
+                    yuv[uvIndex++] = (byte) (v < 0 ? 0 : (v > 255 ? 255 : v));
+                    yuv[uvIndex++] = (byte) (u < 0 ? 0 : (u > 255 ? 255 : u));
+                }
+            }
+        }
+        return yuv;
+    }
 
     /**
      * Convert an {@code ARGB_8888} {@link Bitmap} into an NV21 ({@code YYYY...VUVU...})

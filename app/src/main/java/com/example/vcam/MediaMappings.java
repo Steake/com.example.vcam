@@ -238,6 +238,10 @@ public final class MediaMappings {
                 .edit().putString(KEY, arr.toString()).apply();
     }
 
+    public static void notifyUpdated(@NonNull Context ctx) {
+        broadcastUpdated(ctx);
+    }
+
     private static void broadcastUpdated(@NonNull Context ctx) {
         try {
             Intent i = new Intent(ACTION_UPDATED);
