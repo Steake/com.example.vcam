@@ -8,14 +8,15 @@ import android.media.MediaCodec;
 import android.media.MediaCodecInfo;
 import android.media.MediaExtractor;
 import android.media.MediaFormat;
+import android.os.SystemClock;
 import android.util.Log;
 import android.view.Surface;
 
-import com.example.vcam.HookMain;
-
 import java.io.File;
+import java.io.FileDescriptor;
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.util.List;
 import java.util.concurrent.LinkedBlockingQueue;
 
 import de.robv.android.xposed.XposedBridge;
@@ -29,17 +30,23 @@ public class VideoToFrames implements Runnable {
     private static final int COLOR_FormatI420 = 1;
     private static final int COLOR_FormatNV21 = 2;
 
-
     private final int decodeColorFormat = MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible;
 
     private LinkedBlockingQueue<byte[]> mQueue;
     private OutputImageFormat outputImageFormat;
-    private boolean stopDecode = false;
+    private volatile boolean stopDecode = false;
 
     private String videoFilePath;
+    private FileDescriptor videoFd;
     private Throwable throwable;
     private Thread childThread;
     private Surface play_surf;
+
+    private int targetWidth = 0;
+    private int targetHeight = 0;
+    private volatile long currentPositionMs = 0L;
+    private volatile long durationMs = 0L;
+    private long lastHandledSeekTimestamp = 0L;
 
     private Callback callback;
 
@@ -57,10 +64,21 @@ public class VideoToFrames implements Runnable {
         mQueue = queue;
     }
 
-    // Set output location (unused)
+    public void setTargetDimensions(int width, int height) {
+        this.targetWidth = width & ~1;
+        this.targetHeight = height & ~1;
+    }
+
+    public long getCurrentPositionMs() {
+        return currentPositionMs;
+    }
+
+    public long getDurationMs() {
+        return durationMs;
+    }
+
     public void setSaveFrames(String dir, OutputImageFormat imageFormat) throws IOException {
         outputImageFormat = imageFormat;
-
     }
 
     public void set_surfcae(Surface player_surface) {
@@ -71,12 +89,29 @@ public class VideoToFrames implements Runnable {
 
     public void stopDecode() {
         stopDecode = true;
+        if (childThread != null) {
+            childThread.interrupt();
+        }
     }
 
     public void decode(String videoFilePath) throws Throwable {
         this.videoFilePath = videoFilePath;
         if (childThread == null) {
             childThread = new Thread(this, "decode");
+            childThread.setDaemon(true);
+            childThread.start();
+            if (throwable != null) {
+                throw throwable;
+            }
+        }
+    }
+
+    public void decodeFd(FileDescriptor fd, String fallbackPath) throws Throwable {
+        this.videoFd = fd;
+        this.videoFilePath = fallbackPath;
+        if (childThread == null) {
+            childThread = new Thread(this, "decode-fd");
+            childThread.setDaemon(true);
             childThread.start();
             if (throwable != null) {
                 throw throwable;
@@ -98,15 +133,28 @@ public class VideoToFrames implements Runnable {
         MediaExtractor extractor = null;
         MediaCodec decoder = null;
         try {
-            File videoFile = new File(videoFilePath);
             extractor = new MediaExtractor();
-            extractor.setDataSource(videoFilePath);
+            TransformConfig initCfg = HookMain.getActiveTransformConfig();
+            if (TransformConfig.SOURCE_STREAM.equals(initCfg.sourceMode)
+                    && initCfg.streamUrl != null && !initCfg.streamUrl.isEmpty()) {
+                extractor.setDataSource(initCfg.streamUrl);
+            } else if (videoFd != null && videoFd.valid()) {
+                extractor.setDataSource(videoFd);
+            } else {
+                File videoFile = new File(videoFilePath);
+                if (!videoFile.exists()) return;
+                extractor.setDataSource(videoFilePath);
+            }
             int trackIndex = selectTrack(extractor);
             if (trackIndex < 0) {
                 XposedBridge.log("[VCAM][decoder] No video track found in " + videoFilePath);
+                return;
             }
             extractor.selectTrack(trackIndex);
             MediaFormat mediaFormat = extractor.getTrackFormat(trackIndex);
+            if (mediaFormat.containsKey(MediaFormat.KEY_DURATION)) {
+                durationMs = mediaFormat.getLong(MediaFormat.KEY_DURATION) / 1000L;
+            }
             String mime = mediaFormat.getString(MediaFormat.KEY_MIME);
             decoder = MediaCodec.createDecoderByType(mime);
             showSupportedColorFormat(decoder.getCodecInfo().getCapabilitiesForType(mime));
@@ -119,21 +167,21 @@ public class VideoToFrames implements Runnable {
             }
             decodeFramesToImage(decoder, extractor, mediaFormat);
             decoder.stop();
-            while (!stopDecode) {
-                extractor.seekTo(0, 0);
+            while (!stopDecode && HookMain.isLoopVideoActive()) {
+                extractor.seekTo(0, MediaExtractor.SEEK_TO_CLOSEST_SYNC);
                 decodeFramesToImage(decoder, extractor, mediaFormat);
                 decoder.stop();
             }
-        }catch (Exception e){
+        } catch (Exception e) {
             XposedBridge.log("[VCAM][videofile] " + e.toString());
         } finally {
             if (decoder != null) {
-                decoder.stop();
-                decoder.release();
+                try { decoder.stop(); } catch (Throwable ignored) {}
+                try { decoder.release(); } catch (Throwable ignored) {}
                 decoder = null;
             }
             if (extractor != null) {
-                extractor.release();
+                try { extractor.release(); } catch (Throwable ignored) {}
                 extractor = null;
             }
         }
@@ -159,6 +207,7 @@ public class VideoToFrames implements Runnable {
     private void decodeFramesToImage(MediaCodec decoder, MediaExtractor extractor, MediaFormat mediaFormat) {
         boolean is_first = false;
         long startWhen = 0;
+        long basePtsUs = 0;
         MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
         decoder.configure(mediaFormat, play_surf, null, 0);
         boolean sawInputEOS = false;
@@ -168,6 +217,45 @@ public class VideoToFrames implements Runnable {
         final int height = mediaFormat.getInteger(MediaFormat.KEY_HEIGHT);
         int outputFrameCount = 0;
         while (!sawOutputEOS && !stopDecode) {
+            TransformConfig cfg = HookMain.getActiveTransformConfig();
+
+            // 1. Handle pause (freeze-frame): keep HookMain.data_buffer alive with sensor grain
+            if (cfg.paused) {
+                if (cfg.sensorGrainEnabled && HookMain.data_buffer != null && HookMain.data_buffer.length > 16) {
+                    int w = targetWidth > 0 ? targetWidth : width;
+                    int h = targetHeight > 0 ? targetHeight : height;
+                    FrameTransformPipeline.applyLumaGrainInPlace(HookMain.data_buffer, w, h);
+                }
+                ExifSynthesizer.CURRENT_PHOTOMETRY.frameTimestampNs = SystemClock.elapsedRealtimeNanos();
+                try {
+                    Thread.sleep(33L);
+                } catch (InterruptedException e) {
+                    return;
+                }
+                startWhen = System.currentTimeMillis() - (info.presentationTimeUs - basePtsUs) / 1000L;
+                continue;
+            }
+
+            // 2. Handle explicit seek requests or active CuePoint boundaries
+            if (cfg.seekRequestMs >= 0 && cfg.seekRequestTimestamp > lastHandledSeekTimestamp) {
+                lastHandledSeekTimestamp = cfg.seekRequestTimestamp;
+                long seekUs = cfg.seekRequestMs * 1000L;
+                extractor.seekTo(seekUs, MediaExtractor.SEEK_TO_CLOSEST_SYNC);
+                try { decoder.flush(); } catch (Throwable ignored) {}
+                sawInputEOS = false;
+                is_first = false;
+            } else if (cfg.activeCueId > 0) {
+                TransformConfig.CuePoint cue = HookMain.findCueById(cfg.activeCueId);
+                if (cue != null && cue.endMs > cue.startMs && currentPositionMs >= cue.endMs) {
+                    if (cue.loop) {
+                        extractor.seekTo(cue.startMs * 1000L, MediaExtractor.SEEK_TO_CLOSEST_SYNC);
+                        try { decoder.flush(); } catch (Throwable ignored) {}
+                        sawInputEOS = false;
+                        is_first = false;
+                    }
+                }
+            }
+
             if (!sawInputEOS) {
                 int inputBufferId = decoder.dequeueInputBuffer(DEFAULT_TIMEOUT_US);
                 if (inputBufferId >= 0) {
@@ -191,40 +279,72 @@ public class VideoToFrames implements Runnable {
                 boolean doRender = (info.size != 0);
                 if (doRender) {
                     outputFrameCount++;
+                    currentPositionMs = Math.max(0L, info.presentationTimeUs / 1000L);
+                    ExifSynthesizer.CURRENT_PHOTOMETRY.frameTimestampNs = SystemClock.elapsedRealtimeNanos();
+                    ExifSynthesizer.CURRENT_PHOTOMETRY.frameNumber++;
+
                     if (callback != null) {
                         callback.onDecodeFrame(outputFrameCount);
                     }
                     if (!is_first) {
                         startWhen = System.currentTimeMillis();
+                        basePtsUs = info.presentationTimeUs;
                         is_first = true;
                     }
                     if (play_surf == null) {
                         Image image = decoder.getOutputImage(outputBufferId);
-                        ByteBuffer buffer = image.getPlanes()[0].getBuffer();
-                        byte[] arr = new byte[buffer.remaining()];
-                        buffer.get(arr);
-                        if (mQueue != null) {
+                        if (image != null) {
                             try {
-                                mQueue.put(arr);
-                            } catch (InterruptedException e) {
-                                XposedBridge.log("[VCAM]" + e.toString());
+                                if (mQueue != null) {
+                                    ByteBuffer buffer = image.getPlanes()[0].getBuffer();
+                                    byte[] arr = new byte[buffer.remaining()];
+                                    buffer.get(arr);
+                                    try {
+                                        mQueue.put(arr);
+                                    } catch (InterruptedException e) {
+                                        XposedBridge.log("[VCAM]" + e.toString());
+                                    }
+                                }
+                                if (outputImageFormat != null) {
+                                    byte[] rawNv21 = getDataFromImage(image, COLOR_FormatNV21);
+                                    Rect crop = image.getCropRect();
+                                    int srcW = crop.width();
+                                    int srcH = crop.height();
+                                    // Update photometry from luma plane
+                                    updateLumaPhotometry(rawNv21, srcW, srcH);
+
+                                    int dstW = targetWidth > 0 ? targetWidth : srcW;
+                                    int dstH = targetHeight > 0 ? targetHeight : srcH;
+                                    if (srcW == dstW && srcH == dstH) {
+                                        if (cfg.sensorGrainEnabled) {
+                                            FrameTransformPipeline.applyLumaGrainInPlace(rawNv21, dstW, dstH);
+                                        }
+                                        HookMain.data_buffer = rawNv21;
+                                    } else {
+                                        // Scale NV21 to the exact target (dstW, dstH) so UV planes never misalign
+                                        byte[] scaled = scaleNv21Nearest(rawNv21, srcW, srcH, dstW, dstH, cfg);
+                                        if (cfg.sensorGrainEnabled) {
+                                            FrameTransformPipeline.applyLumaGrainInPlace(scaled, dstW, dstH);
+                                        }
+                                        HookMain.data_buffer = scaled;
+                                    }
+                                }
+                            } finally {
+                                image.close();
                             }
                         }
-                        if (outputImageFormat != null) {
-                            HookMain.data_buffer = getDataFromImage(image, COLOR_FormatNV21);
-                        }
-                        image.close();
                     }
-                    long sleepTime = info.presentationTimeUs / 1000 - (System.currentTimeMillis() - startWhen);
+                    long sleepTime = (info.presentationTimeUs - basePtsUs) / 1000L - (System.currentTimeMillis() - startWhen);
                     if (sleepTime > 0) {
                         try {
-                            Thread.sleep(sleepTime);
+                            Thread.sleep(Math.min(sleepTime, 100L));
                         } catch (InterruptedException e) {
-                            XposedBridge.log("[VCAM][decoder] Thread sleep interrupted: " + e.toString());
-                            XposedBridge.log("[VCAM][decoder] Thread delay error");
+                            return;
                         }
                     }
                     decoder.releaseOutputBuffer(outputBufferId, true);
+                } else {
+                    decoder.releaseOutputBuffer(outputBufferId, false);
                 }
             }
         }
@@ -233,12 +353,99 @@ public class VideoToFrames implements Runnable {
         }
     }
 
+    private static void updateLumaPhotometry(byte[] nv21, int w, int h) {
+        int ySize = w * h;
+        if (nv21 == null || nv21.length < ySize || ySize <= 0) return;
+        long sum = 0;
+        int count = 0;
+        int stride = Math.max(1, ySize / 64);
+        for (int i = 0; i < ySize; i += stride) {
+            sum += (nv21[i] & 0xFF);
+            count++;
+        }
+        if (count > 0) {
+            float meanY = (float) sum / count;
+            ExifSynthesizer.CURRENT_PHOTOMETRY.meanLuma = meanY;
+            float darkness = 1.0f - Math.max(0.05f, Math.min(0.98f, meanY / 240.0f));
+            ExifSynthesizer.CURRENT_PHOTOMETRY.computedExposureNs =
+                    (long) (2_000_000L + darkness * 30_000_000L);
+            ExifSynthesizer.CURRENT_PHOTOMETRY.computedIso =
+                    (int) (60 + darkness * 1200);
+        }
+    }
+
+    /**
+     * Fast nearest-neighbor aspect-aware NV21 resampler so Camera1 callbacks
+     * always receive a buffer whose Y and interleaved VU planes match the exact
+     * {@code (dstW, dstH)} requested by the host's {@code Camera.Parameters}.
+     */
+    private static byte[] scaleNv21Nearest(byte[] src, int srcW, int srcH,
+                                           int dstW, int dstH,
+                                           TransformConfig cfg) {
+        dstW &= ~1;
+        dstH &= ~1;
+        int dstYSize = dstW * dstH;
+        byte[] dst = new byte[dstYSize * 3 / 2];
+        // Initialize black Y=16, V=128, U=128 for letterbox bars
+        java.util.Arrays.fill(dst, 0, dstYSize, (byte) 16);
+        java.util.Arrays.fill(dst, dstYSize, dst.length, (byte) 128);
+
+        float scaleX = (float) dstW / srcW;
+        float scaleY = (float) dstH / srcH;
+        float scale;
+        if (TransformConfig.ASPECT_STRETCH.equals(cfg.aspectMode)) {
+            scaleX *= cfg.zoom;
+            scaleY *= cfg.zoom;
+        } else if (TransformConfig.ASPECT_FILL.equals(cfg.aspectMode)) {
+            scale = Math.max(scaleX, scaleY) * cfg.zoom;
+            scaleX = scale;
+            scaleY = scale;
+        } else {
+            scale = Math.min(scaleX, scaleY) * cfg.zoom;
+            scaleX = scale;
+            scaleY = scale;
+        }
+
+        int targetBoxW = Math.max(2, Math.round(srcW * scaleX));
+        int targetBoxH = Math.max(2, Math.round(srcH * scaleY));
+        int offsetX = (dstW - targetBoxW) / 2 + Math.round(cfg.panX * dstW * 0.5f);
+        int offsetY = (dstH - targetBoxH) / 2 + Math.round(cfg.panY * dstH * 0.5f);
+
+        int srcYSize = srcW * srcH;
+        for (int dy = 0; dy < dstH; dy++) {
+            int sy = ((dy - offsetY) * srcH) / targetBoxH;
+            if (cfg.mirrorV) sy = srcH - 1 - sy;
+            if (sy < 0 || sy >= srcH) continue;
+            int dstRow = dy * dstW;
+            int srcRow = sy * srcW;
+            int dstUvRow = dstYSize + (dy >> 1) * dstW;
+            int srcUvRow = srcYSize + (sy >> 1) * srcW;
+            boolean evenRow = (dy & 1) == 0;
+
+            for (int dx = 0; dx < dstW; dx++) {
+                int sx = ((dx - offsetX) * srcW) / targetBoxW;
+                if (cfg.mirrorH) sx = srcW - 1 - sx;
+                if (sx < 0 || sx >= srcW) continue;
+                dst[dstRow + dx] = src[srcRow + sx];
+                if (evenRow && (dx & 1) == 0) {
+                    int sUv = srcUvRow + (sx & ~1);
+                    int dUv = dstUvRow + dx;
+                    if (sUv + 1 < src.length && dUv + 1 < dst.length) {
+                        dst[dUv] = src[sUv];
+                        dst[dUv + 1] = src[sUv + 1];
+                    }
+                }
+            }
+        }
+        return dst;
+    }
+
     private static int selectTrack(MediaExtractor extractor) {
         int numTracks = extractor.getTrackCount();
         for (int i = 0; i < numTracks; i++) {
             MediaFormat format = extractor.getTrackFormat(i);
             String mime = format.getString(MediaFormat.KEY_MIME);
-            if (mime.startsWith("video/")) {
+            if (mime != null && mime.startsWith("video/")) {
                 if (VERBOSE) {
                     Log.d(TAG, "Extractor selected track " + i + " (" + mime + "): " + format);
                 }
@@ -261,7 +468,7 @@ public class VideoToFrames implements Runnable {
 
     private static byte[] getDataFromImage(Image image, int colorFormat) {
         if (colorFormat != COLOR_FormatI420 && colorFormat != COLOR_FormatNV21) {
-            throw new IllegalArgumentException("only support COLOR_FormatI420 " + "and COLOR_FormatNV21");
+            throw new IllegalArgumentException("only support COLOR_FormatI420 and COLOR_FormatNV21");
         }
         if (!isImageFormatSupported(image)) {
             throw new RuntimeException("can't convert Image to byte array, format " + image.getFormat());
@@ -304,13 +511,6 @@ public class VideoToFrames implements Runnable {
             ByteBuffer buffer = planes[i].getBuffer();
             int rowStride = planes[i].getRowStride();
             int pixelStride = planes[i].getPixelStride();
-            if (VERBOSE) {
-                Log.v(TAG, "pixelStride " + pixelStride);
-                Log.v(TAG, "rowStride " + rowStride);
-                Log.v(TAG, "width " + width);
-                Log.v(TAG, "height " + height);
-                Log.v(TAG, "buffer size " + buffer.remaining());
-            }
             int shift = (i == 0) ? 0 : 1;
             int w = width >> shift;
             int h = height >> shift;
@@ -333,12 +533,9 @@ public class VideoToFrames implements Runnable {
                     buffer.position(buffer.position() + rowStride - length);
                 }
             }
-            if (VERBOSE) Log.v(TAG, "Finished reading data from plane " + i);
         }
         return data;
     }
-
-
 }
 
 enum OutputImageFormat {
@@ -355,5 +552,3 @@ enum OutputImageFormat {
         return friendlyName;
     }
 }
-
-

@@ -158,7 +158,152 @@ public class MediaLibraryActivity extends AppCompatActivity {
     private void setAsDefault(@NonNull MediaLibrary.Entry e) {
         MediaMappings.setOne(this, MediaMappings.PKG_GLOBAL, MediaMappings.FACING_ANY,
                 e.type, e.uri().toString());
+        File src = MediaLibrary.fileFor(this, e);
+        File dst = MediaLibrary.TYPE_IMAGE.equals(e.type)
+                ? MediaPaths.getImageTarget(this)
+                : MediaPaths.getVideoTarget(this);
+        try {
+            MediaPaths.copyFile(src, dst);
+        } catch (Throwable ignored) {}
         Toast.makeText(this, R.string.lib_set_default_done, Toast.LENGTH_SHORT).show();
+    }
+
+    private void showEntryToolsDialog(@NonNull MediaLibrary.Entry e, @NonNull File f) {
+        boolean isVideo = MediaLibrary.TYPE_VIDEO.equals(e.type);
+        String details;
+        if (isVideo) {
+            MediaTranscoder.InspectionReport rep = MediaTranscoder.inspectVideo(f);
+            details = rep.summary;
+        } else {
+            int[] res = MediaPaths.imageResolution(f);
+            int rot = MediaPaths.imageExifRotation(f);
+            details = (res != null ? (res[0] + "x" + res[1]) : "Unknown")
+                    + " • EXIF rot: " + rot + "° • " + MediaPaths.humanBytes(e.size);
+        }
+
+        CharSequence[] options = isVideo
+                ? new CharSequence[]{
+                        "Set as Global Default & Stage Now",
+                        "Normalize Video Container (0° Rotation Hint)",
+                        "Configure Cue Points (Cue A–D)",
+                        "Delete Entry"}
+                : new CharSequence[]{
+                        "Set as Global Default & Stage Now",
+                        "Bake Active Transform & EXIF Orientation",
+                        "Delete Entry"};
+
+        new AlertDialog.Builder(this)
+                .setTitle(e.name + "\n" + details)
+                .setItems(options, (d, which) -> {
+                    if (which == 0) {
+                        setAsDefault(e);
+                    } else if (which == 1) {
+                        normalizeEntry(e, f, isVideo);
+                    } else if (isVideo && which == 2) {
+                        showCueEditorDialog(e);
+                    } else {
+                        confirmDelete(e);
+                    }
+                })
+                .setNegativeButton(R.string.negative, null)
+                .show();
+    }
+
+    private void normalizeEntry(@NonNull MediaLibrary.Entry e, @NonNull File f, boolean isVideo) {
+        Toast.makeText(this, "Normalizing media...", Toast.LENGTH_SHORT).show();
+        thumbExecutor.execute(() -> {
+            boolean ok;
+            if (isVideo) {
+                ok = MediaTranscoder.normalizeVideoContainer(this, f, f, 0);
+            } else {
+                TransformConfig cfg = TransformConfig.loadGlobal(this);
+                int[] res = MediaPaths.imageResolution(f);
+                int w = res != null ? res[0] : 1280;
+                int h = res != null ? res[1] : 720;
+                ok = MediaTranscoder.normalizeImage(f, f, w, h, cfg);
+            }
+            final boolean success = ok;
+            mainHandler.post(() -> {
+                if (isFinishing() || isDestroyed()) return;
+                thumbCache.evictAll();
+                resolutionCache.clear();
+                refresh();
+                Toast.makeText(this,
+                        success ? "Media normalized successfully" : "Normalization failed",
+                        Toast.LENGTH_SHORT).show();
+            });
+        });
+    }
+
+    private void showCueEditorDialog(@NonNull MediaLibrary.Entry e) {
+        final List<TransformConfig.CuePoint> cues = TransformConfig.loadCues(this, "global");
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        int pad = (int) (16 * getResources().getDisplayMetrics().density);
+        root.setPadding(pad, pad / 2, pad, 0);
+
+        final android.widget.EditText[] startInputs = new android.widget.EditText[4];
+        final android.widget.EditText[] endInputs = new android.widget.EditText[4];
+
+        for (int i = 0; i < 4; i++) {
+            int cueId = i + 1;
+            TransformConfig.CuePoint existing = null;
+            for (TransformConfig.CuePoint c : cues) {
+                if (c.id == cueId) {
+                    existing = c;
+                    break;
+                }
+            }
+            TextView lbl = new TextView(this);
+            lbl.setText("Cue " + (char) ('A' + i) + " (Start ms / Loop End ms):");
+            root.addView(lbl);
+
+            LinearLayout row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            android.widget.EditText st = new android.widget.EditText(this);
+            st.setHint("Start ms");
+            st.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
+            st.setText(String.valueOf(existing != null ? existing.timestampMs : i * 2000L));
+            row.addView(st, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+            android.widget.EditText en = new android.widget.EditText(this);
+            en.setHint("End ms (0=no loop)");
+            en.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
+            en.setText(String.valueOf(existing != null ? existing.loopEndMs : 0L));
+            row.addView(en, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+            startInputs[i] = st;
+            endInputs[i] = en;
+            root.addView(row);
+        }
+
+        new AlertDialog.Builder(this)
+                .setTitle("Cue Points (" + e.name + ")")
+                .setView(root)
+                .setPositiveButton(R.string.positive, (d, w) -> {
+                    List<TransformConfig.CuePoint> updated = new java.util.ArrayList<>();
+                    for (int i = 0; i < 4; i++) {
+                        long stMs = 0L;
+                        long enMs = 0L;
+                        try {
+                            stMs = Long.parseLong(startInputs[i].getText().toString().trim());
+                        } catch (Throwable ignored) {}
+                        try {
+                            enMs = Long.parseLong(endInputs[i].getText().toString().trim());
+                        } catch (Throwable ignored) {}
+                        int action = enMs > stMs
+                                ? TransformConfig.CuePoint.ACTION_LOOP_SEGMENT
+                                : TransformConfig.CuePoint.ACTION_SEEK;
+                        updated.add(new TransformConfig.CuePoint(
+                                i + 1, "Cue " + (char) ('A' + i), stMs, enMs, action));
+                    }
+                    TransformConfig.saveCues(this, "global", updated);
+                    TransformConfig.saveCues(this, e.id, updated);
+                    MediaMappings.notifyUpdated(this);
+                    Toast.makeText(this, "Cue points saved", Toast.LENGTH_SHORT).show();
+                })
+                .setNegativeButton(R.string.negative, null)
+                .show();
     }
 
     private void pickResult(@NonNull MediaLibrary.Entry e) {
@@ -211,15 +356,12 @@ public class MediaLibraryActivity extends AppCompatActivity {
             }
 
             boolean pick = isPickMode();
-            // Only enable row-level clickability in pick mode; in browse mode
-            // the row click is a no-op, so keep the card inert and avoid
-            // surfacing an unusable touch target / ripple to TalkBack users.
-            h.itemView.setClickable(pick);
-            h.itemView.setFocusable(pick);
+            h.itemView.setClickable(true);
+            h.itemView.setFocusable(true);
             if (pick) {
                 h.itemView.setOnClickListener(v -> pickResult(e));
             } else {
-                h.itemView.setOnClickListener(null);
+                h.itemView.setOnClickListener(v -> showEntryToolsDialog(e, f));
             }
             h.btnDelete.setVisibility(pick ? View.GONE : View.VISIBLE);
             h.btnSetDefault.setVisibility(pick ? View.GONE : View.VISIBLE);

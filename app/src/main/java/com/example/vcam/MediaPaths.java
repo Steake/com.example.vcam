@@ -5,10 +5,15 @@ import android.content.Context;
 import android.content.SharedPreferences;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.graphics.Matrix;
+import android.media.ExifInterface;
 import android.media.MediaMetadataRetriever;
 import android.net.Uri;
 import android.os.Environment;
 import android.text.TextUtils;
+
+import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -16,7 +21,8 @@ import java.io.InputStream;
 import java.io.OutputStream;
 
 /**
- * Utility helpers for locating and writing the files the Xposed hook reads.
+ * Utility helpers for locating and writing the files the Xposed hook reads,
+ * plus rotation-aware media resolution &amp; thumbnail decoding.
  *
  * <p>The hook contract (do not break): images are read from
  * {@code /DCIM/Camera1/1000.bmp} and videos from {@code /DCIM/Camera1/virtual.mp4}.
@@ -88,7 +94,54 @@ public final class MediaPaths {
         return total;
     }
 
-    /** Decodes a bounded thumbnail so we never blow up memory. */
+    /**
+     * Read the EXIF clockwise rotation (0, 90, 180, 270) of an image file.
+     */
+    public static int imageExifRotation(@Nullable File f) {
+        if (f == null || !f.exists()) return 0;
+        try {
+            ExifInterface exif = new ExifInterface(f.getAbsolutePath());
+            int orient = exif.getAttributeInt(
+                    ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL);
+            switch (orient) {
+                case ExifInterface.ORIENTATION_ROTATE_90:
+                case ExifInterface.ORIENTATION_TRANSPOSE:
+                    return 90;
+                case ExifInterface.ORIENTATION_ROTATE_180:
+                case ExifInterface.ORIENTATION_FLIP_VERTICAL:
+                    return 180;
+                case ExifInterface.ORIENTATION_ROTATE_270:
+                case ExifInterface.ORIENTATION_TRANSVERSE:
+                    return 270;
+                default:
+                    return 0;
+            }
+        } catch (Throwable ignored) {
+            return 0;
+        }
+    }
+
+    /**
+     * Read the MP4 container rotation metadata (0, 90, 180, 270) of a video file.
+     */
+    public static int videoRotation(@Nullable File f) {
+        if (f == null || !f.exists()) return 0;
+        MediaMetadataRetriever r = new MediaMetadataRetriever();
+        try {
+            r.setDataSource(f.getAbsolutePath());
+            String rot = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION);
+            if (rot != null) {
+                return ((Integer.parseInt(rot.trim()) % 360) + 360) % 360;
+            }
+        } catch (Throwable ignored) {
+        } finally {
+            try { r.release(); } catch (Throwable ignored) {}
+        }
+        return 0;
+    }
+
+    /** Decodes a bounded thumbnail (upright according to EXIF) so we never blow up memory. */
+    @Nullable
     public static Bitmap decodeImageThumb(File f, int maxSide) {
         if (f == null || !f.exists()) return null;
         BitmapFactory.Options o = new BitmapFactory.Options();
@@ -99,10 +152,23 @@ public final class MediaPaths {
         while (longer / sample > maxSide) sample *= 2;
         BitmapFactory.Options o2 = new BitmapFactory.Options();
         o2.inSampleSize = sample;
-        return BitmapFactory.decodeFile(f.getAbsolutePath(), o2);
+        Bitmap bmp = BitmapFactory.decodeFile(f.getAbsolutePath(), o2);
+        if (bmp == null) return null;
+        int rot = imageExifRotation(f);
+        if (rot != 0) {
+            try {
+                Matrix m = new Matrix();
+                m.postRotate(rot);
+                Bitmap rotated = Bitmap.createBitmap(bmp, 0, 0, bmp.getWidth(), bmp.getHeight(), m, true);
+                if (rotated != bmp) bmp.recycle();
+                return rotated;
+            } catch (Throwable ignored) {}
+        }
+        return bmp;
     }
 
     /** Extracts the first frame of a video as a thumbnail bitmap. */
+    @Nullable
     public static Bitmap decodeVideoFrame(File f) {
         if (f == null || !f.exists()) return null;
         MediaMetadataRetriever r = new MediaMetadataRetriever();
@@ -116,29 +182,81 @@ public final class MediaPaths {
         }
     }
 
+    /**
+     * Returns the display resolution {@code [width, height]} of an image,
+     * swapping width and height when EXIF rotation is 90 or 270 degrees.
+     */
+    @Nullable
     public static int[] imageResolution(File f) {
         if (f == null || !f.exists()) return null;
         BitmapFactory.Options o = new BitmapFactory.Options();
         o.inJustDecodeBounds = true;
         BitmapFactory.decodeFile(f.getAbsolutePath(), o);
         if (o.outWidth <= 0 || o.outHeight <= 0) return null;
+        int rot = imageExifRotation(f);
+        if (rot == 90 || rot == 270) {
+            return new int[]{o.outHeight, o.outWidth};
+        }
         return new int[]{o.outWidth, o.outHeight};
     }
 
+    /**
+     * Returns the display resolution {@code [width, height]} of a video,
+     * honoring {@link MediaMetadataRetriever#METADATA_KEY_VIDEO_ROTATION}
+     * so portrait phone videos (e.g. 1920x1080 rotated 90 deg) are reported
+     * and rendered as 1080x1920 rather than stretched landscape!
+     */
+    @Nullable
     public static int[] videoResolution(File f) {
         if (f == null || !f.exists()) return null;
         MediaMetadataRetriever r = new MediaMetadataRetriever();
         try {
             r.setDataSource(f.getAbsolutePath());
-            String w = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH);
-            String h = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT);
-            if (w == null || h == null) return null;
-            return new int[]{Integer.parseInt(w), Integer.parseInt(h)};
+            String wStr = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH);
+            String hStr = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT);
+            String rotStr = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION);
+            if (wStr == null || hStr == null) return null;
+            int w = Integer.parseInt(wStr.trim());
+            int h = Integer.parseInt(hStr.trim());
+            int rot = 0;
+            if (rotStr != null) {
+                try { rot = ((Integer.parseInt(rotStr.trim()) % 360) + 360) % 360; } catch (Throwable ignored) {}
+            }
+            if (rot == 90 || rot == 270) {
+                return new int[]{h, w};
+            }
+            return new int[]{w, h};
         } catch (Throwable t) {
             return null;
         } finally {
             try { r.release(); } catch (Throwable ignored) {}
         }
+    }
+
+    /**
+     * Returns {@code [rawWidth, rawHeight, rotationDegrees, durationMs]} for a video file.
+     */
+    @NonNull
+    public static int[] inspectVideoMetrics(@Nullable File f) {
+        if (f == null || !f.exists()) return new int[]{1280, 720, 0, 0};
+        MediaMetadataRetriever r = new MediaMetadataRetriever();
+        try {
+            r.setDataSource(f.getAbsolutePath());
+            int w = parseSafe(r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH), 1280);
+            int h = parseSafe(r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT), 720);
+            int rot = ((parseSafe(r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION), 0) % 360) + 360) % 360;
+            int dur = parseSafe(r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION), 0);
+            return new int[]{w, h, rot, dur};
+        } catch (Throwable t) {
+            return new int[]{1280, 720, 0, 0};
+        } finally {
+            try { r.release(); } catch (Throwable ignored) {}
+        }
+    }
+
+    private static int parseSafe(@Nullable String s, int fallback) {
+        if (s == null) return fallback;
+        try { return Integer.parseInt(s.trim()); } catch (Throwable t) { return fallback; }
     }
 
     public static String humanBytes(long bytes) {
@@ -156,9 +274,6 @@ public final class MediaPaths {
      */
     public static boolean isXposedLikelyActive() {
         try {
-            // LSPosed/EdXposed expose de.robv.android.xposed.XposedBridge in hooked apps,
-            // but in the manager app we check whether the framework ever loaded our jar
-            // by looking at the system property or class at runtime.
             String prop = System.getProperty("vxp.loader");
             if (prop != null) return true;
         } catch (Throwable ignored) {}

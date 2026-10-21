@@ -185,7 +185,12 @@ public class PerAppMappingActivity extends AppCompatActivity {
         public void onBindViewHolder(@NonNull VH h, int pos) {
             AppRow row = items.get(pos);
             h.label.setText(row.label);
-            h.pkg.setText(row.pkg);
+            SensorProfiler.HostTelemetry ht = SensorProfiler.loadTelemetry(PerAppMappingActivity.this, row.pkg);
+            if (ht != null) {
+                h.pkg.setText(row.pkg + "\n" + ht.badgeSummary());
+            } else {
+                h.pkg.setText(row.pkg);
+            }
             if (row.icon != null) h.icon.setImageDrawable(row.icon);
             else h.icon.setImageResource(android.R.drawable.sym_def_app_icon);
             h.badge.setText(summary(row.pkg));

@@ -6,7 +6,6 @@ import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
-import android.graphics.Rect;
 import android.graphics.SurfaceTexture;
 import android.media.MediaMetadataRetriever;
 import android.media.MediaPlayer;
@@ -23,6 +22,7 @@ import android.util.Log;
 import android.view.Surface;
 import android.view.TextureView;
 import android.view.View;
+import android.widget.EditText;
 import android.widget.ImageView;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -36,23 +36,24 @@ import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.content.ContextCompat;
 
 import com.google.android.material.appbar.MaterialToolbar;
-import com.google.android.material.button.MaterialButton;
 import com.google.android.material.chip.Chip;
 import com.google.android.material.materialswitch.MaterialSwitch;
 import com.google.android.material.textfield.TextInputEditText;
 
 import java.io.File;
 import java.io.IOException;
+import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
  * Material 3 companion UI for the VCAM Xposed module.
  *
- * <p>Preserves the legacy file-based toggle contract (marker files under
- * {@code /DCIM/Camera1/}) and the hook's expected media paths
- * ({@code virtual.mp4} / {@code 1000.bmp}) so previously installed hooks
- * keep working unchanged.
+ * Includes:
+ * - First-class aspect ratio & spatial transform preview (Fit/Fill/Stretch, Rotation, Mirror)
+ * - Source mode switcher (Media File, Diagnostic Test Pattern, Live QR Code, Network Stream URL)
+ * - Hardware Camera Sensor Profiler & Anti-Detection controls
+ * - Floating In-App Overlay HUD, Virtual Microphone, Intent Interception & Pass-Through toggles
  */
 public class MainActivity extends AppCompatActivity {
 
@@ -66,11 +67,21 @@ public class MainActivity extends AppCompatActivity {
     private MaterialSwitch loopSwitch;
     private MaterialSwitch muteSwitch;
 
+    // Hardware & HUD switches
+    private MaterialSwitch switchOverlayHud;
+    private MaterialSwitch switchMetadataPatch;
+    private MaterialSwitch switchSensorGrain;
+    private MaterialSwitch switchInterceptIntents;
+    private MaterialSwitch switchVirtualMic;
+    private MaterialSwitch switchPassthrough;
+    private TextView sensorProfileSummary;
+    private TextView transformStatusLine;
+
     private Chip chipModule, chipImage, chipVideo, chipRes, chipSize;
     private ImageView preview;
     private TextInputEditText pkgFilter, customImagePath, customVideoPath;
 
-    // Demo card (Bug 4)
+    // Demo card (Live Preview)
     private TextureView demoTexture;
     private Chip demoOkChip;
     private TextView demoReport;
@@ -78,6 +89,8 @@ public class MainActivity extends AppCompatActivity {
     private Handler demoHandler;
     private Runnable demoImageLoop;
     private Surface demoSurface;
+    private int currentDemoVideoW = 1280;
+    private int currentDemoVideoH = 720;
 
     private ActivityResultLauncher<String> pickImageLauncher;
     private ActivityResultLauncher<String> pickVideoLauncher;
@@ -117,6 +130,16 @@ public class MainActivity extends AppCompatActivity {
         loopSwitch = findViewById(R.id.switch_loop);
         muteSwitch = findViewById(R.id.switch_mute);
 
+        // Hardware & HUD controls
+        sensorProfileSummary = findViewById(R.id.sensor_profile_summary);
+        transformStatusLine = findViewById(R.id.transform_status_line);
+        switchOverlayHud = findViewById(R.id.switch_overlay_hud);
+        switchMetadataPatch = findViewById(R.id.switch_metadata_patch);
+        switchSensorGrain = findViewById(R.id.switch_sensor_grain);
+        switchInterceptIntents = findViewById(R.id.switch_intercept_intents);
+        switchVirtualMic = findViewById(R.id.switch_virtual_mic);
+        switchPassthrough = findViewById(R.id.switch_passthrough);
+
         // Status chips + preview
         chipModule = findViewById(R.id.chip_module);
         chipImage = findViewById(R.id.chip_image);
@@ -136,10 +159,25 @@ public class MainActivity extends AppCompatActivity {
         loopSwitch.setChecked(prefs.getBoolean(VCAMApp.KEY_LOOP_VIDEO, true));
         muteSwitch.setChecked(prefs.getBoolean(VCAMApp.KEY_MUTE_VIDEO, false));
 
-        loopSwitch.setOnCheckedChangeListener((b, c) ->
-                prefs.edit().putBoolean(VCAMApp.KEY_LOOP_VIDEO, c).apply());
-        muteSwitch.setOnCheckedChangeListener((b, c) ->
-                prefs.edit().putBoolean(VCAMApp.KEY_MUTE_VIDEO, c).apply());
+        loopSwitch.setOnCheckedChangeListener((b, c) -> {
+            prefs.edit().putBoolean(VCAMApp.KEY_LOOP_VIDEO, c).apply();
+            MediaMappings.notifyUpdated(this);
+        });
+        muteSwitch.setOnCheckedChangeListener((b, c) -> {
+            prefs.edit().putBoolean(VCAMApp.KEY_MUTE_VIDEO, c).apply();
+            if (play_sound_switch.isChecked() == c) {
+                play_sound_switch.setChecked(!c);
+            }
+            if (demoPlayer != null) {
+                try {
+                    demoPlayer.setVolume(c ? 0f : 1f, c ? 0f : 1f);
+                } catch (Throwable ignored) {}
+            }
+            MediaMappings.notifyUpdated(this);
+        });
+
+        wireTransformAndSourceStudio();
+        wireHardwareAndHudCard();
 
         // Register content pickers for image/video import.
         pickImageLauncher = registerForActivityResult(
@@ -170,7 +208,6 @@ public class MainActivity extends AppCompatActivity {
 
         findViewById(R.id.btn_clear).setOnClickListener(v -> clearMedia());
         findViewById(R.id.btn_test).setOnClickListener(v -> launchVerifier());
-
         findViewById(R.id.btn_save_paths).setOnClickListener(v -> savePaths());
 
         findViewById(R.id.btn_open_library).setOnClickListener(v ->
@@ -183,9 +220,6 @@ public class MainActivity extends AppCompatActivity {
             startActivity(i);
         });
 
-        // First-launch migration: move legacy DCIM-staged media into the
-        // new MediaLibrary and wire them up as the global default. No-op
-        // after the first successful run; legacy files stay in place.
         MediaMigration.migrateIfNeeded(this);
 
         findViewById(R.id.button).setOnClickListener(v -> {
@@ -201,7 +235,6 @@ public class MainActivity extends AppCompatActivity {
         wireDemoCard();
 
         if (!hasStoragePermission()) {
-            // Don't block; just surface once so the user isn't left wondering why imports fail.
             requestStoragePermission();
         }
 
@@ -214,6 +247,11 @@ public class MainActivity extends AppCompatActivity {
     protected void onResume() {
         super.onResume();
         syncStateWithFiles();
+        refreshTransformStatusUi();
+        refreshSensorProfileUi();
+        if (demoTexture != null && demoTexture.isAvailable()) {
+            startDemoPlayback();
+        }
     }
 
     @Override
@@ -230,11 +268,198 @@ public class MainActivity extends AppCompatActivity {
     }
 
     // ---------------------------------------------------------------------
-    // Demo card: exercises the same MediaPlayer / bitmap pipeline the hook
-    // uses so the user can confirm media is decodable before launching a
-    // host app. (Bug 4)
+    // Aspect Ratio, Rotation, Mirror & Source Mode Studio
     // ---------------------------------------------------------------------
+    private void wireTransformAndSourceStudio() {
+        findViewById(R.id.btn_aspect_fit).setOnClickListener(v -> {
+            TransformConfig cfg = TransformConfig.loadGlobal(this);
+            cfg.aspectMode = TransformConfig.ASPECT_FIT;
+            saveGlobalTransformAndRefresh(cfg);
+        });
+        findViewById(R.id.btn_aspect_fill).setOnClickListener(v -> {
+            TransformConfig cfg = TransformConfig.loadGlobal(this);
+            cfg.aspectMode = TransformConfig.ASPECT_FILL;
+            saveGlobalTransformAndRefresh(cfg);
+        });
+        findViewById(R.id.btn_aspect_stretch).setOnClickListener(v -> {
+            TransformConfig cfg = TransformConfig.loadGlobal(this);
+            cfg.aspectMode = TransformConfig.ASPECT_STRETCH;
+            saveGlobalTransformAndRefresh(cfg);
+        });
+        findViewById(R.id.btn_rotate_auto).setOnClickListener(v -> {
+            TransformConfig cfg = TransformConfig.loadGlobal(this);
+            cfg.rotationDegrees = TransformConfig.ROTATION_AUTO;
+            saveGlobalTransformAndRefresh(cfg);
+        });
+        findViewById(R.id.btn_rotate_90).setOnClickListener(v -> {
+            TransformConfig cfg = TransformConfig.loadGlobal(this);
+            int cur = cfg.rotationDegrees == TransformConfig.ROTATION_AUTO ? 0 : cfg.rotationDegrees;
+            cfg.rotationDegrees = (cur + 90) % 360;
+            saveGlobalTransformAndRefresh(cfg);
+        });
+        findViewById(R.id.btn_mirror_h).setOnClickListener(v -> {
+            TransformConfig cfg = TransformConfig.loadGlobal(this);
+            cfg.mirrorH = !cfg.mirrorH;
+            saveGlobalTransformAndRefresh(cfg);
+        });
+        findViewById(R.id.btn_reset_transform).setOnClickListener(v -> {
+            TransformConfig cfg = TransformConfig.loadGlobal(this);
+            cfg.resetSpatial();
+            cfg.resetPhotometric();
+            saveGlobalTransformAndRefresh(cfg);
+        });
 
+        findViewById(R.id.btn_src_media).setOnClickListener(v -> {
+            TransformConfig cfg = TransformConfig.loadGlobal(this);
+            cfg.sourceMode = TransformConfig.SOURCE_MEDIA;
+            saveGlobalTransformAndRefresh(cfg);
+            startDemoPlayback();
+        });
+        findViewById(R.id.btn_src_pattern).setOnClickListener(v -> {
+            TransformConfig cfg = TransformConfig.loadGlobal(this);
+            cfg.sourceMode = TransformConfig.SOURCE_TEST_PATTERN;
+            saveGlobalTransformAndRefresh(cfg);
+            startDemoPlayback();
+        });
+        findViewById(R.id.btn_src_qr).setOnClickListener(v -> promptQrPayloadDialog());
+        findViewById(R.id.btn_src_stream).setOnClickListener(v -> promptStreamUrlDialog());
+    }
+
+    private void promptQrPayloadDialog() {
+        TransformConfig cfg = TransformConfig.loadGlobal(this);
+        final EditText input = new EditText(this);
+        input.setSingleLine(true);
+        input.setText(cfg.qrPayload);
+        input.setHint("Enter URL or text for Live QR");
+        new AlertDialog.Builder(this)
+                .setTitle("Live QR Code Source")
+                .setView(input)
+                .setPositiveButton(R.string.positive, (d, w) -> {
+                    TransformConfig updated = TransformConfig.loadGlobal(this);
+                    String txt = input.getText() != null ? input.getText().toString().trim() : "";
+                    if (!txt.isEmpty()) {
+                        updated.qrPayload = txt;
+                    }
+                    updated.sourceMode = TransformConfig.SOURCE_QR;
+                    saveGlobalTransformAndRefresh(updated);
+                    startDemoPlayback();
+                })
+                .setNegativeButton(R.string.negative, null)
+                .show();
+    }
+
+    private void promptStreamUrlDialog() {
+        TransformConfig cfg = TransformConfig.loadGlobal(this);
+        final EditText input = new EditText(this);
+        input.setSingleLine(true);
+        input.setText(cfg.streamUrl);
+        input.setHint("http:// or rtsp:// stream URL");
+        new AlertDialog.Builder(this)
+                .setTitle("Network Stream Source URL")
+                .setView(input)
+                .setPositiveButton(R.string.positive, (d, w) -> {
+                    TransformConfig updated = TransformConfig.loadGlobal(this);
+                    String url = input.getText() != null ? input.getText().toString().trim() : "";
+                    updated.streamUrl = url;
+                    updated.sourceMode = url.isEmpty()
+                            ? TransformConfig.SOURCE_MEDIA
+                            : TransformConfig.SOURCE_STREAM;
+                    saveGlobalTransformAndRefresh(updated);
+                    startDemoPlayback();
+                })
+                .setNegativeButton(R.string.negative, null)
+                .show();
+    }
+
+    private void saveGlobalTransformAndRefresh(@NonNull TransformConfig cfg) {
+        TransformConfig.saveGlobal(this, cfg);
+        MediaMappings.notifyUpdated(this);
+        refreshTransformStatusUi();
+        applyDemoTextureTransform();
+    }
+
+    private void refreshTransformStatusUi() {
+        if (transformStatusLine == null) return;
+        TransformConfig cfg = TransformConfig.loadGlobal(this);
+        String rotStr = cfg.rotationDegrees == TransformConfig.ROTATION_AUTO
+                ? "Auto" : (cfg.rotationDegrees + "°");
+        transformStatusLine.setText(String.format(Locale.US,
+                "Active: Aspect=%s • Rot=%s • Zoom=%.2fx • MirrorH=%s • Source=%s",
+                cfg.aspectMode.toUpperCase(Locale.US),
+                rotStr,
+                cfg.zoom,
+                cfg.mirrorH ? "ON" : "OFF",
+                cfg.sourceMode.toUpperCase(Locale.US)));
+    }
+
+    // ---------------------------------------------------------------------
+    // Hardware Sensor Profile & HUD Card
+    // ---------------------------------------------------------------------
+    private void wireHardwareAndHudCard() {
+        switchOverlayHud.setChecked(prefs.getBoolean(VCAMApp.KEY_OVERLAY_HUD_ENABLED, false));
+        switchMetadataPatch.setChecked(prefs.getBoolean(VCAMApp.KEY_METADATA_PATCH_ENABLED, true));
+        switchSensorGrain.setChecked(prefs.getBoolean(VCAMApp.KEY_SENSOR_GRAIN_ENABLED, true));
+        switchInterceptIntents.setChecked(prefs.getBoolean(VCAMApp.KEY_INTERCEPT_CAPTURE_INTENTS, true));
+        switchVirtualMic.setChecked(prefs.getBoolean(VCAMApp.KEY_VIRTUAL_MIC_ENABLED, false));
+        switchPassthrough.setChecked(prefs.getBoolean(VCAMApp.KEY_PASSTHROUGH_MODE, false));
+
+        switchOverlayHud.setOnCheckedChangeListener((b, c) -> {
+            prefs.edit().putBoolean(VCAMApp.KEY_OVERLAY_HUD_ENABLED, c).apply();
+            TransformConfig cfg = TransformConfig.loadGlobal(this);
+            cfg.overlayEnabled = c;
+            TransformConfig.saveGlobal(this, cfg);
+            MediaMappings.notifyUpdated(this);
+        });
+        switchMetadataPatch.setOnCheckedChangeListener((b, c) -> {
+            prefs.edit().putBoolean(VCAMApp.KEY_METADATA_PATCH_ENABLED, c).apply();
+            MediaMappings.notifyUpdated(this);
+        });
+        switchSensorGrain.setOnCheckedChangeListener((b, c) -> {
+            prefs.edit().putBoolean(VCAMApp.KEY_SENSOR_GRAIN_ENABLED, c).apply();
+            TransformConfig cfg = TransformConfig.loadGlobal(this);
+            cfg.sensorGrainEnabled = c;
+            TransformConfig.saveGlobal(this, cfg);
+            MediaMappings.notifyUpdated(this);
+        });
+        switchInterceptIntents.setOnCheckedChangeListener((b, c) -> {
+            prefs.edit().putBoolean(VCAMApp.KEY_INTERCEPT_CAPTURE_INTENTS, c).apply();
+            MediaMappings.notifyUpdated(this);
+        });
+        switchVirtualMic.setOnCheckedChangeListener((b, c) -> {
+            prefs.edit().putBoolean(VCAMApp.KEY_VIRTUAL_MIC_ENABLED, c).apply();
+            MediaMappings.notifyUpdated(this);
+        });
+        switchPassthrough.setOnCheckedChangeListener((b, c) -> {
+            prefs.edit().putBoolean(VCAMApp.KEY_PASSTHROUGH_MODE, c).apply();
+            TransformConfig cfg = TransformConfig.loadGlobal(this);
+            cfg.passthroughMode = c;
+            TransformConfig.saveGlobal(this, cfg);
+            MediaMappings.notifyUpdated(this);
+        });
+
+        findViewById(R.id.btn_profile_sensors).setOnClickListener(v -> {
+            int count = SensorProfiler.profileAndSaveAllCameras(this);
+            refreshSensorProfileUi();
+            MediaMappings.notifyUpdated(this);
+            Toast.makeText(this,
+                    "Profiled " + count + " hardware camera lens(es)",
+                    Toast.LENGTH_SHORT).show();
+        });
+    }
+
+    private void refreshSensorProfileUi() {
+        if (sensorProfileSummary == null) return;
+        SensorProfiler.LensProfile back = SensorProfiler.loadProfile(this, MediaMappings.FACING_BACK);
+        SensorProfiler.LensProfile front = SensorProfiler.loadProfile(this, MediaMappings.FACING_FRONT);
+        sensorProfileSummary.setText("Back Lens: " + back.summary()
+                + "\nFront Lens: " + front.summary());
+    }
+
+    // ---------------------------------------------------------------------
+    // Demo card: exercises the same MediaPlayer / bitmap pipeline the hook
+    // uses so the user can confirm media is decodable and aspect ratio is
+    // respected before launching a host app.
+    // ---------------------------------------------------------------------
     private void wireDemoCard() {
         demoOkChip = findViewById(R.id.demo_chip_ok);
         demoReport = findViewById(R.id.demo_report);
@@ -242,10 +467,6 @@ public class MainActivity extends AppCompatActivity {
 
         findViewById(R.id.demo_btn_validate).setOnClickListener(v -> validateStagedMedia());
 
-        // TextureView construction can throw on software-rendered windows
-        // (some LSPosed / LineageOS setups end up here). Try once; if we
-        // can't build it, leave the demo placeholder in place — the
-        // validate button still works, it just has no live preview.
         android.widget.FrameLayout container = findViewById(R.id.demo_texture_container);
         try {
             demoTexture = new TextureView(this);
@@ -260,16 +481,39 @@ public class MainActivity extends AppCompatActivity {
 
         if (demoTexture == null) return;
         demoTexture.setSurfaceTextureListener(new TextureView.SurfaceTextureListener() {
-            @Override public void onSurfaceTextureAvailable(@NonNull SurfaceTexture s, int w, int h) {
+            @Override
+            public void onSurfaceTextureAvailable(@NonNull SurfaceTexture s, int w, int h) {
                 startDemoPlayback();
             }
-            @Override public void onSurfaceTextureSizeChanged(@NonNull SurfaceTexture s, int w, int h) {}
-            @Override public boolean onSurfaceTextureDestroyed(@NonNull SurfaceTexture s) {
+
+            @Override
+            public void onSurfaceTextureSizeChanged(@NonNull SurfaceTexture s, int w, int h) {
+                applyDemoTextureTransform();
+            }
+
+            @Override
+            public boolean onSurfaceTextureDestroyed(@NonNull SurfaceTexture s) {
                 stopDemo();
                 return true;
             }
-            @Override public void onSurfaceTextureUpdated(@NonNull SurfaceTexture s) {}
+
+            @Override
+            public void onSurfaceTextureUpdated(@NonNull SurfaceTexture s) {
+            }
         });
+    }
+
+    private void applyDemoTextureTransform() {
+        if (demoTexture == null) return;
+        TransformConfig cfg = TransformConfig.loadGlobal(this);
+        if (demoPlayer != null) {
+            FrameTransformPipeline.applyTextureViewTransform(
+                    demoTexture, currentDemoVideoW, currentDemoVideoH, cfg);
+        } else {
+            // For Canvas-rendered bitmaps, reset TextureView matrix to identity because
+            // FrameTransformPipeline.drawTransformedBitmap handles the matrix inside the Canvas
+            demoTexture.setTransform(null);
+        }
     }
 
     private void startDemoPlayback() {
@@ -279,9 +523,27 @@ public class MainActivity extends AppCompatActivity {
         if (tex == null) return;
         demoSurface = new Surface(tex);
 
+        TransformConfig cfg = TransformConfig.loadGlobal(this);
+        if (TransformConfig.SOURCE_TEST_PATTERN.equals(cfg.sourceMode)
+                || TransformConfig.SOURCE_QR.equals(cfg.sourceMode)) {
+            demoTexture.setTransform(null);
+            startSyntheticDemoLoop();
+            return;
+        }
+
         final File vid = MediaPaths.getVideoTarget(this);
         final File img = MediaPaths.getImageTarget(this);
-        if (vid.exists() && vid.length() > 0) {
+        final boolean isStream = TransformConfig.SOURCE_STREAM.equals(cfg.sourceMode)
+                && !cfg.streamUrl.isEmpty();
+
+        if (isStream || (vid.exists() && vid.length() > 0)) {
+            if (!isStream) {
+                int[] vRes = MediaPaths.videoResolution(vid);
+                if (vRes != null) {
+                    currentDemoVideoW = vRes[0];
+                    currentDemoVideoH = vRes[1];
+                }
+            }
             final MediaPlayer player = new MediaPlayer();
             demoPlayer = player;
             player.setSurface(demoSurface);
@@ -289,29 +551,34 @@ public class MainActivity extends AppCompatActivity {
             if (prefs.getBoolean(VCAMApp.KEY_MUTE_VIDEO, false)) {
                 player.setVolume(0f, 0f);
             }
-            // Guard against async prepare completing after stopDemo() —
-            // player may have been released, or a newer player may have
-            // replaced it. Only start when we're still the active one.
+            player.setOnVideoSizeChangedListener((mp, width, height) -> {
+                if (width > 0 && height > 0) {
+                    currentDemoVideoW = width;
+                    currentDemoVideoH = height;
+                    applyDemoTextureTransform();
+                }
+            });
             player.setOnPreparedListener(mp -> {
                 if (demoPlayer != mp) return;
                 try {
+                    applyDemoTextureTransform();
                     mp.start();
                 } catch (IllegalStateException e) {
                     Log.w(TAG, "demo video start skipped after lifecycle cleanup", e);
                 }
             });
             try {
-                player.setDataSource(vid.getAbsolutePath());
+                if (isStream) {
+                    player.setDataSource(cfg.streamUrl);
+                } else {
+                    player.setDataSource(vid.getAbsolutePath());
+                }
                 player.prepareAsync();
             } catch (IOException e) {
                 Log.w(TAG, "demo video prepare failed", e);
             }
         } else if (img.exists() && img.length() > 0) {
-            // Render the staged bitmap onto the demo surface at ~15fps,
-            // matching the image-only fallback behaviour documented in
-            // HookMain#process_callback. Decode off the UI thread and
-            // sample down to the TextureView size to avoid OOM / jank on
-            // large staged images.
+            demoTexture.setTransform(null);
             final int maxSide = Math.max(
                     Math.max(demoTexture.getWidth(), demoTexture.getHeight()),
                     800);
@@ -325,26 +592,63 @@ public class MainActivity extends AppCompatActivity {
                     startImageLoop(bmp);
                 });
             });
+        } else {
+            // No staged media yet: show diagnostic test pattern so user sees live aspect-accurate preview
+            demoTexture.setTransform(null);
+            startSyntheticDemoLoop();
         }
     }
 
     private void startImageLoop(@NonNull Bitmap bmp) {
         demoImageLoop = new Runnable() {
-            @Override public void run() {
+            @Override
+            public void run() {
                 try {
                     Surface s = demoSurface;
                     if (s == null || !s.isValid()) return;
+                    TransformConfig cfg = TransformConfig.loadGlobal(MainActivity.this);
                     Canvas c = s.lockCanvas(null);
                     if (c != null) {
-                        Rect dst = new Rect(0, 0, c.getWidth(), c.getHeight());
-                        c.drawBitmap(bmp, null, dst, null);
+                        FrameTransformPipeline.drawTransformedBitmap(
+                                c, bmp, c.getWidth(), c.getHeight(), cfg, 0, 0);
                         s.unlockCanvasAndPost(c);
                     }
                 } catch (Throwable t) {
                     Log.w(TAG, "demo image loop", t);
                 } finally {
                     if (demoHandler != null && demoImageLoop == this) {
-                        demoHandler.postDelayed(this, 66L /* ~15fps */);
+                        demoHandler.postDelayed(this, 66L);
+                    }
+                }
+            }
+        };
+        demoHandler.post(demoImageLoop);
+    }
+
+    private void startSyntheticDemoLoop() {
+        demoImageLoop = new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    Surface s = demoSurface;
+                    if (s == null || !s.isValid()) return;
+                    TransformConfig cfg = TransformConfig.loadGlobal(MainActivity.this);
+                    Canvas c = s.lockCanvas(null);
+                    if (c != null) {
+                        int w = Math.max(320, c.getWidth());
+                        int h = Math.max(240, c.getHeight());
+                        Bitmap syn = TransformConfig.SOURCE_QR.equals(cfg.sourceMode)
+                                ? SyntheticFrameGenerator.renderQrFrame(w, h, cfg.qrPayload)
+                                : SyntheticFrameGenerator.renderTestPattern(
+                                        w, h, getPackageName(), "preview", 15f, cfg);
+                        FrameTransformPipeline.drawTransformedBitmap(c, syn, w, h, cfg, 0, 0);
+                        s.unlockCanvasAndPost(c);
+                    }
+                } catch (Throwable t) {
+                    Log.w(TAG, "synthetic demo loop", t);
+                } finally {
+                    if (demoHandler != null && demoImageLoop == this) {
+                        demoHandler.postDelayed(this, 66L);
                     }
                 }
             }
@@ -378,7 +682,8 @@ public class MainActivity extends AppCompatActivity {
 
         if (img.exists() && img.length() > 0) {
             int[] res = MediaPaths.imageResolution(img);
-            String codec = "bitmap";
+            int exifRot = MediaPaths.imageExifRotation(img);
+            String codec = "bitmap (EXIF " + exifRot + "°)";
             if (res != null) {
                 report.append(getString(R.string.demo_report_image_format,
                         codec, res[0], res[1], MediaPaths.humanBytes(img.length()))).append('\n');
@@ -387,24 +692,32 @@ public class MainActivity extends AppCompatActivity {
             }
         }
         if (vid.exists() && vid.length() > 0) {
-            MediaMetadataRetriever r = new MediaMetadataRetriever();
-            try {
-                r.setDataSource(vid.getAbsolutePath());
-                String mime = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_MIMETYPE);
-                String bitrate = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_BITRATE);
-                int[] res = MediaPaths.videoResolution(vid);
-                int w = res != null ? res[0] : 0;
-                int h = res != null ? res[1] : 0;
-                String rate = bitrate != null
-                        ? MediaPaths.humanBytes(Long.parseLong(bitrate) / 8) + "/s" : "?";
-                report.append(getString(R.string.demo_report_video_format,
-                        mime == null ? "video" : mime, w, h, rate)).append('\n');
+            MediaTranscoder.InspectionReport rep = MediaTranscoder.inspectVideo(vid);
+            if (rep.valid) {
+                report.append(rep.summary).append('\n');
                 anyOk = true;
-                if (w < 160 || h < 120 || w > 4096 || h > 4096) warn = true;
-            } catch (Throwable t) {
-                Log.w(TAG, "validate video", t);
-            } finally {
-                try { r.release(); } catch (Throwable ignored) {}
+                if (rep.width < 160 || rep.height < 120 || rep.width > 4096 || rep.height > 4096) {
+                    warn = true;
+                }
+            } else {
+                MediaMetadataRetriever r = new MediaMetadataRetriever();
+                try {
+                    r.setDataSource(vid.getAbsolutePath());
+                    String mime = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_MIMETYPE);
+                    String bitrate = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_BITRATE);
+                    int[] res = MediaPaths.videoResolution(vid);
+                    int w = res != null ? res[0] : 0;
+                    int h = res != null ? res[1] : 0;
+                    String rate = bitrate != null
+                            ? MediaPaths.humanBytes(Long.parseLong(bitrate) / 8) + "/s" : "?";
+                    report.append(getString(R.string.demo_report_video_format,
+                            mime == null ? "video" : mime, w, h, rate)).append('\n');
+                    anyOk = true;
+                } catch (Throwable t) {
+                    Log.w(TAG, "validate video", t);
+                } finally {
+                    try { r.release(); } catch (Throwable ignored) {}
+                }
             }
         }
         if (!anyOk) {
@@ -426,12 +739,8 @@ public class MainActivity extends AppCompatActivity {
     // ---------------------------------------------------------------------
     // Permissions / storage
     // ---------------------------------------------------------------------
-
     private boolean hasStoragePermission() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return true;
-        // On Android 11+ we need "All files access" to write into /DCIM/Camera1/
-        // because that's where the Xposed hook reads. Scoped-media APIs are unsuitable
-        // since the hook uses plain File I/O.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             return Environment.isExternalStorageManager();
         }
@@ -468,9 +777,8 @@ public class MainActivity extends AppCompatActivity {
     }
 
     // ---------------------------------------------------------------------
-    // Toggle switches backed by marker files (legacy contract)
+    // Toggle switches backed by marker files (legacy contract + provider sync)
     // ---------------------------------------------------------------------
-
     private void wireSwitchesToFiles() {
         bindMarker(force_show_switch, "force_show.jpg");
         bindMarker(disable_switch, "disable.jpg");
@@ -482,6 +790,12 @@ public class MainActivity extends AppCompatActivity {
     private void bindMarker(MaterialSwitch sw, String fileName) {
         sw.setOnCheckedChangeListener((view, checked) -> {
             if (!view.isPressed()) return;
+            if ("no-silent.jpg".equals(fileName)) {
+                prefs.edit().putBoolean(VCAMApp.KEY_MUTE_VIDEO, !checked).apply();
+                if (muteSwitch.isChecked() == checked) {
+                    muteSwitch.setChecked(!checked);
+                }
+            }
             if (!hasStoragePermission()) {
                 requestStoragePermission();
                 return;
@@ -502,19 +816,31 @@ public class MainActivity extends AppCompatActivity {
                     marker.delete();
                 }
             }
+            MediaMappings.notifyUpdated(this);
             syncStateWithFiles();
         });
     }
 
     // ---------------------------------------------------------------------
-    // Picker handling
+    // Picker handling (Synced with MediaLibrary & Global MediaMappings)
     // ---------------------------------------------------------------------
-
     private void importMedia(@NonNull Uri uri, boolean isImage) {
         File dst = isImage ? MediaPaths.getImageTarget(this) : MediaPaths.getVideoTarget(this);
         ioExecutor.execute(() -> {
             try {
                 long bytes = MediaPaths.copyUriToFile(this, uri, dst);
+                // Also import into MediaLibrary and wire as the global MediaMappings default
+                // so MediaProvider /resolve serves the newly picked file immediately!
+                String type = isImage ? MediaLibrary.TYPE_IMAGE : MediaLibrary.TYPE_VIDEO;
+                MediaLibrary.Entry libEntry = MediaLibrary.importFromUri(
+                        this, uri, type, uri.getLastPathSegment());
+                if (libEntry != null) {
+                    MediaMappings.setOne(this, MediaMappings.PKG_GLOBAL,
+                            MediaMappings.FACING_ANY, type, libEntry.uri().toString());
+                } else {
+                    MediaMappings.notifyUpdated(this);
+                }
+
                 prefs.edit()
                         .putString(isImage ? VCAMApp.KEY_LAST_IMAGE_URI : VCAMApp.KEY_LAST_VIDEO_URI,
                                 uri.toString())
@@ -524,6 +850,7 @@ public class MainActivity extends AppCompatActivity {
                             getString(R.string.media_imported_format, MediaPaths.humanBytes(bytes)),
                             Toast.LENGTH_SHORT).show();
                     syncStateWithFiles();
+                    startDemoPlayback();
                 });
             } catch (Exception e) {
                 Log.w(TAG, "Import failed (dst=" + dst + ")", e);
@@ -549,29 +876,16 @@ public class MainActivity extends AppCompatActivity {
         if (img.exists()) img.delete();
         //noinspection ResultOfMethodCallIgnored
         if (vid.exists()) vid.delete();
+        MediaMappings.clear(this, MediaMappings.PKG_GLOBAL, MediaMappings.FACING_ANY);
         prefs.edit()
                 .remove(VCAMApp.KEY_LAST_IMAGE_URI)
                 .remove(VCAMApp.KEY_LAST_VIDEO_URI)
                 .apply();
         Toast.makeText(this, R.string.cleared, Toast.LENGTH_SHORT).show();
         syncStateWithFiles();
+        startDemoPlayback();
     }
 
-    private void openSystemCamera() {
-        Intent i = new Intent(MediaStore.ACTION_IMAGE_CAPTURE);
-        if (i.resolveActivity(getPackageManager()) != null) {
-            startActivity(i);
-        } else {
-            Toast.makeText(this, R.string.test_camera_failed, Toast.LENGTH_SHORT).show();
-        }
-    }
-
-    /**
-     * Launch the in-manager {@link CameraVerifyActivity} which opens Camera2
-     * inside this process so the VCAM hook — always scoped to its own
-     * manager — applies and the user can visually confirm injection without
-     * needing to add the external system camera to LSPosed scope.
-     */
     private void launchVerifier() {
         startActivity(new Intent(this, CameraVerifyActivity.class));
     }
@@ -593,6 +907,7 @@ public class MainActivity extends AppCompatActivity {
                 .putString(VCAMApp.KEY_CUSTOM_IMAGE_PATH, img)
                 .putString(VCAMApp.KEY_CUSTOM_VIDEO_PATH, vid)
                 .apply();
+        MediaMappings.notifyUpdated(this);
         Toast.makeText(this, R.string.saved, Toast.LENGTH_SHORT).show();
         syncStateWithFiles();
     }
@@ -601,11 +916,6 @@ public class MainActivity extends AppCompatActivity {
         return cs == null ? "" : cs.toString().trim();
     }
 
-    /**
-     * Minimal guardrail: absolute, no traversal segments, no nulls.
-     * We intentionally keep validation lightweight because Xposed usage
-     * legitimately spans many vendor-specific paths.
-     */
     private static boolean isSaneAbsolutePath(@NonNull String path) {
         if (!path.startsWith("/")) return false;
         if (path.contains("\0")) return false;
@@ -618,7 +928,6 @@ public class MainActivity extends AppCompatActivity {
     // ---------------------------------------------------------------------
     // Status sync
     // ---------------------------------------------------------------------
-
     private void syncStateWithFiles() {
         Log.d(TAG, "[sync] syncing state with files");
         if (hasStoragePermission()) {

@@ -74,7 +74,13 @@ public class AppMappingEditActivity extends AppCompatActivity {
         tb.setNavigationOnClickListener(v -> finish());
 
         TextView pkgLine = findViewById(R.id.edit_pkg_line);
-        pkgLine.setText(pkg);
+        SensorProfiler.HostTelemetry ht = !MediaMappings.PKG_GLOBAL.equals(pkg)
+                ? SensorProfiler.loadTelemetry(this, pkg) : null;
+        if (ht != null) {
+            pkgLine.setText(pkg + "  •  " + ht.badgeSummary());
+        } else {
+            pkgLine.setText(pkg);
+        }
 
         // Resolve a human label lazily when we weren't given one.
         if (TextUtils.isEmpty(getIntent().getStringExtra(EXTRA_LABEL))

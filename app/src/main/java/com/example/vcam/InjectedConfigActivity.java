@@ -68,6 +68,9 @@ public class InjectedConfigActivity extends AppCompatActivity {
         setContentView(R.layout.activity_injected_config);
 
         callerPackage = getIntent().getStringExtra(EXTRA_CALLER_PACKAGE);
+        if (callerPackage == null) {
+            callerPackage = getIntent().getStringExtra("target_package");
+        }
         if (callerPackage == null && getCallingPackage() != null) {
             callerPackage = getCallingPackage();
         }
@@ -85,6 +88,12 @@ public class InjectedConfigActivity extends AppCompatActivity {
         if (!TextUtils.isEmpty(currentFacing)) {
             subtitleText += "\n" + getString(R.string.injected_scope_current_facing_format,
                     facingLabel(currentFacing));
+        }
+        if (!TextUtils.isEmpty(callerPackage)) {
+            SensorProfiler.HostTelemetry ht = SensorProfiler.loadTelemetry(this, callerPackage);
+            if (ht != null) {
+                subtitleText += "\nLast requested: " + ht.badgeSummary();
+            }
         }
         subtitle.setText(subtitleText);
 

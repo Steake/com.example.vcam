@@ -3,12 +3,15 @@ package com.example.vcam;
 import android.content.ContentProvider;
 import android.content.ContentValues;
 import android.content.Context;
+import android.content.SharedPreferences;
 import android.content.UriMatcher;
 import android.content.pm.PackageManager;
 import android.database.Cursor;
 import android.database.MatrixCursor;
 import android.net.Uri;
 import android.os.Binder;
+import android.os.Bundle;
+import android.os.Environment;
 import android.os.ParcelFileDescriptor;
 import android.provider.OpenableColumns;
 import android.text.TextUtils;
@@ -16,16 +19,16 @@ import android.text.TextUtils;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
+import org.json.JSONArray;
+
 import java.io.File;
 import java.io.FileNotFoundException;
+import java.util.List;
 
 /**
- * Exposes the manager-staged media over cross-app ContentProvider URIs so
- * the VCAM hook — running inside arbitrary host processes — can stream the
- * injected media regardless of whether the host was granted storage
- * permission. This is the preferred path on Android 11+ where hosts almost
- * never hold {@code MANAGE_EXTERNAL_STORAGE} and therefore can't read the
- * legacy {@code /DCIM/Camera1/} location directly.
+ * Exposes the manager-staged media, live {@link TransformConfig}, marker-switch
+ * states, hardware {@link SensorProfiler.LensProfile}, and bi-directional host
+ * camera telemetry over cross-app ContentProvider URIs &amp; {@code call()} RPCs.
  *
  * <p>Supported URIs:
  * <ul>
@@ -38,14 +41,21 @@ import java.io.FileNotFoundException;
  *     <li>{@code content://com.example.vcam/video/{id}} &mdash; a
  *         {@link MediaLibrary} video entry.</li>
  *     <li>{@code content://com.example.vcam/resolve?pkg=X&facing=Y&type=image|video}
- *         &mdash; returns a single-row cursor with column {@code uri}
- *         containing the concrete content URI per
- *         {@link MediaMappings#resolve MediaMappings.resolve}'s resolution
- *         order (or empty row if nothing matched).</li>
+ *         &mdash; returns a single-row cursor with columns {@code [uri, status]}
+ *         where {@code status} is {@code "OK"} or {@code "UNSET"} so the hook
+ *         can distinguish an intentionally cleared mapping from an unreachable provider.</li>
+ *     <li>{@code content://com.example.vcam/config?pkg=X&facing=Y}
+ *         &mdash; returns the resolved runtime config, marker flags, sensor profile,
+ *         and cue points for the calling host package.</li>
  * </ul>
  *
- * <p>The legacy DCIM path remains a supported fallback so pre-existing
- * manual-setup workflows keep working.
+ * <p>Supported {@link #call(String, String, Bundle)} RPC methods (for in-host overlay &amp; telemetry):
+ * <ul>
+ *     <li>{@code "report_telemetry"} &mdash; records {@link SensorProfiler.HostTelemetry}</li>
+ *     <li>{@code "update_transform"} &mdash; saves live PTZ / aspect / pause / cue updates from the
+ *         in-app Floating Overlay directly into the manager's SharedPreferences</li>
+ *     <li>{@code "add_cue"} &mdash; bookmarks a timestamp CuePoint from the in-app overlay</li>
+ * </ul>
  */
 public class MediaProvider extends ContentProvider {
 
@@ -53,12 +63,17 @@ public class MediaProvider extends ContentProvider {
     public static final Uri URI_IMAGE = Uri.parse("content://" + AUTHORITY + "/image");
     public static final Uri URI_VIDEO = Uri.parse("content://" + AUTHORITY + "/video");
     public static final Uri URI_RESOLVE = Uri.parse("content://" + AUTHORITY + "/resolve");
+    public static final Uri URI_CONFIG = Uri.parse("content://" + AUTHORITY + "/config");
+
+    public static final String STATUS_OK = "OK";
+    public static final String STATUS_UNSET = "UNSET";
 
     private static final int MATCH_IMAGE = 1;
     private static final int MATCH_VIDEO = 2;
     private static final int MATCH_IMAGE_ID = 3;
     private static final int MATCH_VIDEO_ID = 4;
     private static final int MATCH_RESOLVE = 5;
+    private static final int MATCH_CONFIG = 6;
 
     private static final UriMatcher MATCHER = new UriMatcher(UriMatcher.NO_MATCH);
     static {
@@ -67,6 +82,7 @@ public class MediaProvider extends ContentProvider {
         MATCHER.addURI(AUTHORITY, "image/#", MATCH_IMAGE_ID);
         MATCHER.addURI(AUTHORITY, "video/#", MATCH_VIDEO_ID);
         MATCHER.addURI(AUTHORITY, "resolve", MATCH_RESOLVE);
+        MATCHER.addURI(AUTHORITY, "config", MATCH_CONFIG);
     }
 
     @Override
@@ -74,19 +90,12 @@ public class MediaProvider extends ContentProvider {
         return true;
     }
 
-    /**
-     * Resolve a URI down to a concrete file the provider can stream.
-     * For the legacy {@code /image} / {@code /video} roots we first
-     * consult the global default mapping, then fall back to the staged
-     * DCIM file so existing manual workflows still work.
-     */
     @Nullable
     private File resolveFile(@NonNull Uri uri) {
         Context ctx = getContext();
         if (ctx == null) return null;
         switch (MATCHER.match(uri)) {
             case MATCH_IMAGE: {
-                // Prefer the mapped global default, if set.
                 String mapped = MediaMappings.resolve(ctx,
                         MediaMappings.PKG_GLOBAL, MediaMappings.FACING_ANY,
                         MediaMappings.TYPE_IMAGE);
@@ -144,25 +153,11 @@ public class MediaProvider extends ContentProvider {
         return ParcelFileDescriptor.open(f, ParcelFileDescriptor.MODE_READ_ONLY);
     }
 
-    /**
-     * The provider has to be exported so the VCAM hook can read it from
-     * arbitrary host processes (host UIDs aren't known in advance and aren't
-     * signed by us, ruling out allow-lists and signature permissions). As a
-     * privacy guardrail, require the calling UID to hold
-     * {@code android.permission.CAMERA}: the only legitimate consumer is a
-     * camera-using app that VCAM is injecting into. Manager-side callers
-     * (our own UID) are always allowed.
-     */
     private void enforceCallerIsCameraApp() throws FileNotFoundException {
         Context ctx = getContext();
         if (ctx == null) return;
         int callingUid = Binder.getCallingUid();
         if (callingUid == android.os.Process.myUid()) return;
-        // Check CAMERA at the UID level. Iterating every package mapped to
-        // the UID handles shared-UID scenarios (e.g. system apps, vendor
-        // bundles) where firstPackageForUid() could pick a sibling that
-        // happens not to declare CAMERA even though another package in the
-        // same UID does — which would produce false denials.
         String[] pkgs = ctx.getPackageManager().getPackagesForUid(callingUid);
         boolean granted = false;
         if (pkgs != null) {
@@ -181,9 +176,6 @@ public class MediaProvider extends ContentProvider {
         }
     }
 
-    // (firstPackageForUid was the old single-package lookup; superseded by
-    // the UID-aware loop in enforceCallerIsCameraApp above.)
-
     @Nullable
     @Override
     public String getType(@NonNull Uri uri) {
@@ -193,6 +185,7 @@ public class MediaProvider extends ContentProvider {
             case MATCH_VIDEO:
             case MATCH_VIDEO_ID: return "video/mp4";
             case MATCH_RESOLVE: return "vnd.android.cursor.item/vcam-resolve";
+            case MATCH_CONFIG: return "vnd.android.cursor.item/vcam-config";
             default: return null;
         }
     }
@@ -201,10 +194,6 @@ public class MediaProvider extends ContentProvider {
     @Override
     public Cursor query(@NonNull Uri uri, @Nullable String[] projection, @Nullable String selection,
                         @Nullable String[] selectionArgs, @Nullable String sortOrder) {
-        // Same caller gate as openFile(): mapping state / file sizes are
-        // not privacy-safe to leak to arbitrary processes, so require the
-        // caller to hold CAMERA (i.e. a plausibly-hooked camera app) or
-        // be our own UID.
         try {
             enforceCallerIsCameraApp();
         } catch (FileNotFoundException denied) {
@@ -213,6 +202,9 @@ public class MediaProvider extends ContentProvider {
         int match = MATCHER.match(uri);
         if (match == MATCH_RESOLVE) {
             return resolveCursor(uri);
+        }
+        if (match == MATCH_CONFIG) {
+            return configCursor(uri);
         }
         File f = resolveFile(uri);
         if (f == null) return null;
@@ -233,37 +225,43 @@ public class MediaProvider extends ContentProvider {
     }
 
     /**
-     * Execute the {@link MediaMappings#resolve MediaMappings.resolve}
-     * resolution chain and return a single-row cursor with column
-     * {@code uri} containing the winning content URI, or an empty row if
-     * nothing matched. The hook reads this to decide which concrete
-     * media entry to stream into its staging file.
+     * Execute the {@link MediaMappings#resolve} resolution chain and return a
+     * single-row cursor with columns {@code ["uri", "status"]}.
+     *
+     * <p>Crucial fix: {@code status} is {@code "OK"} when a valid non-empty media file
+     * resolves, or {@code "UNSET"} when the user intentionally cleared the slot so
+     * {@code HookMain} knows to delete its stale local copy rather than keeping old media!
      */
     @NonNull
     private Cursor resolveCursor(@NonNull Uri uri) {
         Context ctx = getContext();
-        MatrixCursor c = new MatrixCursor(new String[]{"uri"});
+        MatrixCursor c = new MatrixCursor(new String[]{"uri", "status"});
         if (ctx == null) {
-            c.addRow(new Object[]{null});
+            c.addRow(new Object[]{null, STATUS_UNSET});
             return c;
         }
         String pkg = uri.getQueryParameter("pkg");
         String facing = uri.getQueryParameter("facing");
         String type = uri.getQueryParameter("type");
         if (TextUtils.isEmpty(pkg) || TextUtils.isEmpty(type)) {
-            c.addRow(new Object[]{null});
+            c.addRow(new Object[]{null, STATUS_UNSET});
             return c;
         }
         if (TextUtils.isEmpty(facing)) facing = MediaMappings.FACING_ANY;
         if (!MediaMappings.TYPE_IMAGE.equals(type) && !MediaMappings.TYPE_VIDEO.equals(type)) {
-            c.addRow(new Object[]{null});
+            c.addRow(new Object[]{null, STATUS_UNSET});
             return c;
         }
         String resolved = MediaMappings.resolve(ctx, pkg, facing, type);
+        if (!TextUtils.isEmpty(resolved)) {
+            // Verify the backing library file actually exists and is non-empty
+            File libFile = libraryFileForUri(ctx, resolved, type);
+            if (libFile == null || !libFile.exists() || libFile.length() == 0) {
+                resolved = null;
+            }
+        }
         if (TextUtils.isEmpty(resolved)) {
-            // Fall back to the legacy "/image" or "/video" URI if the
-            // manager-staged DCIM file is populated — keeps legacy-only users
-            // working even when no explicit mapping was configured.
+            // Fall back to legacy staged file if present
             File legacy = MediaMappings.TYPE_IMAGE.equals(type)
                     ? MediaPaths.getImageTarget(ctx)
                     : MediaPaths.getVideoTarget(ctx);
@@ -271,8 +269,206 @@ public class MediaProvider extends ContentProvider {
                 resolved = (MediaMappings.TYPE_IMAGE.equals(type) ? URI_IMAGE : URI_VIDEO).toString();
             }
         }
-        c.addRow(new Object[]{resolved});
+        String status = !TextUtils.isEmpty(resolved) ? STATUS_OK : STATUS_UNSET;
+        c.addRow(new Object[]{resolved, status});
         return c;
+    }
+
+    /**
+     * Return a single-row cursor with the unified configuration for {@code (pkg, facing)}:
+     * <ul>
+     *   <li>{@code disabled}: 1 if module disabled (or excluded by package filter), else 0</li>
+     *   <li>{@code loop}: 1 if video looping enabled, else 0</li>
+     *   <li>{@code playAudio}: 1 if video audio enabled (not muted), else 0</li>
+     *   <li>{@code forcePrivateDir}: 1 if private_dir forced, else 0</li>
+     *   <li>{@code forceShowToast}: 1 if force_show enabled, else 0</li>
+     *   <li>{@code disableToast}: 1 if toasts suppressed, else 0</li>
+     *   <li>{@code transformJson}: serialized {@link TransformConfig}</li>
+     *   <li>{@code sensorProfileJson}: serialized {@link SensorProfiler.LensProfile}</li>
+     *   <li>{@code cuesJson}: serialized JSONArray of {@link TransformConfig.CuePoint}</li>
+     *   <li>{@code librarySummaryJson}: JSONArray of available MediaLibrary items for hot-swap</li>
+     * </ul>
+     */
+    @NonNull
+    private Cursor configCursor(@NonNull Uri uri) {
+        String[] cols = new String[]{
+                "disabled", "loop", "playAudio", "forcePrivateDir",
+                "forceShowToast", "disableToast", "transformJson",
+                "sensorProfileJson", "cuesJson", "librarySummaryJson"
+        };
+        MatrixCursor c = new MatrixCursor(cols);
+        Context ctx = getContext();
+        if (ctx == null) return c;
+
+        String pkg = uri.getQueryParameter("pkg");
+        String facing = uri.getQueryParameter("facing");
+        if (TextUtils.isEmpty(pkg)) pkg = MediaMappings.PKG_GLOBAL;
+        if (TextUtils.isEmpty(facing)) facing = MediaMappings.FACING_BACK;
+
+        SharedPreferences sp = ctx.getSharedPreferences(VCAMApp.PREFS, Context.MODE_PRIVATE);
+        File dcim = new File(Environment.getExternalStorageDirectory(), "DCIM/Camera1");
+
+        boolean markerDisabled = new File(dcim, "disable.jpg").exists()
+                || sp.getBoolean("pref_disable_module", false);
+        boolean pkgAllowed = isPackageAllowedByFilter(sp.getString(VCAMApp.KEY_PACKAGE_FILTER, ""), pkg);
+        boolean effectiveDisabled = markerDisabled || !pkgAllowed;
+
+        boolean loop = sp.getBoolean(VCAMApp.KEY_LOOP_VIDEO, true);
+        boolean markerPlaySound = new File(dcim, "no-silent.jpg").exists();
+        boolean prefMute = sp.getBoolean(VCAMApp.KEY_MUTE_VIDEO, true);
+        boolean playAudio = markerPlaySound || !prefMute;
+
+        boolean forcePrivate = new File(dcim, "private_dir.jpg").exists()
+                || sp.getBoolean("pref_force_private_dir", false);
+        boolean forceShow = new File(dcim, "force_show.jpg").exists()
+                || sp.getBoolean("pref_force_show", false);
+        boolean noToast = new File(dcim, "no_toast.jpg").exists()
+                || sp.getBoolean("pref_disable_toast", false);
+
+        TransformConfig tc = TransformConfig.resolve(ctx, pkg, facing);
+        SensorProfiler.LensProfile lp = SensorProfiler.getProfileForFacing(ctx, facing);
+
+        String resolvedVidUri = MediaMappings.resolve(ctx, pkg, facing, MediaMappings.TYPE_VIDEO);
+        List<TransformConfig.CuePoint> cues = TransformConfig.listCues(ctx, resolvedVidUri);
+        JSONArray cuesArr = new JSONArray();
+        for (TransformConfig.CuePoint cp : cues) {
+            cuesArr.put(cp.toJson());
+        }
+
+        List<MediaLibrary.Entry> libEntries = MediaLibrary.list(ctx);
+        JSONArray libArr = new JSONArray();
+        try {
+            for (MediaLibrary.Entry e : libEntries) {
+                org.json.JSONObject eo = new org.json.JSONObject();
+                eo.put("id", e.id);
+                eo.put("type", e.type);
+                eo.put("name", e.name);
+                eo.put("uri", e.uri().toString());
+                libArr.put(eo);
+            }
+        } catch (Throwable ignored) {}
+
+        c.addRow(new Object[]{
+                effectiveDisabled ? 1 : 0,
+                loop ? 1 : 0,
+                playAudio ? 1 : 0,
+                forcePrivate ? 1 : 0,
+                forceShow ? 1 : 0,
+                noToast ? 1 : 0,
+                tc.toJson().toString(),
+                lp.toJson().toString(),
+                cuesArr.toString(),
+                libArr.toString()
+        });
+        return c;
+    }
+
+    /**
+     * Evaluate comma-separated package filter. Empty filter allows all packages.
+     * Supports prefixing with {@code !} or {@code -} for blocklist entries.
+     */
+    public static boolean isPackageAllowedByFilter(@Nullable String filterRaw, @Nullable String pkg) {
+        if (TextUtils.isEmpty(filterRaw) || TextUtils.isEmpty(pkg)) return true;
+        if (BuildConfig.APPLICATION_ID.equals(pkg)) return true;
+        String[] tokens = filterRaw.split(",");
+        boolean hasAllowRules = false;
+        boolean matchedAllow = false;
+        for (String raw : tokens) {
+            String t = raw.trim();
+            if (t.isEmpty()) continue;
+            if (t.startsWith("!") || t.startsWith("-")) {
+                String blocked = t.substring(1).trim();
+                if (!blocked.isEmpty() && pkg.equalsIgnoreCase(blocked)) {
+                    return false;
+                }
+            } else {
+                hasAllowRules = true;
+                if (pkg.equalsIgnoreCase(t) || pkg.contains(t)) {
+                    matchedAllow = true;
+                }
+            }
+        }
+        return !hasAllowRules || matchedAllow;
+    }
+
+    @Nullable
+    @Override
+    public Bundle call(@NonNull String method, @Nullable String arg, @Nullable Bundle extras) {
+        try {
+            enforceCallerIsCameraApp();
+        } catch (FileNotFoundException denied) {
+            return null;
+        }
+        Context ctx = getContext();
+        if (ctx == null) return null;
+        Bundle reply = new Bundle();
+
+        if ("report_telemetry".equals(method) && extras != null) {
+            String json = extras.getString("telemetry_json");
+            if (!TextUtils.isEmpty(json)) {
+                try {
+                    SensorProfiler.HostTelemetry ht = SensorProfiler.HostTelemetry.fromJson(
+                            new org.json.JSONObject(json));
+                    if (ht != null) {
+                        SensorProfiler.recordHostTelemetry(ctx, ht);
+                        reply.putBoolean("ok", true);
+                    }
+                } catch (Throwable ignored) {}
+            }
+            return reply;
+        }
+
+        if ("update_transform".equals(method) && extras != null) {
+            String pkg = extras.getString("pkg", MediaMappings.PKG_GLOBAL);
+            String facing = extras.getString("facing", MediaMappings.FACING_ANY);
+            String json = extras.getString("transform_json");
+            if (!TextUtils.isEmpty(json)) {
+                TransformConfig cfg = TransformConfig.fromJsonString(json);
+                TransformConfig.saveScoped(ctx, pkg, facing, cfg);
+                reply.putBoolean("ok", true);
+            }
+            return reply;
+        }
+
+        if ("select_library_media".equals(method) && extras != null) {
+            String pkg = extras.getString("pkg", MediaMappings.PKG_GLOBAL);
+            String facing = extras.getString("facing", MediaMappings.FACING_ANY);
+            String type = extras.getString("type", MediaMappings.TYPE_VIDEO);
+            String uri = extras.getString("uri");
+            MediaMappings.setOne(ctx, pkg, facing, type, uri);
+            reply.putBoolean("ok", true);
+            return reply;
+        }
+
+        if ("save_preset".equals(method) && extras != null) {
+            String name = extras.getString("name", "Preset");
+            String json = extras.getString("transform_json");
+            if (!TextUtils.isEmpty(json)) {
+                TransformConfig.savePreset(ctx, name, TransformConfig.fromJsonString(json));
+                reply.putBoolean("ok", true);
+            }
+            return reply;
+        }
+
+        if ("save_cues".equals(method) && extras != null) {
+            String mediaKey = extras.getString("media_key");
+            String cuesJson = extras.getString("cues_json");
+            if (!TextUtils.isEmpty(cuesJson)) {
+                try {
+                    JSONArray arr = new JSONArray(cuesJson);
+                    java.util.List<TransformConfig.CuePoint> list = new java.util.ArrayList<>();
+                    for (int i = 0; i < arr.length(); i++) {
+                        TransformConfig.CuePoint cp = TransformConfig.CuePoint.fromJson(arr.optJSONObject(i));
+                        if (cp != null) list.add(cp);
+                    }
+                    TransformConfig.saveCues(ctx, mediaKey, list);
+                    reply.putBoolean("ok", true);
+                } catch (Throwable ignored) {}
+            }
+            return reply;
+        }
+
+        return reply;
     }
 
     @Nullable

@@ -164,15 +164,45 @@ public class CameraVerifyActivity extends AppCompatActivity {
         cameraHandler = new Handler(cameraThread.getLooper());
 
         if (previewView.isAvailable()) {
+            applyVerifyAspectTransform();
             openCamera();
         } else {
             previewView.setSurfaceTextureListener(new TextureView.SurfaceTextureListener() {
-                @Override public void onSurfaceTextureAvailable(@NonNull SurfaceTexture s, int w, int h) { openCamera(); }
-                @Override public void onSurfaceTextureSizeChanged(@NonNull SurfaceTexture s, int w, int h) {}
+                @Override public void onSurfaceTextureAvailable(@NonNull SurfaceTexture s, int w, int h) {
+                    applyVerifyAspectTransform();
+                    openCamera();
+                }
+                @Override public void onSurfaceTextureSizeChanged(@NonNull SurfaceTexture s, int w, int h) {
+                    applyVerifyAspectTransform();
+                }
                 @Override public boolean onSurfaceTextureDestroyed(@NonNull SurfaceTexture s) { return true; }
                 @Override public void onSurfaceTextureUpdated(@NonNull SurfaceTexture s) {}
             });
         }
+    }
+
+    private void applyVerifyAspectTransform() {
+        runOnUiThread(() -> {
+            TransformConfig cfg = TransformConfig.loadGlobal(this);
+            int srcW = 1280;
+            int srcH = 720;
+            File vid = MediaPaths.getVideoTarget(this);
+            File img = MediaPaths.getImageTarget(this);
+            if (vid.exists() && vid.length() > 0) {
+                int[] r = MediaPaths.videoResolution(vid);
+                if (r != null) {
+                    srcW = r[0];
+                    srcH = r[1];
+                }
+            } else if (img.exists() && img.length() > 0) {
+                int[] r = MediaPaths.imageResolution(img);
+                if (r != null) {
+                    srcW = r[0];
+                    srcH = r[1];
+                }
+            }
+            FrameTransformPipeline.applyTextureViewTransform(previewView, srcW, srcH, cfg);
+        });
     }
 
     @SuppressWarnings("MissingPermission")
@@ -243,6 +273,7 @@ public class CameraVerifyActivity extends AppCompatActivity {
             SurfaceTexture tex = previewView.getSurfaceTexture();
             if (tex == null) return;
             tex.setDefaultBufferSize(1280, 720);
+            applyVerifyAspectTransform();
             Surface previewSurface = new Surface(tex);
 
             CaptureRequest.Builder builder = cameraDevice.createCaptureRequest(
