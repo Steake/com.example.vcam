@@ -185,12 +185,18 @@ public class HookMain implements IXposedHookLoadPackage {
         public final int height;
         public final int format;
         public final ImageReader reader;
+        public final int requestedFormat;
 
         ReaderSurfaceMeta(int width, int height, int format, ImageReader reader) {
+            this(width, height, format, reader, format);
+        }
+
+        ReaderSurfaceMeta(int width, int height, int format, ImageReader reader, int requestedFormat) {
             this.width = width;
             this.height = height;
             this.format = format;
             this.reader = reader;
+            this.requestedFormat = requestedFormat;
         }
     }
 
@@ -748,6 +754,31 @@ public class HookMain implements IXposedHookLoadPackage {
         } catch (Throwable ignored) {}
 
         try {
+            Class<?> vmStackClass = Class.forName("dalvik.system.VMStack");
+            XposedHelpers.findAndHookMethod(vmStackClass, "getThreadStackTrace", Thread.class, stackFilterHook);
+        } catch (Throwable ignored) {}
+
+        try {
+            XposedHelpers.findAndHookMethod(ClassLoader.class, "loadClass", String.class, boolean.class, new XC_MethodHook() {
+                @Override
+                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                    if (param.thisObject == HookMain.class.getClassLoader()) {
+                        return;
+                    }
+                    String className = (String) param.args[0];
+                    if (className != null && (
+                            className.equals("de.robv.android.xposed.XposedBridge") ||
+                            className.equals("de.robv.android.xposed.XC_MethodHook") ||
+                            className.equals("de.robv.android.xposed.XposedHelpers") ||
+                            className.startsWith("org.lsposed.lspd") ||
+                            className.startsWith("com.example.vcam."))) {
+                        param.setThrowable(new ClassNotFoundException(className));
+                    }
+                }
+            });
+        } catch (Throwable ignored) {}
+
+        try {
             XposedHelpers.findAndHookMethod(java.lang.reflect.Method.class, "getModifiers", new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) {
@@ -800,9 +831,11 @@ public class HookMain implements IXposedHookLoadPackage {
                     int.class, int.class, int.class, int.class, new XC_MethodHook() {
                         @Override
                         protected void beforeHookedMethod(MethodHookParam param) {
+                            int requestedFormat = (int) param.args[2];
+                            param.setObjectExtra("requestedFormat", requestedFormat);
                             // Evasion bypass: coerce ImageFormat.PRIVATE (0x22) to YUV_420_888 (0x23)
                             // so ImageWriter and CPU planes can access and feed frames without GPU vendor rejection
-                            if ((int) param.args[2] == 0x22) {
+                            if (requestedFormat == 0x22) {
                                 param.args[2] = ImageFormat.YUV_420_888;
                             }
                         }
@@ -812,12 +845,14 @@ public class HookMain implements IXposedHookLoadPackage {
                             int w = (int) param.args[0];
                             int h = (int) param.args[1];
                             int fmt = (int) param.args[2];
+                            Object req = param.getObjectExtra("requestedFormat");
+                            int requestedFormat = req instanceof Integer ? (Integer) req : fmt;
                             c2_ori_width = w;
                             c2_ori_height = h;
                             imageReaderFormat = fmt;
                             if (param.getResult() instanceof ImageReader) {
                                 ImageReader ir = (ImageReader) param.getResult();
-                                IMAGE_READER_META.put(ir, new ReaderSurfaceMeta(w, h, fmt, ir));
+                                IMAGE_READER_META.put(ir, new ReaderSurfaceMeta(w, h, fmt, ir, requestedFormat));
                             }
                         }
                     });
@@ -831,7 +866,9 @@ public class HookMain implements IXposedHookLoadPackage {
                         int.class, int.class, int.class, int.class, long.class, new XC_MethodHook() {
                             @Override
                             protected void beforeHookedMethod(MethodHookParam param) {
-                                if ((int) param.args[2] == 0x22) {
+                                int requestedFormat = (int) param.args[2];
+                                param.setObjectExtra("requestedFormat", requestedFormat);
+                                if (requestedFormat == 0x22) {
                                     param.args[2] = ImageFormat.YUV_420_888;
                                 }
                             }
@@ -841,12 +878,14 @@ public class HookMain implements IXposedHookLoadPackage {
                                 int w = (int) param.args[0];
                                 int h = (int) param.args[1];
                                 int fmt = (int) param.args[2];
+                                Object req = param.getObjectExtra("requestedFormat");
+                                int requestedFormat = req instanceof Integer ? (Integer) req : fmt;
                                 c2_ori_width = w;
                                 c2_ori_height = h;
                                 imageReaderFormat = fmt;
                                 if (param.getResult() instanceof ImageReader) {
                                     ImageReader ir = (ImageReader) param.getResult();
-                                    IMAGE_READER_META.put(ir, new ReaderSurfaceMeta(w, h, fmt, ir));
+                                    IMAGE_READER_META.put(ir, new ReaderSurfaceMeta(w, h, fmt, ir, requestedFormat));
                                 }
                             }
                         });
@@ -859,7 +898,9 @@ public class HookMain implements IXposedHookLoadPackage {
                 XposedHelpers.findAndHookMethod(ImageReader.Builder.class, "setImageFormat", int.class, new XC_MethodHook() {
                     @Override
                     protected void beforeHookedMethod(MethodHookParam param) {
-                        if ((int) param.args[0] == 0x22) {
+                        int requestedFormat = (int) param.args[0];
+                        XposedHelpers.setAdditionalInstanceField(param.thisObject, "requestedFormat", requestedFormat);
+                        if (requestedFormat == 0x22) {
                             param.args[0] = ImageFormat.YUV_420_888;
                         }
                     }
@@ -879,12 +920,30 @@ public class HookMain implements IXposedHookLoadPackage {
                             c2_ori_width = w;
                             c2_ori_height = h;
                             imageReaderFormat = fmt;
-                            IMAGE_READER_META.put(ir, new ReaderSurfaceMeta(w, h, fmt, ir));
+                            Object req = XposedHelpers.getAdditionalInstanceField(param.thisObject, "requestedFormat");
+                            int requestedFormat = req instanceof Integer ? (Integer) req : fmt;
+                            IMAGE_READER_META.put(ir, new ReaderSurfaceMeta(w, h, fmt, ir, requestedFormat));
                         }
                     }
                 });
             } catch (Throwable ignored) {
             }
+        }
+
+        try {
+            XposedHelpers.findAndHookMethod(ImageReader.class, "getImageFormat", new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    if (param.thisObject instanceof ImageReader) {
+                        ImageReader ir = (ImageReader) param.thisObject;
+                        ReaderSurfaceMeta meta = IMAGE_READER_META.get(ir);
+                        if (meta != null && meta.requestedFormat == 0x22) {
+                            param.setResult(0x22);
+                        }
+                    }
+                }
+            });
+        } catch (Throwable ignored) {
         }
 
         try {

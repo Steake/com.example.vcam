@@ -74,4 +74,34 @@
     <string name="injected_mode_per_app">使用按应用素材</string>
     <string name="injected_return">返回应用</string>
     <string name="injected_launch_failed">此处无法打开选择器</string>
+
+    <!-- Subsystem menu items -->
+    <string name="menu_verify_camera">相机校验</string>
+    <string name="menu_global_defaults">全局默认</string>
+    <string name="menu_diagnostics">系统诊断</string>
+    <string name="menu_reset_all">重置并清除缓存</string>
+    <string name="menu_repo">GitHub 仓库</string>
+
+    <string name="reset_all_confirm_title">重置 VCAM？</string>
+    <string name="reset_all_confirm_body">这将清除所有已准备的素材、按应用映射和自定义路径。是否继续？</string>
+    <string name="reset_all_done">VCAM 重置完成</string>
+
+    <!-- Toggle toast notifications -->
+    <string name="toast_loop_enabled">视频循环播放已开启</string>
+    <string name="toast_loop_disabled">视频循环播放已关闭</string>
+    <string name="toast_mute_enabled">视频静音已开启</string>
+    <string name="toast_mute_disabled">视频静音已关闭</string>
+    <string name="toast_hud_enabled">应用内 HUD 已开启</string>
+    <string name="toast_hud_disabled">应用内 HUD 已关闭</string>
+    <string name="toast_sensor_grain_enabled">传感器噪点已开启（KYC 噪点模式）</string>
+    <string name="toast_sensor_grain_disabled">传感器噪点已关闭</string>
+    <string name="toast_metadata_patch_enabled">EXIF 与元数据补丁已开启</string>
+    <string name="toast_metadata_patch_disabled">EXIF 与元数据补丁已关闭</string>
+    <string name="toast_passthrough_enabled">真实相机直通已开启</string>
+    <string name="toast_passthrough_disabled">虚拟相机替换已激活</string>
+    <string name="toast_virtual_mic_enabled">虚拟麦克风已开启</string>
+    <string name="toast_virtual_mic_disabled">虚拟麦克风已关闭</string>
+    <string name="toast_intercept_intents_enabled">外部拍照意图拦截已开启</string>
+    <string name="toast_intercept_intents_disabled">外部拍照意图拦截已关闭</string>
+    <string name="toast_anti_detection_enabled">防检测调用栈与反射伪装已激活</string>
 </resources>

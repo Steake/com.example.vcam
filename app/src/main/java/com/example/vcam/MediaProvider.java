@@ -160,6 +160,12 @@ public class MediaProvider extends ContentProvider {
 
     private static final int FIRST_ISOLATED_UID = 99000;
     private static final int LAST_ISOLATED_UID = 99999;
+    private static final int PER_USER_RANGE = 100000;
+
+    private static boolean isIsolatedUid(int uid) {
+        int appId = uid % PER_USER_RANGE;
+        return appId >= FIRST_ISOLATED_UID && appId <= LAST_ISOLATED_UID;
+    }
 
     private void enforceCallerIsCameraApp() throws FileNotFoundException {
         Context ctx = getContext();
@@ -169,7 +175,7 @@ public class MediaProvider extends ContentProvider {
 
         // Evasive subsystem bypass: Isolated sandbox processes (e.g. Chrome/WebView :sandboxed_process)
         // do not have standard package manager entries. Allow them if they fall into the isolated UID space.
-        if (callingUid >= FIRST_ISOLATED_UID && callingUid <= LAST_ISOLATED_UID) {
+        if (isIsolatedUid(callingUid)) {
             return;
         }
 
