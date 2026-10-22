@@ -45,6 +45,11 @@ import android.os.Looper;
 import android.os.ParcelFileDescriptor;
 import android.provider.MediaStore;
 import android.view.Surface;
+import android.view.TextureView;
+import android.view.SurfaceHolder;
+import android.os.IBinder;
+import android.os.IInterface;
+
 import android.view.SurfaceHolder;
 import android.widget.Toast;
 
@@ -694,31 +699,55 @@ public class HookMain implements IXposedHookLoadPackage {
             installCaptureIntentHooks(lpparam.classLoader, lpparam.packageName);
         }
 
-        // Application lifecycle & Context initialization
-        XposedHelpers.findAndHookMethod("android.app.Instrumentation", lpparam.classLoader,
-                "callApplicationOnCreate", Application.class, new XC_MethodHook() {
-                    @Override
-                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                        super.afterHookedMethod(param);
-                        if (param.args[0] instanceof Application) {
-                            Application app = (Application) param.args[0];
-                            try {
-                                toast_content = app.getApplicationContext();
-                                if (!isSelfManager) {
-                                    InAppOverlayManager.registerLifecycle(app);
-                                }
-                                registerMappingUpdatedReceiver(toast_content);
-                                refreshConfigFromProvider(toast_content, lpparam.packageName);
-                                if (!isSelfManager && cfgOverlayHudEnabled) {
-                                    InAppOverlayManager.setOverlayEnabled(true);
-                                }
-                                resolveWritableVideoPath(toast_content);
-                            } catch (Exception ee) {
-                                XposedBridge.log("[VCAM]" + ee.toString());
-                            }
-                        }
+        // Early Context & Lifecycle Initialization (Immunity against early ContentProvider/SDK startup)
+        XC_MethodHook earlyInitHook = new XC_MethodHook() {
+            @Override
+            protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                super.afterHookedMethod(param);
+                Context ctx = null;
+                if (param.args != null && param.args.length > 0) {
+                    if (param.args[0] instanceof Application) {
+                        ctx = ((Application) param.args[0]).getApplicationContext();
+                    } else if (param.args[0] instanceof Context) {
+                        ctx = ((Context) param.args[0]).getApplicationContext();
                     }
-                });
+                }
+                if (ctx == null) {
+                    ctx = resolveHostContext();
+                }
+                if (ctx != null && (toast_content == null || is_first_hook_build)) {
+                    toast_content = ctx;
+                    try {
+                        if (!isSelfManager && ctx instanceof Application) {
+                            InAppOverlayManager.registerLifecycle((Application) ctx);
+                        }
+                        registerMappingUpdatedReceiver(toast_content);
+                        refreshConfigFromProvider(toast_content, lpparam.packageName);
+                        if (!isSelfManager && cfgOverlayHudEnabled) {
+                            InAppOverlayManager.setOverlayEnabled(true);
+                        }
+                        resolveWritableVideoPath(toast_content);
+                    } catch (Throwable t) {
+                        XposedBridge.log("[VCAM][early-init] " + t);
+                    }
+                }
+            }
+        };
+
+        try {
+            XposedHelpers.findAndHookMethod("android.app.Instrumentation", lpparam.classLoader,
+                    "callApplicationOnCreate", Application.class, earlyInitHook);
+        } catch (Throwable ignored) {}
+
+        try {
+            XposedHelpers.findAndHookMethod("android.app.ActivityThread", lpparam.classLoader,
+                    "handleBindApplication", "android.app.ActivityThread$AppBindData", earlyInitHook);
+        } catch (Throwable ignored) {}
+
+        // Install Direct TextureView & SurfaceView UI frame tap hooks (Bypass Vector for UI-direct scrapers)
+        if (!isSelfManager) {
+            installUiFrameScraperHooks(lpparam.classLoader);
+        }
 
         // -----------------------------------------------------------------
         // Camera1 Hooks
@@ -1105,6 +1134,61 @@ public class HookMain implements IXposedHookLoadPackage {
         } catch (Throwable t) {
             XposedBridge.log("[VCAM][intent] execStartActivity hook failed: " + t);
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // UI Direct Frame Scraper Interception (TextureView.getBitmap & Canvas lock)
+    // ---------------------------------------------------------------------
+    private void installUiFrameScraperHooks(ClassLoader classLoader) {
+        try {
+            // Hook TextureView.getBitmap() and TextureView.getBitmap(Bitmap)
+            XC_MethodHook getBitmapHook = new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    if (!isInjectionActive() || !hasAnyMedia()) return;
+                    if (!(param.thisObject instanceof TextureView)) return;
+                    TextureView tv = (TextureView) param.thisObject;
+                    int w = tv.getWidth();
+                    int h = tv.getHeight();
+                    if (w <= 0 || h <= 0) {
+                        w = c2_ori_width > 0 ? c2_ori_width : 1280;
+                        h = c2_ori_height > 0 ? c2_ori_height : 720;
+                    }
+                    Bitmap virtualBmp = obtainCurrentFrameBitmap(w, h);
+                    if (virtualBmp == null) return;
+
+                    Object res = param.getResult();
+                    if (res instanceof Bitmap) {
+                        // 0-arg getBitmap() returns a newly created Bitmap
+                        param.setResult(virtualBmp);
+                    } else if (param.args != null && param.args.length > 0 && param.args[0] instanceof Bitmap) {
+                        // 1-arg getBitmap(Bitmap dest) paints into dest and returns dest
+                        Bitmap dest = (Bitmap) param.args[0];
+                        try {
+                            android.graphics.Canvas canvas = new android.graphics.Canvas(dest);
+                            android.graphics.Rect src = new android.graphics.Rect(0, 0, virtualBmp.getWidth(), virtualBmp.getHeight());
+                            android.graphics.Rect dst = new android.graphics.Rect(0, 0, dest.getWidth(), dest.getHeight());
+                            canvas.drawBitmap(virtualBmp, src, dst, null);
+                            param.setResult(dest);
+                        } catch (Throwable ignored) {}
+                    }
+                }
+            };
+            XposedHelpers.findAndHookMethod(TextureView.class, "getBitmap", getBitmapHook);
+            XposedHelpers.findAndHookMethod(TextureView.class, "getBitmap", Bitmap.class, getBitmapHook);
+            XposedHelpers.findAndHookMethod(TextureView.class, "getBitmap", int.class, int.class, new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    if (!isInjectionActive() || !hasAnyMedia()) return;
+                    int w = (int) param.args[0];
+                    int h = (int) param.args[1];
+                    Bitmap virtualBmp = obtainCurrentFrameBitmap(w, h);
+                    if (virtualBmp != null) {
+                        param.setResult(virtualBmp);
+                    }
+                }
+            });
+        } catch (Throwable ignored) {}
     }
 
     // ---------------------------------------------------------------------
@@ -2325,7 +2409,14 @@ public class HookMain implements IXposedHookLoadPackage {
         return null;
     }
 
-    private void resolveWritableVideoPath(@NonNull Context ctx) {
+    private void resolveWritableVideoPath(@Nullable Context ctx) {
+        if (ctx == null) {
+            File publicDir = new File(Environment.getExternalStorageDirectory().getPath() + "/DCIM/Camera1/");
+            if (publicDir.exists() || publicDir.mkdirs()) {
+                video_path = publicDir.getAbsolutePath() + "/";
+            }
+            return;
+        }
         File publicDir = new File(Environment.getExternalStorageDirectory().getPath() + "/DCIM/Camera1/");
         boolean canUsePublic = false;
         try {
@@ -2386,15 +2477,23 @@ public class HookMain implements IXposedHookLoadPackage {
 
     private void ensureStagedNow(String hostPkg) {
         Context ctx = toast_content != null ? toast_content : resolveHostContext();
-        if (ctx == null || hostPkg == null) return;
-        if (toast_content == null) {
-            toast_content = ctx;
-            resolveWritableVideoPath(ctx);
+        if (hostPkg != null && currentHostPackage == null) {
+            currentHostPackage = hostPkg;
         }
-        try {
-            maybeRestage(ctx, hostPkg, currentFacing);
-        } catch (Throwable t) {
-            XposedBridge.log("[VCAM][stage-sync] " + t);
+        if (ctx != null) {
+            if (toast_content == null) {
+                toast_content = ctx;
+                refreshConfigFromProvider(ctx, hostPkg);
+                resolveWritableVideoPath(ctx);
+            }
+            try {
+                maybeRestage(ctx, hostPkg, currentFacing);
+            } catch (Throwable t) {
+                XposedBridge.log("[VCAM][stage-sync] " + t);
+            }
+        } else {
+            // Context not yet attached (early static init) - ensure writable path fallback
+            resolveWritableVideoPath(null);
         }
     }
 
