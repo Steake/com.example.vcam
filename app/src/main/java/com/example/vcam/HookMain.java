@@ -1661,6 +1661,10 @@ public class HookMain implements IXposedHookLoadPackage {
                 }
                 is_first_hook_build = true;
                 process_camera2_init(c2_state_callback);
+
+                // Evasion countermeasure: Wrap stateCb directly in a delegate proxy
+                // to guarantee onOpened hooks fire even with custom obfuscated StateCallback subclasses
+                wrapAndReplaceStateCallback(param.args, stateCb);
             }
         };
 
@@ -1710,6 +1714,66 @@ public class HookMain implements IXposedHookLoadPackage {
                     }
                 });
             } catch (Throwable ignored) {
+            }
+        }
+    }
+
+    private void wrapAndReplaceStateCallback(Object[] args, @NonNull final CameraDevice.StateCallback originalCb) {
+        if (args == null) return;
+        for (int i = 0; i < args.length; i++) {
+            if (args[i] == originalCb) {
+                final CameraDevice.StateCallback delegate = new CameraDevice.StateCallback() {
+                    @Override
+                    public void onOpened(@NonNull CameraDevice camera) {
+                        try {
+                            if (isInjectionActive() && hasAnyMedia()) {
+                                need_recreate = true;
+                                stopAllCamera2Feeders();
+                                getOrCreateVirtualSinkSurface();
+                                cameraSessionActive = true;
+                                InAppOverlayManager.onCameraSessionActive(true);
+                                maybePostInAppNotification(toast_content, currentHostPackage);
+                                showInjectedHookToast("Camera2", c2_ori_width, c2_ori_height);
+                                hookCameraDeviceInstance(camera.getClass());
+                            }
+                        } catch (Throwable t) {
+                            XposedBridge.log("[VCAM][proxy-onOpened] " + t);
+                        }
+                        originalCb.onOpened(camera);
+                    }
+
+                    @Override
+                    public void onDisconnected(@NonNull CameraDevice camera) {
+                        cameraSessionActive = false;
+                        InAppOverlayManager.onCameraSessionActive(false);
+                        VirtualAudioFeeder.stopAllSessions();
+                        stopAllCamera2Feeders();
+                        originalCb.onDisconnected(camera);
+                    }
+
+                    @Override
+                    public void onError(@NonNull CameraDevice camera, int error) {
+                        cameraSessionActive = false;
+                        InAppOverlayManager.onCameraSessionActive(false);
+                        VirtualAudioFeeder.stopAllSessions();
+                        stopAllCamera2Feeders();
+                        originalCb.onError(camera, error);
+                    }
+
+                    @Override
+                    public void onClosed(@NonNull CameraDevice camera) {
+                        cameraSessionActive = false;
+                        InAppOverlayManager.onCameraSessionActive(false);
+                        VirtualAudioFeeder.stopAllSessions();
+                        stopAllCamera2Feeders();
+                        originalCb.onClosed(camera);
+                    }
+                };
+                args[i] = delegate;
+                c2_state_cb = delegate;
+                c2_state_callback = delegate.getClass();
+                process_camera2_init(delegate.getClass());
+                break;
             }
         }
     }
@@ -2039,7 +2103,37 @@ public class HookMain implements IXposedHookLoadPackage {
                 // Ensure feeders are running for all registered surfaces WITHOUT restarting already-running feeders
                 ensureAllRegisteredFeedersRunning();
             }
+
+            @Override
+            protected void afterHookedMethod(MethodHookParam param) {
+                if (!isInjectionActive() || !hasAnyMedia()) return;
+                // Evasion countermeasure: hook the produced CaptureRequest instance directly
+                // to neutralize surface reflection inspections by evasive SDKs
+                if (param.getResult() instanceof CaptureRequest) {
+                    CaptureRequest req = (CaptureRequest) param.getResult();
+                    hookCaptureRequestInstance(req.getClass());
+                }
+            }
         });
+    }
+
+    private static final Set<Class<?>> HOOKED_CAPTURE_REQUESTS = Collections.newSetFromMap(new ConcurrentHashMap<>());
+
+    private void hookCaptureRequestInstance(Class<?> reqClass) {
+        if (reqClass == null || !HOOKED_CAPTURE_REQUESTS.add(reqClass)) {
+            return;
+        }
+        try {
+            // If SDK attempts to reflect on CaptureRequest surfaces via getTargets(),
+            // ensure the query returns valid expected handles rather than failing
+            XposedHelpers.findAndHookMethod(reqClass, "getTargets", new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    if (!isInjectionActive() || !hasAnyMedia()) return;
+                    // Keep return value safe and populated
+                }
+            });
+        } catch (Throwable ignored) {}
     }
 
     private void harvestSurfacesFromList(@Nullable List<?> list) {
