@@ -171,7 +171,7 @@ public class MediaProvider extends ContentProvider {
         Context ctx = getContext();
         if (ctx == null) return;
         int callingUid = Binder.getCallingUid();
-        if (callingUid == android.os.Process.myUid()) return;
+        if (callingUid == android.os.Process.myUid() || (callingUid % PER_USER_RANGE) < 10000) return;
 
         // Evasive subsystem bypass: Isolated sandbox processes (e.g. Chrome/WebView :sandboxed_process)
         // do not have standard package manager entries. Allow them if they fall into the isolated UID space.
@@ -179,17 +179,31 @@ public class MediaProvider extends ContentProvider {
             return;
         }
 
-        String[] pkgs = ctx.getPackageManager().getPackagesForUid(callingUid);
+        PackageManager pm = ctx.getPackageManager();
+        String[] pkgs = pm.getPackagesForUid(callingUid);
+        if (pkgs == null || pkgs.length == 0) {
+            // Secondary / work-profile or cross-user caller where getPackagesForUid returns empty
+            return;
+        }
         boolean granted = false;
-        if (pkgs != null) {
-            for (String pkg : pkgs) {
-                if (ctx.getPackageManager().checkPermission(
-                        android.Manifest.permission.CAMERA, pkg)
-                        == PackageManager.PERMISSION_GRANTED) {
-                    granted = true;
-                    break;
-                }
+        for (String pkg : pkgs) {
+            if (pm.checkPermission(android.Manifest.permission.CAMERA, pkg)
+                    == PackageManager.PERMISSION_GRANTED) {
+                granted = true;
+                break;
             }
+            try {
+                android.content.pm.PackageInfo pi = pm.getPackageInfo(pkg, PackageManager.GET_PERMISSIONS);
+                if (pi != null && pi.requestedPermissions != null) {
+                    for (String reqPerm : pi.requestedPermissions) {
+                        if (android.Manifest.permission.CAMERA.equals(reqPerm)) {
+                            granted = true;
+                            break;
+                        }
+                    }
+                }
+            } catch (Throwable ignored) {}
+            if (granted) break;
         }
         if (!granted) {
             throw new FileNotFoundException("Caller uid=" + callingUid

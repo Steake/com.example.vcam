@@ -19,20 +19,9 @@ import java.nio.ByteBuffer;
 import de.robv.android.xposed.XposedBridge;
 
 /**
- * Feeds a single staged still image (or synthetic Test Pattern / QR Code frame)
- * into a Camera1 or Camera2 output {@link Surface} continuously at the target
- * sensor cadence (~30fps / 33ms when {@code fpsMatchEnabled} is active, or ~15fps).
- *
- * <p>Upgrades over the legacy implementation:
- * <ul>
- *   <li><b>Zero per-tick JPEG re-decoding</b>: Caches the transformed {@link Bitmap}
- *       in memory and draws it directly onto preview canvases with {@link FrameTransformPipeline}.</li>
- *   <li><b>First-class Aspect Ratio, Rotation &amp; PTZ</b>: Rebuilds the cached frame
- *       whenever {@link HookMain#getActiveTransformConfig()} or the source file changes.</li>
- *   <li><b>Temporal Sensor Grain &amp; EXIF Synthesis</b>: Applies subtle +/- 1..2 LSB
- *       temporal photon shot noise on YUV frames and injects hardware-matched EXIF APP1
- *       headers into JPEG captures via {@link ExifSynthesizer}.</li>
- * </ul>
+ * Feeds a single staged still image (or synthetic Test Pattern / QR Code frame,
+ * or live decoded video frame fallback for JPEG still captures) into a Camera1
+ * or Camera2 output {@link Surface}.
  */
 public class StaticBitmapFeeder {
 
@@ -70,9 +59,9 @@ public class StaticBitmapFeeder {
                               int height, String bitmapPath) {
         this.surface = surface;
         this.surfaceFormat = surfaceFormat;
-        this.width = Math.max(2, width & ~1);
-        this.height = Math.max(2, height & ~1);
-        this.bitmapPath = bitmapPath;
+        this.width = Math.max(2, (width > 0 ? width : 1280) & ~1);
+        this.height = Math.max(2, (height > 0 ? height : 720) & ~1);
+        this.bitmapPath = bitmapPath != null ? bitmapPath : "";
     }
 
     public StaticBitmapFeeder(Surface surface, File bitmapFile, int width, int height) {
@@ -81,8 +70,18 @@ public class StaticBitmapFeeder {
         start();
     }
 
+    public StaticBitmapFeeder(Surface surface, File bitmapFile, int width, int height, int surfaceFormat) {
+        this(surface, surfaceFormat, width > 0 ? width : 1280, height > 0 ? height : 720,
+                bitmapFile != null ? bitmapFile.getAbsolutePath() : "");
+        start();
+    }
+
     public boolean isRunning() {
         return running;
+    }
+
+    public int getSurfaceFormat() {
+        return surfaceFormat;
     }
 
     public static void invalidateAllCaches() {
@@ -106,6 +105,32 @@ public class StaticBitmapFeeder {
         if (writer != null) {
             try { writer.close(); } catch (Throwable ignored) {}
             writer = null;
+        }
+    }
+
+    /**
+     * Pushes a single frame on demand (used when a CaptureRequest targets a JPEG
+     * still-capture ImageReader surface so JPEG buffers are only queued when requested).
+     */
+    public synchronized void triggerSingleFrame() {
+        try {
+            TransformConfig cfg = HookMain.getActiveTransformConfig();
+            if (cfg.passthroughRealCamera) return;
+            if (writer == null && surfaceFormat != FORMAT_PREVIEW && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                writer = createWriter();
+            }
+            if (!ensureCache(cfg)) return;
+            if (surfaceFormat == ImageFormat.JPEG || surfaceFormat == 256) {
+                pushJpegFrame(cfg);
+            } else if (surfaceFormat == ImageFormat.YUV_420_888
+                    || surfaceFormat == ImageFormat.NV21
+                    || surfaceFormat == ImageFormat.YV12) {
+                pushYuvFrame(cfg);
+            } else {
+                drawOnCanvas(cfg);
+            }
+        } catch (Throwable t) {
+            XposedBridge.log("[VCAM][feeder] triggerSingleFrame: " + t);
         }
     }
 
@@ -134,7 +159,7 @@ public class StaticBitmapFeeder {
                 }
                 if (surfaceFormat == FORMAT_PREVIEW) {
                     drawOnCanvas(cfg);
-                } else if (surfaceFormat == ImageFormat.JPEG) {
+                } else if (surfaceFormat == ImageFormat.JPEG || surfaceFormat == 256) {
                     pushJpegFrame(cfg);
                 } else if (surfaceFormat == ImageFormat.YUV_420_888
                         || surfaceFormat == ImageFormat.NV21
@@ -181,7 +206,17 @@ public class StaticBitmapFeeder {
         }
 
         File f = new File(bitmapPath);
-        if (!f.exists() || f.length() == 0) return false;
+        if (!f.exists() || f.length() == 0) {
+            // Video-only fallback: if a video is actively decoded, synthesize from the latest video frame
+            Bitmap videoBmp = HookMain.getLatestVideoFrameBitmap(width, height);
+            if (videoBmp != null) {
+                cachedTransformedBitmap = FrameTransformPipeline.renderToBitmap(
+                        videoBmp, 0, width, height, cfg, cachedTransformedBitmap);
+                rebuildEncodedBuffers(cachedTransformedBitmap, cfg);
+                return cachedJpeg != null && cachedI420 != null;
+            }
+            return false;
+        }
         long mtime = f.lastModified();
         long size = f.length();
         long inv = cacheInvalidationCounter;
@@ -193,7 +228,6 @@ public class StaticBitmapFeeder {
                 && inv == observedInvalidationCounter
                 && sig.equals(cachedTransformSig)) {
             if (cfg.sensorGrainEnabled) {
-                // Apply lightweight in-place luma grain so consecutive frames differ
                 FrameTransformPipeline.applyLumaGrainInPlace(cachedI420, width, height);
             }
             return true;
@@ -298,6 +332,11 @@ public class StaticBitmapFeeder {
         }
     }
 
+    /**
+     * Copies a planar channel into an {@link Image.Plane}, preserving interleaved
+     * neighbor bytes when {@code pixelStride > 1} (e.g. semi-planar NV12/NV21 backing
+     * {@link ImageFormat#YUV_420_888} where U and V share the same memory block).
+     */
     public static void copyPlane(Image.Plane plane, byte[] src, int offset,
                                  int w, int h, int srcPixelStride) {
         ByteBuffer buf = plane.getBuffer();
@@ -306,28 +345,39 @@ public class StaticBitmapFeeder {
         int pixelStride = plane.getPixelStride();
         buf.rewind();
         if (pixelStride == srcPixelStride && rowStride == w * srcPixelStride) {
-            int len = Math.min(w * h * srcPixelStride, buf.remaining());
-            buf.put(src, offset, len);
+            int len = Math.min(w * h * srcPixelStride, Math.min(src.length - offset, buf.remaining()));
+            if (len > 0) buf.put(src, offset, len);
             return;
         }
-        byte[] row = new byte[rowStride];
-        for (int y = 0; y < h; y++) {
-            int srcRow = offset + y * w * srcPixelStride;
-            if (pixelStride == srcPixelStride) {
-                int copyLen = Math.min(w * srcPixelStride, src.length - srcRow);
-                if (copyLen > 0) System.arraycopy(src, srcRow, row, 0, copyLen);
-            } else {
-                for (int x = 0; x < w; x++) {
-                    int sIdx = srcRow + x * srcPixelStride;
-                    int dIdx = x * pixelStride;
-                    if (sIdx < src.length && dIdx < row.length) {
-                        row[dIdx] = src[sIdx];
-                    }
+        if (pixelStride == 1 && srcPixelStride == 1) {
+            int cap = buf.capacity();
+            for (int y = 0; y < h; y++) {
+                int srcRow = offset + y * w;
+                int dstRow = y * rowStride;
+                int copyLen = Math.min(w, Math.min(src.length - srcRow, cap - dstRow));
+                if (copyLen > 0) {
+                    buf.position(dstRow);
+                    buf.put(src, srcRow, copyLen);
                 }
             }
-            int toPut = Math.min(rowStride, buf.remaining());
-            if (toPut > 0) buf.put(row, 0, toPut);
+            buf.rewind();
+            return;
         }
+        // Interleaved chroma plane (pixelStride == 2): write individual samples by index
+        // so we never clobber the adjacent interleaved V/U channel sharing the same buffer!
+        int cap = buf.capacity();
+        for (int y = 0; y < h; y++) {
+            int srcRow = offset + y * w * srcPixelStride;
+            int dstRow = y * rowStride;
+            for (int x = 0; x < w; x++) {
+                int sIdx = srcRow + x * srcPixelStride;
+                int dIdx = dstRow + x * pixelStride;
+                if (sIdx < src.length && dIdx >= 0 && dIdx < cap) {
+                    buf.put(dIdx, src[sIdx]);
+                }
+            }
+        }
+        buf.rewind();
     }
 
     private void drawOnCanvas(@NonNull TransformConfig cfg) {
@@ -338,7 +388,6 @@ public class StaticBitmapFeeder {
         try {
             c = s.lockCanvas(null);
             if (c == null) return;
-            // Draw onto the preview surface preserving aspect ratio / PTZ
             if (rawSourceBitmap != null && !rawSourceBitmap.isRecycled()
                     && TransformConfig.SOURCE_MEDIA.equals(cfg.sourceMode)) {
                 FrameTransformPipeline.drawTransformedBitmap(

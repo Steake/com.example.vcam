@@ -4,10 +4,12 @@ import android.annotation.SuppressLint;
 import android.graphics.ImageFormat;
 import android.graphics.Rect;
 import android.media.Image;
+import android.media.ImageWriter;
 import android.media.MediaCodec;
 import android.media.MediaCodecInfo;
 import android.media.MediaExtractor;
 import android.media.MediaFormat;
+import android.os.Build;
 import android.os.SystemClock;
 import android.util.Log;
 import android.view.Surface;
@@ -16,7 +18,6 @@ import java.io.File;
 import java.io.FileDescriptor;
 import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.util.List;
 import java.util.concurrent.LinkedBlockingQueue;
 
 import de.robv.android.xposed.XposedBridge;
@@ -41,6 +42,7 @@ public class VideoToFrames implements Runnable {
     private Throwable throwable;
     private Thread childThread;
     private Surface play_surf;
+    private boolean useImageWriterForSurface = false;
 
     private int targetWidth = 0;
     private int targetHeight = 0;
@@ -69,6 +71,10 @@ public class VideoToFrames implements Runnable {
     public void setTargetDimensions(int width, int height) {
         this.targetWidth = width & ~1;
         this.targetHeight = height & ~1;
+    }
+
+    public void setUseImageWriterForSurface(boolean useImageWriter) {
+        this.useImageWriterForSurface = useImageWriter;
     }
 
     public void setPaused(boolean paused) {
@@ -238,154 +244,211 @@ public class VideoToFrames implements Runnable {
         long startWhen = 0;
         long basePtsUs = 0;
         MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
-        decoder.configure(mediaFormat, play_surf, null, 0);
-        boolean sawInputEOS = false;
-        boolean sawOutputEOS = false;
-        decoder.start();
-        final int width = mediaFormat.getInteger(MediaFormat.KEY_WIDTH);
-        final int height = mediaFormat.getInteger(MediaFormat.KEY_HEIGHT);
-        int outputFrameCount = 0;
-        while (!sawOutputEOS && !stopDecode) {
-            TransformConfig cfg = HookMain.getActiveTransformConfig();
 
-            // 1. Handle pause (freeze-frame): keep HookMain.data_buffer alive with sensor grain
-            if (cfg.paused || explicitPaused) {
-                if (cfg.sensorGrainEnabled && HookMain.data_buffer != null && HookMain.data_buffer.length > 16) {
-                    int w = targetWidth > 0 ? targetWidth : width;
-                    int h = targetHeight > 0 ? targetHeight : height;
-                    FrameTransformPipeline.applyLumaGrainInPlace(HookMain.data_buffer, w, h);
-                }
-                ExifSynthesizer.CURRENT_PHOTOMETRY.frameTimestampNs = SystemClock.elapsedRealtimeNanos();
-                try {
-                    Thread.sleep(33L);
-                } catch (InterruptedException e) {
-                    return;
-                }
-                startWhen = System.currentTimeMillis() - (info.presentationTimeUs - basePtsUs) / 1000L;
-                continue;
-            }
-
-            // 2. Handle explicit seek requests or active CuePoint boundaries
-            long reqSeekMs = explicitSeekMs;
-            if (reqSeekMs >= 0) {
-                explicitSeekMs = -1L;
-                extractor.seekTo(reqSeekMs * 1000L, MediaExtractor.SEEK_TO_CLOSEST_SYNC);
-                try { decoder.flush(); } catch (Throwable ignored) {}
-                sawInputEOS = false;
-                is_first = false;
-            } else if (cfg.seekRequestMs >= 0 && cfg.seekRequestTimestamp > lastHandledSeekTimestamp) {
-                lastHandledSeekTimestamp = cfg.seekRequestTimestamp;
-                long seekUs = cfg.seekRequestMs * 1000L;
-                extractor.seekTo(seekUs, MediaExtractor.SEEK_TO_CLOSEST_SYNC);
-                try { decoder.flush(); } catch (Throwable ignored) {}
-                sawInputEOS = false;
-                is_first = false;
-            } else if (cfg.activeCueId > 0) {
-                TransformConfig.CuePoint cue = HookMain.findCueById(cfg.activeCueId);
-                if (cue != null && cue.endMs > cue.startMs && currentPositionMs >= cue.endMs) {
-                    if (cue.loop) {
-                        extractor.seekTo(cue.startMs * 1000L, MediaExtractor.SEEK_TO_CLOSEST_SYNC);
-                        try { decoder.flush(); } catch (Throwable ignored) {}
-                        sawInputEOS = false;
-                        is_first = false;
+        ImageWriter surfaceWriter = null;
+        Surface codecSurface = play_surf;
+        if (useImageWriterForSurface && play_surf != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            try {
+                if (play_surf.isValid()) {
+                    surfaceWriter = ImageWriter.newInstance(play_surf, 2);
+                    codecSurface = null;
+                    if (outputImageFormat == null) {
+                        outputImageFormat = OutputImageFormat.NV21;
                     }
                 }
-            }
-
-            if (!sawInputEOS) {
-                int inputBufferId = decoder.dequeueInputBuffer(DEFAULT_TIMEOUT_US);
-                if (inputBufferId >= 0) {
-                    ByteBuffer inputBuffer = decoder.getInputBuffer(inputBufferId);
-                    int sampleSize = extractor.readSampleData(inputBuffer, 0);
-                    if (sampleSize < 0) {
-                        decoder.queueInputBuffer(inputBufferId, 0, 0, 0L, MediaCodec.BUFFER_FLAG_END_OF_STREAM);
-                        sawInputEOS = true;
-                    } else {
-                        long presentationTimeUs = extractor.getSampleTime();
-                        decoder.queueInputBuffer(inputBufferId, 0, sampleSize, presentationTimeUs, 0);
-                        extractor.advance();
-                    }
-                }
-            }
-            int outputBufferId = decoder.dequeueOutputBuffer(info, DEFAULT_TIMEOUT_US);
-            if (outputBufferId >= 0) {
-                if ((info.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
-                    sawOutputEOS = true;
-                }
-                boolean doRender = (info.size != 0);
-                if (doRender) {
-                    outputFrameCount++;
-                    currentPositionMs = Math.max(0L, info.presentationTimeUs / 1000L);
-                    ExifSynthesizer.CURRENT_PHOTOMETRY.frameTimestampNs = SystemClock.elapsedRealtimeNanos();
-                    ExifSynthesizer.CURRENT_PHOTOMETRY.frameNumber++;
-
-                    if (callback != null) {
-                        callback.onDecodeFrame(outputFrameCount);
-                    }
-                    if (!is_first) {
-                        startWhen = System.currentTimeMillis();
-                        basePtsUs = info.presentationTimeUs;
-                        is_first = true;
-                    }
-                    if (play_surf == null) {
-                        Image image = decoder.getOutputImage(outputBufferId);
-                        if (image != null) {
-                            try {
-                                if (mQueue != null) {
-                                    ByteBuffer buffer = image.getPlanes()[0].getBuffer();
-                                    byte[] arr = new byte[buffer.remaining()];
-                                    buffer.get(arr);
-                                    try {
-                                        mQueue.put(arr);
-                                    } catch (InterruptedException e) {
-                                        XposedBridge.log("[VCAM]" + e.toString());
-                                    }
-                                }
-                                if (outputImageFormat != null) {
-                                    byte[] rawNv21 = getDataFromImage(image, COLOR_FormatNV21);
-                                    Rect crop = image.getCropRect();
-                                    int srcW = crop.width();
-                                    int srcH = crop.height();
-                                    // Update photometry from luma plane
-                                    updateLumaPhotometry(rawNv21, srcW, srcH);
-
-                                    int dstW = targetWidth > 0 ? targetWidth : srcW;
-                                    int dstH = targetHeight > 0 ? targetHeight : srcH;
-                                    if (srcW == dstW && srcH == dstH) {
-                                        if (cfg.sensorGrainEnabled) {
-                                            FrameTransformPipeline.applyLumaGrainInPlace(rawNv21, dstW, dstH);
-                                        }
-                                        HookMain.data_buffer = rawNv21;
-                                    } else {
-                                        // Scale NV21 to the exact target (dstW, dstH) so UV planes never misalign
-                                        byte[] scaled = scaleNv21Nearest(rawNv21, srcW, srcH, dstW, dstH, cfg);
-                                        if (cfg.sensorGrainEnabled) {
-                                            FrameTransformPipeline.applyLumaGrainInPlace(scaled, dstW, dstH);
-                                        }
-                                        HookMain.data_buffer = scaled;
-                                    }
-                                }
-                            } finally {
-                                image.close();
-                            }
-                        }
-                    }
-                    long sleepTime = (info.presentationTimeUs - basePtsUs) / 1000L - (System.currentTimeMillis() - startWhen);
-                    if (sleepTime > 0) {
-                        try {
-                            Thread.sleep(Math.min(sleepTime, 100L));
-                        } catch (InterruptedException e) {
-                            return;
-                        }
-                    }
-                    decoder.releaseOutputBuffer(outputBufferId, true);
-                } else {
-                    decoder.releaseOutputBuffer(outputBufferId, false);
-                }
+            } catch (Throwable t) {
+                XposedBridge.log("[VCAM][decoder] ImageWriter fallback to direct surface: " + t.getMessage());
+                surfaceWriter = null;
+                codecSurface = play_surf;
             }
         }
-        if (callback != null) {
-            callback.onFinishDecode();
+
+        try {
+            decoder.configure(mediaFormat, codecSurface, null, 0);
+            boolean sawInputEOS = false;
+            boolean sawOutputEOS = false;
+            decoder.start();
+            final int width = mediaFormat.getInteger(MediaFormat.KEY_WIDTH);
+            final int height = mediaFormat.getInteger(MediaFormat.KEY_HEIGHT);
+            int outputFrameCount = 0;
+            while (!sawOutputEOS && !stopDecode) {
+                TransformConfig cfg = HookMain.getActiveTransformConfig();
+
+                // 1. Handle pause (freeze-frame): keep HookMain.data_buffer alive with sensor grain
+                if (cfg.paused || explicitPaused) {
+                    if (cfg.sensorGrainEnabled && HookMain.data_buffer != null && HookMain.data_buffer.length > 16) {
+                        int w = targetWidth > 0 ? targetWidth : width;
+                        int h = targetHeight > 0 ? targetHeight : height;
+                        FrameTransformPipeline.applyLumaGrainInPlace(HookMain.data_buffer, w, h);
+                    }
+                    ExifSynthesizer.CURRENT_PHOTOMETRY.frameTimestampNs = SystemClock.elapsedRealtimeNanos();
+                    try {
+                        Thread.sleep(33L);
+                    } catch (InterruptedException e) {
+                        return;
+                    }
+                    startWhen = System.currentTimeMillis() - (info.presentationTimeUs - basePtsUs) / 1000L;
+                    continue;
+                }
+
+                // 2. Handle explicit seek requests or active CuePoint boundaries
+                long reqSeekMs = explicitSeekMs;
+                if (reqSeekMs >= 0) {
+                    explicitSeekMs = -1L;
+                    extractor.seekTo(reqSeekMs * 1000L, MediaExtractor.SEEK_TO_CLOSEST_SYNC);
+                    try { decoder.flush(); } catch (Throwable ignored) {}
+                    sawInputEOS = false;
+                    is_first = false;
+                } else if (cfg.seekRequestMs >= 0 && cfg.seekRequestTimestamp > lastHandledSeekTimestamp) {
+                    lastHandledSeekTimestamp = cfg.seekRequestTimestamp;
+                    long seekUs = cfg.seekRequestMs * 1000L;
+                    extractor.seekTo(seekUs, MediaExtractor.SEEK_TO_CLOSEST_SYNC);
+                    try { decoder.flush(); } catch (Throwable ignored) {}
+                    sawInputEOS = false;
+                    is_first = false;
+                } else if (cfg.activeCueId > 0) {
+                    TransformConfig.CuePoint cue = HookMain.findCueById(cfg.activeCueId);
+                    if (cue != null && cue.endMs > cue.startMs && currentPositionMs >= cue.endMs) {
+                        if (cue.loop) {
+                            extractor.seekTo(cue.startMs * 1000L, MediaExtractor.SEEK_TO_CLOSEST_SYNC);
+                            try { decoder.flush(); } catch (Throwable ignored) {}
+                            sawInputEOS = false;
+                            is_first = false;
+                        }
+                    }
+                }
+
+                if (!sawInputEOS) {
+                    int inputBufferId = decoder.dequeueInputBuffer(DEFAULT_TIMEOUT_US);
+                    if (inputBufferId >= 0) {
+                        ByteBuffer inputBuffer = decoder.getInputBuffer(inputBufferId);
+                        int sampleSize = extractor.readSampleData(inputBuffer, 0);
+                        if (sampleSize < 0) {
+                            decoder.queueInputBuffer(inputBufferId, 0, 0, 0L, MediaCodec.BUFFER_FLAG_END_OF_STREAM);
+                            sawInputEOS = true;
+                        } else {
+                            long presentationTimeUs = extractor.getSampleTime();
+                            decoder.queueInputBuffer(inputBufferId, 0, sampleSize, presentationTimeUs, 0);
+                            extractor.advance();
+                        }
+                    }
+                }
+                int outputBufferId = decoder.dequeueOutputBuffer(info, DEFAULT_TIMEOUT_US);
+                if (outputBufferId >= 0) {
+                    if ((info.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
+                        sawOutputEOS = true;
+                    }
+                    boolean doRender = (info.size != 0);
+                    if (doRender) {
+                        outputFrameCount++;
+                        currentPositionMs = Math.max(0L, info.presentationTimeUs / 1000L);
+                        ExifSynthesizer.CURRENT_PHOTOMETRY.frameTimestampNs = SystemClock.elapsedRealtimeNanos();
+                        ExifSynthesizer.CURRENT_PHOTOMETRY.frameNumber++;
+
+                        if (callback != null) {
+                            callback.onDecodeFrame(outputFrameCount);
+                        }
+                        if (!is_first) {
+                            startWhen = System.currentTimeMillis();
+                            basePtsUs = info.presentationTimeUs;
+                            is_first = true;
+                        }
+                        if (codecSurface == null) {
+                            Image image = decoder.getOutputImage(outputBufferId);
+                            if (image != null) {
+                                try {
+                                    if (mQueue != null) {
+                                        ByteBuffer buffer = image.getPlanes()[0].getBuffer();
+                                        byte[] arr = new byte[buffer.remaining()];
+                                        buffer.get(arr);
+                                        try {
+                                            mQueue.put(arr);
+                                        } catch (InterruptedException e) {
+                                            XposedBridge.log("[VCAM]" + e.toString());
+                                        }
+                                    }
+                                    if (outputImageFormat != null || surfaceWriter != null) {
+                                        byte[] rawNv21 = getDataFromImage(image, COLOR_FormatNV21);
+                                        Rect crop = image.getCropRect();
+                                        int srcW = crop.width();
+                                        int srcH = crop.height();
+                                        updateLumaPhotometry(rawNv21, srcW, srcH);
+
+                                        int dstW = targetWidth > 0 ? targetWidth : srcW;
+                                        int dstH = targetHeight > 0 ? targetHeight : srcH;
+                                        byte[] finalNv21;
+                                        if (srcW == dstW && srcH == dstH
+                                                && !cfg.mirrorH && !cfg.mirrorV
+                                                && cfg.zoom == 1.0f && cfg.panX == 0.0f && cfg.panY == 0.0f) {
+                                            if (cfg.sensorGrainEnabled) {
+                                                FrameTransformPipeline.applyLumaGrainInPlace(rawNv21, dstW, dstH);
+                                            }
+                                            finalNv21 = rawNv21;
+                                        } else {
+                                            byte[] scaled = scaleNv21Nearest(rawNv21, srcW, srcH, dstW, dstH, cfg);
+                                            if (cfg.sensorGrainEnabled) {
+                                                FrameTransformPipeline.applyLumaGrainInPlace(scaled, dstW, dstH);
+                                            }
+                                            finalNv21 = scaled;
+                                        }
+                                        HookMain.updateLatestVideoFrame(finalNv21, dstW, dstH);
+                                        NdkHookEngine.updateFrameBuffer(finalNv21, dstW, dstH);
+
+                                        if (surfaceWriter != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                                            pushNv21ToImageWriter(surfaceWriter, finalNv21, dstW, dstH);
+                                        }
+                                    }
+                                } finally {
+                                    image.close();
+                                }
+                            }
+                        }
+                        long sleepTime = (info.presentationTimeUs - basePtsUs) / 1000L - (System.currentTimeMillis() - startWhen);
+                        if (sleepTime > 0) {
+                            try {
+                                Thread.sleep(Math.min(sleepTime, 100L));
+                            } catch (InterruptedException e) {
+                                return;
+                            }
+                        }
+                        decoder.releaseOutputBuffer(outputBufferId, codecSurface != null);
+                    } else {
+                        decoder.releaseOutputBuffer(outputBufferId, false);
+                    }
+                }
+            }
+            if (callback != null) {
+                callback.onFinishDecode();
+            }
+        } finally {
+            if (surfaceWriter != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                try { surfaceWriter.close(); } catch (Throwable ignored) {}
+            }
+        }
+    }
+
+    private static void pushNv21ToImageWriter(ImageWriter writer, byte[] nv21, int w, int h) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M || writer == null || nv21 == null) return;
+        Image outImg = null;
+        try {
+            outImg = writer.dequeueInputImage();
+            if (outImg == null) return;
+            outImg.setTimestamp(ExifSynthesizer.CURRENT_PHOTOMETRY.frameTimestampNs);
+            Image.Plane[] planes = outImg.getPlanes();
+            if (planes == null || planes.length < 3) return;
+            int ySize = w * h;
+            // Convert NV21 (Y + interleaved VU) into Y, U, V planes via StaticBitmapFeeder.copyPlane
+            StaticBitmapFeeder.copyPlane(planes[0], nv21, 0, w, h, 1);
+            // In NV21, V is at ySize + 0 (stride 2), U is at ySize + 1 (stride 2)
+            StaticBitmapFeeder.copyPlane(planes[1], nv21, ySize + 1, w / 2, h / 2, 2);
+            StaticBitmapFeeder.copyPlane(planes[2], nv21, ySize, w / 2, h / 2, 2);
+            writer.queueInputImage(outImg);
+            outImg = null;
+        } catch (Throwable ignored) {
+        } finally {
+            if (outImg != null) {
+                try { outImg.close(); } catch (Throwable ignored) {}
+            }
         }
     }
 
@@ -411,9 +474,9 @@ public class VideoToFrames implements Runnable {
     }
 
     /**
-     * Fast nearest-neighbor aspect-aware NV21 resampler so Camera1 callbacks
+     * Fast nearest-neighbor aspect-aware NV21 resampler so Camera1 and ImageReader callbacks
      * always receive a buffer whose Y and interleaved VU planes match the exact
-     * {@code (dstW, dstH)} requested by the host's {@code Camera.Parameters}.
+     * {@code (dstW, dstH)} requested by the host.
      */
     private static byte[] scaleNv21Nearest(byte[] src, int srcW, int srcH,
                                            int dstW, int dstH,
@@ -422,7 +485,6 @@ public class VideoToFrames implements Runnable {
         dstH &= ~1;
         int dstYSize = dstW * dstH;
         byte[] dst = new byte[dstYSize * 3 / 2];
-        // Initialize black Y=16, V=128, U=128 for letterbox bars
         java.util.Arrays.fill(dst, 0, dstYSize, (byte) 16);
         java.util.Arrays.fill(dst, dstYSize, dst.length, (byte) 128);
 

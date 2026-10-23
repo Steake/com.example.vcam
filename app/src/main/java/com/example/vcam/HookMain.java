@@ -27,30 +27,36 @@ import android.hardware.camera2.CameraCharacteristics;
 import android.hardware.camera2.CameraDevice;
 import android.hardware.camera2.CameraManager;
 import android.hardware.camera2.CameraMetadata;
-import android.hardware.camera2.CaptureFailure;
 import android.hardware.camera2.CaptureRequest;
+import android.hardware.camera2.TotalCaptureResult;
 import android.hardware.camera2.params.InputConfiguration;
 import android.hardware.camera2.params.OutputConfiguration;
 import android.hardware.camera2.params.SessionConfiguration;
 import android.media.Image;
 import android.media.ImageReader;
+import android.media.MediaMetadataRetriever;
 import android.media.MediaPlayer;
 import android.net.Uri;
+import android.opengl.EGL14;
+import android.opengl.EGLConfig;
+import android.opengl.EGLContext;
+import android.opengl.EGLDisplay;
+import android.opengl.EGLSurface;
+import android.opengl.GLES20;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
 import android.os.Handler;
+import android.os.HandlerThread;
 import android.os.IBinder;
 import android.os.Looper;
 import android.os.ParcelFileDescriptor;
 import android.provider.MediaStore;
+import android.view.PixelCopy;
 import android.view.Surface;
+import android.view.SurfaceHolder;
+import android.view.SurfaceView;
 import android.view.TextureView;
-import android.view.SurfaceHolder;
-import android.os.IBinder;
-import android.os.IInterface;
-
-import android.view.SurfaceHolder;
 import android.widget.Toast;
 
 import androidx.annotation.NonNull;
@@ -58,8 +64,6 @@ import androidx.annotation.Nullable;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
-import java.io.FileDescriptor;
-import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -67,25 +71,36 @@ import java.io.OutputStream;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Random;
 import java.util.Set;
 import java.util.WeakHashMap;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 import de.robv.android.xposed.IXposedHookLoadPackage;
+import de.robv.android.xposed.IXposedHookZygoteInit;
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
-public class HookMain implements IXposedHookLoadPackage {
+public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
+    @Override
+    public void initZygote(StartupParam startupParam) throws Throwable {
+        if (startupParam != null && startupParam.modulePath != null) {
+            sModuleApkPath = startupParam.modulePath;
+        }
+    }
+    private static volatile HookMain sInstance;
+    private static volatile String sModuleApkPath;
+
     // Legacy public static fields retained for full backwards compatibility
     public static Surface mSurface;
     public static SurfaceTexture mSurfacetexture;
@@ -96,6 +111,9 @@ public class HookMain implements IXposedHookLoadPackage {
     public static Camera camera_onPreviewFrame;
     public static Camera start_preview_camera;
     public static volatile byte[] data_buffer = {0};
+    public static volatile byte[] latestVideoNv21 = null;
+    public static volatile int latestVideoWidth = 0;
+    public static volatile int latestVideoHeight = 0;
     public static byte[] input;
     public static int mhight;
     public static int mwidth;
@@ -147,9 +165,17 @@ public class HookMain implements IXposedHookLoadPackage {
     public static Class c2_state_callback;
     public Context toast_content;
 
-    //Camera1 StaticBitmapFeeder for image-only / synthetic modes
+    // Camera1 StaticBitmapFeeder for image-only / synthetic modes
     private static StaticBitmapFeeder c1_surface_feeder;
     private static StaticBitmapFeeder c1_holder_feeder;
+
+    // Background GL sink consumer thread so dummy SurfaceTextures never stall HAL BufferQueue
+    private static HandlerThread sSinkDrainThread;
+    private static Handler sSinkDrainHandler;
+    private static EGLDisplay sEglDisplay = EGL14.EGL_NO_DISPLAY;
+    private static EGLContext sEglContext = EGL14.EGL_NO_CONTEXT;
+    private static EGLSurface sEglPbuffer = EGL14.EGL_NO_SURFACE;
+    private static final Random sRandom = new Random();
 
     // ---------------------------------------------------------------------
     // Core System Package Exclusions & Hook Deduplication Registries
@@ -175,12 +201,16 @@ public class HookMain implements IXposedHookLoadPackage {
             Collections.synchronizedSet(new HashSet<>());
     private static final Set<Class<?>> HOOKED_SESSION_CALLBACKS =
             Collections.synchronizedSet(new HashSet<>());
+    private static final Set<Class<?>> HOOKED_CAPTURE_SESSIONS =
+            Collections.synchronizedSet(new HashSet<>());
     private static final Set<Class<?>> HOOKED_PREVIEW_CALLBACKS =
             Collections.synchronizedSet(new HashSet<>());
     private static final Set<Class<?>> HOOKED_PICTURE_CALLBACKS =
             Collections.synchronizedSet(new HashSet<>());
     private static final Set<Class<?>> HOOKED_BUILDERS =
             Collections.synchronizedSet(new HashSet<>());
+    private static final Map<CameraDevice, Boolean> INITIALIZED_CAMERA_DEVICES =
+            Collections.synchronizedMap(new WeakHashMap<>());
 
     // ---------------------------------------------------------------------
     // ImageReader Surface Metadata Tracking & Dynamic Surface Feeder Registry
@@ -318,7 +348,7 @@ public class HookMain implements IXposedHookLoadPackage {
             });
 
     // ---------------------------------------------------------------------
-    // Public Static Accessors for Feeders, Overlay HUD & Synthesizers
+    // Public Static Accessors for Feeders, Overlay HUD, NDK & Synthesizers
     // ---------------------------------------------------------------------
     @NonNull
     public static TransformConfig getActiveTransformConfig() {
@@ -349,7 +379,7 @@ public class HookMain implements IXposedHookLoadPackage {
     }
 
     public static boolean isVirtualMicActive() {
-        return cfgEnabled && cfgVirtualMicEnabled && ! isPassthroughActive();
+        return cfgEnabled && cfgVirtualMicEnabled && !isPassthroughActive();
     }
 
     public static boolean isCameraSessionActive() {
@@ -362,6 +392,130 @@ public class HookMain implements IXposedHookLoadPackage {
 
     public static boolean isPassthroughActive() {
         return cfgPassthroughMode || activeTransformConfig.passthroughMode;
+    }
+
+    public static void updateLatestVideoFrame(@Nullable byte[] nv21, int width, int height) {
+        if (nv21 == null || nv21.length <= 16 || width <= 0 || height <= 0) {
+            return;
+        }
+        data_buffer = nv21;
+        latestVideoNv21 = nv21;
+        latestVideoWidth = width;
+        latestVideoHeight = height;
+    }
+
+    @Nullable
+    public static Bitmap getLatestVideoFrameBitmap(int targetW, int targetH) {
+        byte[] nv21 = latestVideoNv21;
+        int w = latestVideoWidth;
+        int h = latestVideoHeight;
+        if (nv21 != null && w > 0 && h > 0 && nv21.length >= w * h * 3 / 2) {
+            Bitmap bmp = nv21ToBitmap(nv21, w, h);
+            if (bmp != null) {
+                return bmp;
+            }
+        }
+        // Fallback if MediaPlayer is rendering directly to a Surface without VideoToFrames active:
+        // extract the current frame from the staged video via MediaMetadataRetriever
+        File vidFile = getActiveVideoFile();
+        if (vidFile != null && vidFile.exists()) {
+            MediaMetadataRetriever mmr = new MediaMetadataRetriever();
+            try {
+                mmr.setDataSource(vidFile.getAbsolutePath());
+                long posUs = getActiveVideoPositionMs() * 1000L;
+                Bitmap frame = mmr.getFrameAtTime(posUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC);
+                if (frame != null) {
+                    return frame;
+                }
+            } catch (Throwable ignored) {
+            } finally {
+                try { mmr.release(); } catch (Throwable ignored) {}
+            }
+        }
+        return null;
+    }
+
+    @Nullable
+    private static Bitmap nv21ToBitmap(@NonNull byte[] nv21, int width, int height) {
+        try {
+            int ySize = width * height;
+            if (nv21.length < ySize * 3 / 2) return null;
+            int[] argb = new int[ySize];
+            for (int j = 0, yp = 0; j < height; j++) {
+                int uvp = ySize + (j >> 1) * width;
+                int u = 0, v = 0;
+                for (int i = 0; i < width; i++, yp++) {
+                    int y = (0xff & ((int) nv21[yp])) - 16;
+                    if (y < 0) y = 0;
+                    if ((i & 1) == 0) {
+                        if (uvp + 1 < nv21.length) {
+                            v = (0xff & nv21[uvp++]) - 128;
+                            u = (0xff & nv21[uvp++]) - 128;
+                        }
+                    }
+                    int y1192 = 1192 * y;
+                    int r = (y1192 + 1634 * v);
+                    int g = (y1192 - 833 * v - 400 * u);
+                    int b = (y1192 + 2066 * u);
+                    if (r < 0) r = 0; else if (r > 262143) r = 262143;
+                    if (g < 0) g = 0; else if (g > 262143) g = 262143;
+                    if (b < 0) b = 0; else if (b > 262143) b = 262143;
+                    argb[yp] = 0xff000000 | ((r << 6) & 0xff0000) | ((g >> 2) & 0xff00) | ((b >> 10) & 0xff);
+                }
+            }
+            return Bitmap.createBitmap(argb, width, height, Bitmap.Config.ARGB_8888);
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    /**
+     * NDK Bridge Callback: invoked when native code calls ACameraManager_openCamera.
+     */
+    public static void onNdkCameraOpened() {
+        HookMain inst = sInstance;
+        if (inst == null) return;
+        inst.ensureStagedNow(currentHostPackage);
+        if (!inst.isInjectionActive() || !inst.hasAnyMedia()) return;
+        Surface sink = inst.getOrCreateVirtualSinkSurface();
+        NdkHookEngine.updateVirtualSinkSurface(sink);
+        cameraSessionActive = true;
+        InAppOverlayManager.onCameraSessionActive(true);
+        inst.maybePostInAppNotification(inst.toast_content, currentHostPackage);
+        inst.showInjectedHookToast("Camera2-NDK", inst.c2_ori_width, inst.c2_ori_height);
+    }
+
+    /**
+     * NDK Bridge Callback: invoked when native code wraps an ANativeWindow into
+     * ACaptureSessionOutput_create, ACameraOutputTarget_create, or AImageReader_getWindow.
+     */
+    public static void onNdkSurfaceDiscovered(Surface surface, int width, int height, int format, boolean isImageReader) {
+        HookMain inst = sInstance;
+        if (inst == null || surface == null || !surface.isValid()) return;
+        inst.ensureStagedNow(currentHostPackage);
+        if (!inst.isInjectionActive() || !inst.hasAnyMedia()) return;
+        if (surface == c2_virtual_surface) return;
+
+        if (isImageReader || format == ImageFormat.YUV_420_888 || format == ImageFormat.JPEG || format == ImageFormat.NV21) {
+            int w = width > 0 ? width : inst.c2_ori_width;
+            int h = height > 0 ? height : inst.c2_ori_height;
+            int fmt = format > 0 ? format : ImageFormat.YUV_420_888;
+            SURFACE_META_MAP.put(surface, new ReaderSurfaceMeta(w, h, fmt, null, fmt));
+        }
+        Surface sink = inst.getOrCreateVirtualSinkSurface();
+        NdkHookEngine.updateVirtualSinkSurface(sink);
+        inst.registerTargetSurface(surface);
+        inst.ensureAllRegisteredFeedersRunning();
+    }
+
+    /**
+     * NDK Bridge Callback: invoked when ACameraDevice_createCaptureSession completes.
+     */
+    public static void onNdkSessionCreated() {
+        HookMain inst = sInstance;
+        if (inst == null) return;
+        if (!inst.isInjectionActive() || !inst.hasAnyMedia()) return;
+        inst.ensureAllRegisteredFeedersRunning();
     }
 
     @Nullable
@@ -556,7 +710,6 @@ public class HookMain implements IXposedHookLoadPackage {
             activeCuePoints.add(created);
         }
         triggerCuePoint(cueId);
-        // Persist asynchronously to MediaProvider if running in host
         final Context ctx = resolveHostContext();
         if (ctx != null) {
             stagingExecutor.execute(() -> {
@@ -575,10 +728,9 @@ public class HookMain implements IXposedHookLoadPackage {
     public static void updateActiveTransformInProcess(@NonNull TransformConfig cfg) {
         activeTransformConfig = cfg;
         StaticBitmapFeeder.invalidateAllCaches();
-        if (hw_decode_obj == null) {
+        if (hw_decode_obj == null && latestVideoNv21 == null) {
             data_buffer = new byte[]{0};
         }
-        // Update MediaPlayer video scaling mode if aspect ratio changed between FIT and FILL
         int scalingMode = TransformConfig.ASPECT_FILL.equals(cfg.aspectMode)
                 ? MediaPlayer.VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING
                 : MediaPlayer.VIDEO_SCALING_MODE_SCALE_TO_FIT;
@@ -669,9 +821,12 @@ public class HookMain implements IXposedHookLoadPackage {
         if (lpparam == null || lpparam.packageName == null) {
             return;
         }
-        // Hard-exclude core Android system packages to prevent system_server / SystemUI instability
         if (EXCLUDED_SYSTEM_PACKAGES.contains(lpparam.packageName)) {
             return;
+        }
+        sInstance = this;
+        if (sModuleApkPath == null && lpparam.appInfo != null && BuildConfig.APPLICATION_ID.equals(lpparam.packageName)) {
+            sModuleApkPath = lpparam.appInfo.sourceDir;
         }
         final boolean isSelfManager = BuildConfig.APPLICATION_ID.equals(lpparam.packageName);
 
@@ -686,7 +841,12 @@ public class HookMain implements IXposedHookLoadPackage {
             VirtualAudioFeeder.installHooks();
         }
 
-        // Install Anti-Detection Callstack & Reflection Cloaking hooks
+        // Install Native NDK Camera2 / Media / ANativeWindow PLT/GOT & dlsym hooks
+        if (!isSelfManager) {
+            NdkHookEngine.ensureInitialized(sModuleApkPath);
+        }
+
+        // Install Anti-Detection Callstack, File & Reflection Cloaking hooks
         if (!isSelfManager) {
             installAntiDetectionHooks(lpparam.classLoader);
         }
@@ -727,6 +887,9 @@ public class HookMain implements IXposedHookLoadPackage {
                             InAppOverlayManager.setOverlayEnabled(true);
                         }
                         resolveWritableVideoPath(toast_content);
+                        if (!isSelfManager) {
+                            NdkHookEngine.ensureInitialized(sModuleApkPath);
+                        }
                     } catch (Throwable t) {
                         XposedBridge.log("[VCAM][early-init] " + t);
                     }
@@ -744,7 +907,7 @@ public class HookMain implements IXposedHookLoadPackage {
                     "handleBindApplication", "android.app.ActivityThread$AppBindData", earlyInitHook);
         } catch (Throwable ignored) {}
 
-        // Install Direct TextureView & SurfaceView UI frame tap hooks (Bypass Vector for UI-direct scrapers)
+        // Install Direct TextureView, SurfaceView & PixelCopy UI frame tap hooks
         if (!isSelfManager) {
             installUiFrameScraperHooks(lpparam.classLoader);
         }
@@ -755,13 +918,13 @@ public class HookMain implements IXposedHookLoadPackage {
         installCamera1Hooks(lpparam);
 
         // -----------------------------------------------------------------
-        // Camera2 Hooks (CameraManager.openCamera - All overloads in beforeHookedMethod)
+        // Camera2 Hooks (CameraManager + Static Boot-Class Framework Impl Hooks)
         // -----------------------------------------------------------------
         installCamera2Hooks(lpparam);
     }
 
     // ---------------------------------------------------------------------
-    // Evasion & Anti-Detection Hooks (Callstack & Reflection Cloaking)
+    // Evasion & Anti-Detection Hooks (Callstack, File & Reflection Cloaking)
     // ---------------------------------------------------------------------
     private void installAntiDetectionHooks(ClassLoader classLoader) {
         XC_MethodHook stackFilterHook = new XC_MethodHook() {
@@ -828,6 +991,44 @@ public class HookMain implements IXposedHookLoadPackage {
                 }
             });
         } catch (Throwable ignored) {}
+
+        // Cloak /DCIM/Camera1 & vcam_native artifacts from host SDK file-existence probes
+        try {
+            XposedHelpers.findAndHookMethod(File.class, "exists", new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    if (!Boolean.TRUE.equals(param.getResult())) return;
+                    if (!(param.thisObject instanceof File)) return;
+                    String path = ((File) param.thisObject).getPath();
+                    if (path == null) return;
+                    if (path.contains("/DCIM/Camera1") || path.contains("libvcam_ndk")) {
+                        if (!isInternalVcamCaller()) {
+                            param.setResult(Boolean.FALSE);
+                        }
+                    }
+                }
+            });
+        } catch (Throwable ignored) {}
+    }
+
+    private static boolean isInternalVcamCaller() {
+        try {
+            Throwable t = new Throwable();
+            // Access raw stack trace via Object/Throwable internals or check classloader frames
+            for (Class<?> cls : ClassSaveHelper.getCallingClasses()) {
+                if (cls != null && cls.getName().startsWith("com.example.vcam.")) {
+                    return true;
+                }
+            }
+        } catch (Throwable ignored) {}
+        return true; // Fail-open for internal file operations if SecurityManager helper unavailable
+    }
+
+    private static final class ClassSaveHelper extends SecurityManager {
+        static final ClassSaveHelper INSTANCE = new ClassSaveHelper();
+        static Class<?>[] getCallingClasses() {
+            return INSTANCE.getClassContext();
+        }
     }
 
     private static StackTraceElement[] filterStackTrace(StackTraceElement[] orig) {
@@ -862,8 +1063,6 @@ public class HookMain implements IXposedHookLoadPackage {
                         protected void beforeHookedMethod(MethodHookParam param) {
                             int requestedFormat = (int) param.args[2];
                             param.setObjectExtra("requestedFormat", requestedFormat);
-                            // Evasion bypass: coerce ImageFormat.PRIVATE (0x22) to YUV_420_888 (0x23)
-                            // so ImageWriter and CPU planes can access and feed frames without GPU vendor rejection
                             if (requestedFormat == 0x22) {
                                 param.args[2] = ImageFormat.YUV_420_888;
                             }
@@ -995,7 +1194,6 @@ public class HookMain implements IXposedHookLoadPackage {
         }
 
         // CPU Plane Patching Fallback for acquireLatestImage / acquireNextImage
-        // when ImageWriter could not attach (e.g., PRIVATE format or hardware buffer)
         XC_MethodHook acquireHook = new XC_MethodHook() {
             @Override
             protected void afterHookedMethod(MethodHookParam param) {
@@ -1007,7 +1205,6 @@ public class HookMain implements IXposedHookLoadPackage {
                     return;
                 }
                 Image img = (Image) res;
-                // Only patch on CPU if no surface feeder was able to replace the ImageReader surface
                 if (param.thisObject instanceof ImageReader) {
                     ImageReader ir = (ImageReader) param.thisObject;
                     try {
@@ -1046,7 +1243,8 @@ public class HookMain implements IXposedHookLoadPackage {
                         buf.put(jpeg);
                     }
                 }
-            } else if (fmt == ImageFormat.YUV_420_888 && planes.length >= 3) {
+            } else if ((fmt == ImageFormat.YUV_420_888 || fmt == ImageFormat.NV21 || fmt == ImageFormat.YV12)
+                    && planes.length >= 3) {
                 byte[] nv21 = data_buffer;
                 if (nv21 == null || nv21.length < w * h * 3 / 2) {
                     Bitmap bmp = obtainCurrentFrameBitmap(w, h);
@@ -1055,11 +1253,10 @@ public class HookMain implements IXposedHookLoadPackage {
                     }
                 }
                 if (nv21 != null && nv21.length >= w * h * 3 / 2) {
-                    ByteBuffer yBuf = planes[0].getBuffer();
-                    if (yBuf != null && !yBuf.isReadOnly() && yBuf.remaining() >= w * h) {
-                        yBuf.rewind();
-                        yBuf.put(nv21, 0, w * h);
-                    }
+                    int ySize = w * h;
+                    StaticBitmapFeeder.copyPlane(planes[0], nv21, 0, w, h, 1);
+                    StaticBitmapFeeder.copyPlane(planes[1], nv21, ySize + 1, w / 2, h / 2, 2);
+                    StaticBitmapFeeder.copyPlane(planes[2], nv21, ySize, w / 2, h / 2, 2);
                 }
             }
         } catch (Throwable ignored) {
@@ -1119,7 +1316,6 @@ public class HookMain implements IXposedHookLoadPackage {
                                 }
                             }
 
-                            // Dispatch onActivityResult asynchronously on main thread & short-circuit real camera launch
                             new Handler(Looper.getMainLooper()).post(() -> {
                                 try {
                                     XposedHelpers.callMethod(caller, "onActivityResult",
@@ -1137,11 +1333,10 @@ public class HookMain implements IXposedHookLoadPackage {
     }
 
     // ---------------------------------------------------------------------
-    // UI Direct Frame Scraper Interception (TextureView.getBitmap & Canvas lock)
+    // UI Direct Frame Scraper Interception (TextureView.getBitmap & PixelCopy)
     // ---------------------------------------------------------------------
     private void installUiFrameScraperHooks(ClassLoader classLoader) {
         try {
-            // Hook TextureView.getBitmap() and TextureView.getBitmap(Bitmap)
             XC_MethodHook getBitmapHook = new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) {
@@ -1159,15 +1354,13 @@ public class HookMain implements IXposedHookLoadPackage {
 
                     Object res = param.getResult();
                     if (res instanceof Bitmap) {
-                        // 0-arg getBitmap() returns a newly created Bitmap
                         param.setResult(virtualBmp);
                     } else if (param.args != null && param.args.length > 0 && param.args[0] instanceof Bitmap) {
-                        // 1-arg getBitmap(Bitmap dest) paints into dest and returns dest
                         Bitmap dest = (Bitmap) param.args[0];
                         try {
                             android.graphics.Canvas canvas = new android.graphics.Canvas(dest);
-                            android.graphics.Rect src = new android.graphics.Rect(0, 0, virtualBmp.getWidth(), virtualBmp.getHeight());
-                            android.graphics.Rect dst = new android.graphics.Rect(0, 0, dest.getWidth(), dest.getHeight());
+                            Rect src = new Rect(0, 0, virtualBmp.getWidth(), virtualBmp.getHeight());
+                            Rect dst = new Rect(0, 0, dest.getWidth(), dest.getHeight());
                             canvas.drawBitmap(virtualBmp, src, dst, null);
                             param.setResult(dest);
                         } catch (Throwable ignored) {}
@@ -1189,6 +1382,51 @@ public class HookMain implements IXposedHookLoadPackage {
                 }
             });
         } catch (Throwable ignored) {}
+
+        // Intercept PixelCopy.request(SurfaceView / Surface, ..., Bitmap, OnPixelCopyFinishedListener, Handler)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            try {
+                XposedBridge.hookAllMethods(PixelCopy.class, "request", new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        if (!isInjectionActive() || !hasAnyMedia() || !cameraSessionActive) return;
+                        if (param.args == null || param.args.length < 3) return;
+                        Object srcObj = param.args[0];
+                        if (!(srcObj instanceof SurfaceView) && !(srcObj instanceof Surface)) return;
+
+                        Bitmap destBmp = null;
+                        PixelCopy.OnPixelCopyFinishedListener listener = null;
+                        Handler handler = null;
+                        for (Object arg : param.args) {
+                            if (arg instanceof Bitmap) destBmp = (Bitmap) arg;
+                            else if (arg instanceof PixelCopy.OnPixelCopyFinishedListener)
+                                listener = (PixelCopy.OnPixelCopyFinishedListener) arg;
+                            else if (arg instanceof Handler) handler = (Handler) arg;
+                        }
+                        if (destBmp == null || listener == null) return;
+
+                        Bitmap virtualBmp = obtainCurrentFrameBitmap(destBmp.getWidth(), destBmp.getHeight());
+                        if (virtualBmp != null) {
+                            try {
+                                android.graphics.Canvas c = new android.graphics.Canvas(destBmp);
+                                c.drawBitmap(virtualBmp,
+                                        new Rect(0, 0, virtualBmp.getWidth(), virtualBmp.getHeight()),
+                                        new Rect(0, 0, destBmp.getWidth(), destBmp.getHeight()),
+                                        null);
+                                final PixelCopy.OnPixelCopyFinishedListener finalListener = listener;
+                                Runnable notify = () -> finalListener.onPixelCopyFinished(PixelCopy.SUCCESS);
+                                if (handler != null) {
+                                    handler.post(notify);
+                                } else {
+                                    new Handler(Looper.getMainLooper()).post(notify);
+                                }
+                                param.setResult(null);
+                            } catch (Throwable ignored) {}
+                        }
+                    }
+                });
+            } catch (Throwable ignored) {}
+        }
     }
 
     // ---------------------------------------------------------------------
@@ -1244,11 +1482,10 @@ public class HookMain implements IXposedHookLoadPackage {
                         origin_preview_camera = (Camera) param.thisObject;
                         mSurfacetexture = (SurfaceTexture) param.args[0];
                         if (fake_SurfaceTexture == null) {
-                            fake_SurfaceTexture = new SurfaceTexture(10);
+                            fake_SurfaceTexture = createManagedSinkSurfaceTexture();
                         }
                         param.args[0] = fake_SurfaceTexture;
 
-                        // If startPreview() was ALREADY called before setPreviewTexture, start feeding now
                         if (cameraSessionActive && start_preview_camera != null
                                 && start_preview_camera.equals(param.thisObject)) {
                             startCamera1PreviewFeed((Camera) param.thisObject);
@@ -1274,7 +1511,7 @@ public class HookMain implements IXposedHookLoadPackage {
                         mcamera1 = (Camera) param.thisObject;
                         ori_holder = (SurfaceHolder) param.args[0];
                         if (c1_fake_texture == null) {
-                            c1_fake_texture = new SurfaceTexture(11);
+                            c1_fake_texture = createManagedSinkSurfaceTexture();
                         }
                         if (c1_fake_surface != null) {
                             c1_fake_surface.release();
@@ -1328,7 +1565,6 @@ public class HookMain implements IXposedHookLoadPackage {
                     }
                 });
 
-        // Preserve host byte[] buffer identity for WebRTC / ZXing / MLKit in-place buffer pools
         XposedHelpers.findAndHookMethod("android.hardware.Camera", lpparam.classLoader,
                 "addCallbackBuffer", byte[].class, new XC_MethodHook() {
                     @Override
@@ -1357,7 +1593,6 @@ public class HookMain implements IXposedHookLoadPackage {
         XposedHelpers.findAndHookMethod("android.hardware.Camera", lpparam.classLoader,
                 "setOneShotPreviewCallback", Camera.PreviewCallback.class, previewCbHook);
 
-        // Hook BOTH 3-arg and 4-arg Camera.takePicture overloads
         XposedHelpers.findAndHookMethod("android.hardware.Camera", lpparam.classLoader,
                 "takePicture", Camera.ShutterCallback.class, Camera.PictureCallback.class,
                 Camera.PictureCallback.class, new XC_MethodHook() {
@@ -1450,10 +1685,16 @@ public class HookMain implements IXposedHookLoadPackage {
             mp.setOnPreparedListener(MediaPlayer::start);
             try {
                 String streamUrl = getActiveStreamUrl();
+                File localVid = new File(video_path + "virtual.mp4");
                 if (streamUrl != null) {
                     mp.setDataSource(streamUrl);
+                } else if (localVid.exists() && localVid.canRead()) {
+                    mp.setDataSource(localVid.getAbsolutePath());
                 } else {
-                    mp.setDataSource(video_path + "virtual.mp4");
+                    ParcelFileDescriptor pfd = openActiveVideoPfd();
+                    if (pfd != null) {
+                        mp.setDataSource(pfd.getFileDescriptor());
+                    }
                 }
                 mp.prepare();
             } catch (IOException e) {
@@ -1464,7 +1705,8 @@ public class HookMain implements IXposedHookLoadPackage {
             if (feeder != null) {
                 feeder.stop();
             }
-            feeder = new StaticBitmapFeeder(targetSurface, new File(video_path + "1000.bmp"), w, h);
+            feeder = new StaticBitmapFeeder(targetSurface, new File(video_path + "1000.bmp"), w, h,
+                    StaticBitmapFeeder.FORMAT_PREVIEW);
             if (isHolder) {
                 c1_holder_feeder = feeder;
             } else {
@@ -1476,6 +1718,7 @@ public class HookMain implements IXposedHookLoadPackage {
 
     private void cleanupCamera1Session() {
         cameraSessionActive = false;
+        camera_onPreviewFrame = null;
         InAppOverlayManager.onCameraSessionActive(false);
         VirtualAudioFeeder.stopAllSessions();
         if (hw_decode_obj != null) {
@@ -1530,15 +1773,16 @@ public class HookMain implements IXposedHookLoadPackage {
                                     data_buffer = FrameTransformPipeline.bitmapToNv21(bmp);
                                 }
                             }
-                            while (data_buffer == null) {
-                                Thread.sleep(1);
-                            }
+                            waitForFirstDecodedFrame(mwidth, mhight);
                             if (paramd.args[0] instanceof byte[]) {
                                 byte[] targetBuf = (byte[]) paramd.args[0];
-                                System.arraycopy(data_buffer, 0, targetBuf, 0,
-                                        Math.min(data_buffer.length, targetBuf.length));
-                                if (hw_decode_obj == null && activeTransformConfig.sensorGrainEnabled) {
-                                    FrameTransformPipeline.applyLumaGrainInPlace(targetBuf, mwidth, mhight);
+                                byte[] src = data_buffer;
+                                if (src != null && src.length > 1) {
+                                    System.arraycopy(src, 0, targetBuf, 0,
+                                            Math.min(src.length, targetBuf.length));
+                                    if (hw_decode_obj == null && activeTransformConfig.sensorGrainEnabled) {
+                                        FrameTransformPipeline.applyLumaGrainInPlace(targetBuf, mwidth, mhight);
+                                    }
                                 }
                             }
                         } else {
@@ -1546,7 +1790,6 @@ public class HookMain implements IXposedHookLoadPackage {
                             camera_onPreviewFrame = (Camera) paramd.args[1];
                             mwidth = camera_onPreviewFrame.getParameters().getPreviewSize().width;
                             mhight = camera_onPreviewFrame.getParameters().getPreviewSize().height;
-                            int frame_Rate = camera_onPreviewFrame.getParameters().getPreviewFrameRate();
                             reportHostTelemetry("Camera1", mwidth, mhight, ImageFormat.NV21);
                             maybePostInAppNotification(toast_content, currentHostPackage);
 
@@ -1555,21 +1798,30 @@ public class HookMain implements IXposedHookLoadPackage {
                                 hw_decode_obj = null;
                             }
                             if (!isSyntheticSourceMode() && (hasVideoStaged() || getActiveStreamUrl() != null)) {
+                                data_buffer = new byte[]{0};
                                 hw_decode_obj = new VideoToFrames();
+                                hw_decode_obj.setTargetDimensions(mwidth, mhight);
                                 hw_decode_obj.setSaveFrames("", OutputImageFormat.NV21);
                                 String streamUrl = getActiveStreamUrl();
+                                File localVid = new File(video_path + "virtual.mp4");
                                 if (streamUrl != null) {
                                     hw_decode_obj.decodeStream(streamUrl);
+                                } else if (localVid.exists() && localVid.canRead()) {
+                                    hw_decode_obj.decode(localVid.getAbsolutePath());
                                 } else {
-                                    hw_decode_obj.decode(video_path + "virtual.mp4");
+                                    ParcelFileDescriptor pfd = openActiveVideoPfd();
+                                    if (pfd != null) {
+                                        hw_decode_obj.decode(pfd.getFileDescriptor());
+                                    }
                                 }
-                                while (data_buffer == null) {
-                                    Thread.sleep(1);
-                                }
+                                waitForFirstDecodedFrame(mwidth, mhight);
                                 if (paramd.args[0] instanceof byte[]) {
                                     byte[] targetBuf = (byte[]) paramd.args[0];
-                                    System.arraycopy(data_buffer, 0, targetBuf, 0,
-                                            Math.min(data_buffer.length, targetBuf.length));
+                                    byte[] src = data_buffer;
+                                    if (src != null && src.length > 1) {
+                                        System.arraycopy(src, 0, targetBuf, 0,
+                                                Math.min(src.length, targetBuf.length));
+                                    }
                                 }
                             } else {
                                 Bitmap bmp = obtainCurrentFrameBitmap(mwidth, mhight);
@@ -1586,6 +1838,29 @@ public class HookMain implements IXposedHookLoadPackage {
                         }
                     }
                 });
+    }
+
+    /**
+     * Waits up to 250ms for {@link #data_buffer} to be populated with a full NV21 frame
+     * (never leaving {@code data_buffer} as the 1-byte sentinel {@code {0}}, which would
+     * leak the real camera image in {@code targetBuf[1..end]} on the first callback!).
+     */
+    private void waitForFirstDecodedFrame(int w, int h) {
+        int waited = 0;
+        while ((data_buffer == null || data_buffer.length <= 1) && waited < 250) {
+            try {
+                Thread.sleep(2);
+                waited += 2;
+            } catch (InterruptedException e) {
+                break;
+            }
+        }
+        if (data_buffer == null || data_buffer.length <= 1) {
+            Bitmap fallback = obtainCurrentFrameBitmap(w, h);
+            if (fallback != null) {
+                data_buffer = FrameTransformPipeline.bitmapToNv21(fallback);
+            }
+        }
     }
 
     private void process_a_shot_jpeg(XC_MethodHook.MethodHookParam param, int index) {
@@ -1638,7 +1913,7 @@ public class HookMain implements IXposedHookLoadPackage {
     }
 
     // ---------------------------------------------------------------------
-    // Camera2 Hooks (No-Escape StateCallback, Session & Dynamic Feeders)
+    // Camera2 Hooks (No-Escape StateCallback, Static Framework Hooks & Dynamic Feeders)
     // ---------------------------------------------------------------------
     private void installCamera2Hooks(final XC_LoadPackage.LoadPackageParam lpparam) {
         XC_MethodHook openCameraHook = new XC_MethodHook() {
@@ -1661,9 +1936,6 @@ public class HookMain implements IXposedHookLoadPackage {
                 }
                 is_first_hook_build = true;
                 process_camera2_init(c2_state_callback);
-
-                // Evasion countermeasure: Wrap stateCb directly in a delegate proxy
-                // to guarantee onOpened hooks fire even with custom obfuscated StateCallback subclasses
                 wrapAndReplaceStateCallback(param.args, stateCb);
             }
         };
@@ -1677,8 +1949,33 @@ public class HookMain implements IXposedHookLoadPackage {
             XposedBridge.hookAllMethods(CameraManager.class, "openCameraForUid", openCameraHook);
         } catch (Throwable ignored) {
         }
+        try {
+            XposedBridge.hookAllMethods(CameraManager.class, "openCameraDeviceUserAsync", openCameraHook);
+        } catch (Throwable ignored) {
+        }
 
-        // Hook OutputConfiguration constructors, addSurface & setPhysicalCameraId
+        // Static Boot-ClassLoader Hooks on Framework CameraDeviceImpl, CameraCaptureSessionImpl & CaptureRequest.Builder
+        // Guarantees interception even if an SDK bypasses CameraManager.openCamera or uses cached/JNI CameraDevice
+        try {
+            Class<?> deviceImplClass = Class.forName("android.hardware.camera2.impl.CameraDeviceImpl");
+            hookCameraDeviceInstance(deviceImplClass);
+        } catch (Throwable ignored) {
+        }
+        try {
+            Class<?> sessionImplClass = Class.forName("android.hardware.camera2.impl.CameraCaptureSessionImpl");
+            hookCaptureSessionInstance(sessionImplClass);
+        } catch (Throwable ignored) {
+        }
+        try {
+            process_camera2_CaptureRequest_builder(CaptureRequest.Builder.class);
+        } catch (Throwable ignored) {
+        }
+        try {
+            hookCaptureRequestInstance(CaptureRequest.class);
+        } catch (Throwable ignored) {
+        }
+
+        // Hook OutputConfiguration addSurface & setPhysicalCameraId
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             try {
                 XposedBridge.hookAllMethods(OutputConfiguration.class, "addSurface", new XC_MethodHook() {
@@ -1689,6 +1986,16 @@ public class HookMain implements IXposedHookLoadPackage {
                             Surface s = (Surface) param.args[0];
                             if (s != c2_virtual_surface) {
                                 registerTargetSurface(s);
+                                if (param.thisObject instanceof OutputConfiguration) {
+                                    OutputConfiguration oc = (OutputConfiguration) param.thisObject;
+                                    if (oc.getSurface() == null) {
+                                        // Deferred OutputConfiguration(Size, Class): bind our virtual sink as the primary surface
+                                        param.args[0] = getOrCreateVirtualSinkSurface();
+                                        return;
+                                    }
+                                }
+                                // Surface-sharing OutputConfiguration that already has c2_virtual_surface:
+                                // suppress duplicate addSurface so framework doesn't throw IllegalArgumentException
                                 param.setResult(null);
                             }
                         }
@@ -1704,7 +2011,6 @@ public class HookMain implements IXposedHookLoadPackage {
                     @Override
                     protected void beforeHookedMethod(MethodHookParam param) {
                         if (!isInjectionActive() || !hasAnyMedia()) return;
-                        // Only clear physical camera ID when virtual surface replaces logical session outputs
                         if (param.args.length > 0 && param.thisObject instanceof OutputConfiguration) {
                             OutputConfiguration oc = (OutputConfiguration) param.thisObject;
                             if (oc.getSurface() == c2_virtual_surface) {
@@ -1718,6 +2024,32 @@ public class HookMain implements IXposedHookLoadPackage {
         }
     }
 
+    private synchronized void onCameraDeviceOpened(@Nullable CameraDevice camera) {
+        if (camera != null && Boolean.TRUE.equals(INITIALIZED_CAMERA_DEVICES.put(camera, Boolean.TRUE))) {
+            // Already initialized for this exact CameraDevice open lifecycle
+            return;
+        }
+        stopAllCamera2Feeders();
+        getOrCreateVirtualSinkSurface();
+        cameraSessionActive = true;
+        InAppOverlayManager.onCameraSessionActive(true);
+        maybePostInAppNotification(toast_content, currentHostPackage);
+        showInjectedHookToast("Camera2", c2_ori_width, c2_ori_height);
+        if (camera != null) {
+            hookCameraDeviceInstance(camera.getClass());
+        }
+    }
+
+    private synchronized void onCameraDeviceClosed(@Nullable CameraDevice camera) {
+        if (camera != null) {
+            INITIALIZED_CAMERA_DEVICES.remove(camera);
+        }
+        cameraSessionActive = false;
+        InAppOverlayManager.onCameraSessionActive(false);
+        VirtualAudioFeeder.stopAllSessions();
+        stopAllCamera2Feeders();
+    }
+
     private void wrapAndReplaceStateCallback(Object[] args, @NonNull final CameraDevice.StateCallback originalCb) {
         if (args == null) return;
         for (int i = 0; i < args.length; i++) {
@@ -1727,14 +2059,7 @@ public class HookMain implements IXposedHookLoadPackage {
                     public void onOpened(@NonNull CameraDevice camera) {
                         try {
                             if (isInjectionActive() && hasAnyMedia()) {
-                                need_recreate = true;
-                                stopAllCamera2Feeders();
-                                getOrCreateVirtualSinkSurface();
-                                cameraSessionActive = true;
-                                InAppOverlayManager.onCameraSessionActive(true);
-                                maybePostInAppNotification(toast_content, currentHostPackage);
-                                showInjectedHookToast("Camera2", c2_ori_width, c2_ori_height);
-                                hookCameraDeviceInstance(camera.getClass());
+                                onCameraDeviceOpened(camera);
                             }
                         } catch (Throwable t) {
                             XposedBridge.log("[VCAM][proxy-onOpened] " + t);
@@ -1744,35 +2069,24 @@ public class HookMain implements IXposedHookLoadPackage {
 
                     @Override
                     public void onDisconnected(@NonNull CameraDevice camera) {
-                        cameraSessionActive = false;
-                        InAppOverlayManager.onCameraSessionActive(false);
-                        VirtualAudioFeeder.stopAllSessions();
-                        stopAllCamera2Feeders();
+                        onCameraDeviceClosed(camera);
                         originalCb.onDisconnected(camera);
                     }
 
                     @Override
                     public void onError(@NonNull CameraDevice camera, int error) {
-                        cameraSessionActive = false;
-                        InAppOverlayManager.onCameraSessionActive(false);
-                        VirtualAudioFeeder.stopAllSessions();
-                        stopAllCamera2Feeders();
+                        onCameraDeviceClosed(camera);
                         originalCb.onError(camera, error);
                     }
 
                     @Override
                     public void onClosed(@NonNull CameraDevice camera) {
-                        cameraSessionActive = false;
-                        InAppOverlayManager.onCameraSessionActive(false);
-                        VirtualAudioFeeder.stopAllSessions();
-                        stopAllCamera2Feeders();
+                        onCameraDeviceClosed(camera);
                         originalCb.onClosed(camera);
                     }
                 };
                 args[i] = delegate;
                 c2_state_cb = delegate;
-                c2_state_callback = delegate.getClass();
-                process_camera2_init(delegate.getClass());
                 break;
             }
         }
@@ -1789,8 +2103,85 @@ public class HookMain implements IXposedHookLoadPackage {
         return null;
     }
 
-    private Surface getOrCreateVirtualSinkSurface() {
+    /**
+     * Creates a SurfaceTexture with a randomized GL texture ID and attaches a background
+     * EGL 1x1 Pbuffer consumer that drains {@code updateTexImage()} on every incoming HAL frame
+     * so multi-stream / RECORD / STILL_CAPTURE sessions never stall the HAL BufferQueue.
+     */
+    private static SurfaceTexture createManagedSinkSurfaceTexture() {
+        int texId = 32 + sRandom.nextInt(200);
+        final SurfaceTexture st;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            st = new SurfaceTexture(texId, false);
+        } else {
+            st = new SurfaceTexture(texId);
+        }
+        st.setDefaultBufferSize(640, 480);
+        attachSinkDrainListener(st);
+        return st;
+    }
+
+    private static synchronized void attachSinkDrainListener(@NonNull final SurfaceTexture st) {
+        try {
+            if (sSinkDrainThread == null) {
+                sSinkDrainThread = new HandlerThread("vcam-sink-drain");
+                sSinkDrainThread.setDaemon(true);
+                sSinkDrainThread.start();
+                sSinkDrainHandler = new Handler(sSinkDrainThread.getLooper());
+                sSinkDrainHandler.post(HookMain::initSinkEglContextOnDrainThread);
+            }
+            SurfaceTexture.OnFrameAvailableListener listener = surfaceTexture -> {
+                try {
+                    if (sEglDisplay != EGL14.EGL_NO_DISPLAY && sEglContext != EGL14.EGL_NO_CONTEXT) {
+                        surfaceTexture.updateTexImage();
+                    } else {
+                        surfaceTexture.releaseTexImage();
+                    }
+                } catch (Throwable ignored) {
+                }
+            };
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                st.setOnFrameAvailableListener(listener, sSinkDrainHandler);
+            } else {
+                st.setOnFrameAvailableListener(listener);
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private static void initSinkEglContextOnDrainThread() {
+        try {
+            sEglDisplay = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY);
+            if (sEglDisplay == EGL14.EGL_NO_DISPLAY) return;
+            int[] version = new int[2];
+            if (!EGL14.eglInitialize(sEglDisplay, version, 0, version, 1)) return;
+            int[] attribList = {
+                    EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
+                    EGL14.EGL_SURFACE_TYPE, EGL14.EGL_PBUFFER_BIT,
+                    EGL14.EGL_RED_SIZE, 8,
+                    EGL14.EGL_GREEN_SIZE, 8,
+                    EGL14.EGL_BLUE_SIZE, 8,
+                    EGL14.EGL_ALPHA_SIZE, 8,
+                    EGL14.EGL_NONE
+            };
+            EGLConfig[] configs = new EGLConfig[1];
+            int[] numConfigs = new int[1];
+            if (!EGL14.eglChooseConfig(sEglDisplay, attribList, 0, configs, 0, 1, numConfigs, 0)
+                    || numConfigs[0] <= 0) {
+                return;
+            }
+            int[] ctxAttribs = {EGL14.EGL_CONTEXT_CLIENT_VERSION, 2, EGL14.EGL_NONE};
+            sEglContext = EGL14.eglCreateContext(sEglDisplay, configs[0], EGL14.EGL_NO_CONTEXT, ctxAttribs, 0);
+            int[] pbufAttribs = {EGL14.EGL_WIDTH, 1, EGL14.EGL_HEIGHT, 1, EGL14.EGL_NONE};
+            sEglPbuffer = EGL14.eglCreatePbufferSurface(sEglDisplay, configs[0], pbufAttribs, 0);
+            EGL14.eglMakeCurrent(sEglDisplay, sEglPbuffer, sEglPbuffer, sEglContext);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private synchronized Surface getOrCreateVirtualSinkSurface() {
         if (c2_virtual_surface != null && c2_virtual_surface.isValid() && !need_recreate) {
+            NdkHookEngine.updateVirtualSinkSurface(c2_virtual_surface);
             return c2_virtual_surface;
         }
         if (c2_virtual_surface != null) {
@@ -1805,10 +2196,10 @@ public class HookMain implements IXposedHookLoadPackage {
             } catch (Throwable ignored) {
             }
         }
-        c2_virtual_surfaceTexture = new SurfaceTexture(15);
-        c2_virtual_surfaceTexture.setDefaultBufferSize(640, 480);
+        c2_virtual_surfaceTexture = createManagedSinkSurfaceTexture();
         c2_virtual_surface = new Surface(c2_virtual_surfaceTexture);
         need_recreate = false;
+        NdkHookEngine.updateVirtualSinkSurface(c2_virtual_surface);
         return c2_virtual_surface;
     }
 
@@ -1822,29 +2213,18 @@ public class HookMain implements IXposedHookLoadPackage {
                 if (!isInjectionActive() || !hasAnyMedia()) {
                     return;
                 }
-                need_recreate = true;
-                stopAllCamera2Feeders();
-                getOrCreateVirtualSinkSurface();
-                cameraSessionActive = true;
-                InAppOverlayManager.onCameraSessionActive(true);
-                maybePostInAppNotification(toast_content, currentHostPackage);
-                showInjectedHookToast("Camera2", c2_ori_width, c2_ori_height);
-
-                Object cameraDeviceObj = param.args[0];
-                if (cameraDeviceObj == null) {
-                    return;
-                }
-                hookCameraDeviceInstance(cameraDeviceObj.getClass());
+                CameraDevice cam = param.args.length > 0 && param.args[0] instanceof CameraDevice
+                        ? (CameraDevice) param.args[0] : null;
+                onCameraDeviceOpened(cam);
             }
         });
 
         XC_MethodHook cleanupHook = new XC_MethodHook() {
             @Override
             protected void beforeHookedMethod(MethodHookParam param) {
-                cameraSessionActive = false;
-                InAppOverlayManager.onCameraSessionActive(false);
-                VirtualAudioFeeder.stopAllSessions();
-                stopAllCamera2Feeders();
+                CameraDevice cam = (param.args != null && param.args.length > 0 && param.args[0] instanceof CameraDevice)
+                        ? (CameraDevice) param.args[0] : null;
+                onCameraDeviceClosed(cam);
             }
         };
 
@@ -1863,7 +2243,7 @@ public class HookMain implements IXposedHookLoadPackage {
     }
 
     private void hookCameraDeviceInstance(Class<?> deviceClass) {
-        if (!HOOKED_CAMERA_DEVICES.add(deviceClass)) {
+        if (deviceClass == null || !HOOKED_CAMERA_DEVICES.add(deviceClass)) {
             return;
         }
 
@@ -1881,34 +2261,67 @@ public class HookMain implements IXposedHookLoadPackage {
             }
         });
 
+        // Also hook createReprocessCaptureRequest(TotalCaptureResult)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            try {
+                XposedBridge.hookAllMethods(deviceClass, "createReprocessCaptureRequest", new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) {
+                        if (!isInjectionActive() || !hasAnyMedia()) return;
+                        if (param.getResult() instanceof CaptureRequest.Builder) {
+                            c2_builder = (CaptureRequest.Builder) param.getResult();
+                            process_camera2_CaptureRequest_builder(c2_builder.getClass());
+                        }
+                    }
+                });
+            } catch (Throwable ignored) {
+            }
+        }
+
+        // Hook isSessionConfigurationSupported so multi-stream / exotic SessionConfigurations never get rejected
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            try {
+                XposedBridge.hookAllMethods(deviceClass, "isSessionConfigurationSupported", new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        if (!isInjectionActive() || !hasAnyMedia()) return;
+                        param.setResult(Boolean.TRUE);
+                    }
+                });
+            } catch (Throwable ignored) {
+            }
+        }
+
         try {
             XposedHelpers.findAndHookMethod(deviceClass, "close", new XC_MethodHook() {
                 @Override
                 protected void beforeHookedMethod(MethodHookParam param) {
-                    cameraSessionActive = false;
-                    InAppOverlayManager.onCameraSessionActive(false);
-                    VirtualAudioFeeder.stopAllSessions();
-                    stopAllCamera2Feeders();
+                    CameraDevice cam = param.thisObject instanceof CameraDevice ? (CameraDevice) param.thisObject : null;
+                    onCameraDeviceClosed(cam);
                 }
             });
         } catch (Throwable ignored) {
         }
 
         // Hook all createCaptureSession variants safely
-        XposedHelpers.findAndHookMethod(deviceClass, "createCaptureSession",
-                List.class, CameraCaptureSession.StateCallback.class, Handler.class, new XC_MethodHook() {
-                    @Override
-                    protected void beforeHookedMethod(MethodHookParam paramd) {
-                        if (!isInjectionActive() || !hasAnyMedia()) return;
-                        if (paramd.args[0] instanceof List) {
-                            harvestSurfacesFromList((List<?>) paramd.args[0]);
-                            paramd.args[0] = Collections.singletonList(getOrCreateVirtualSinkSurface());
-                            if (paramd.args[1] != null) {
-                                process_camera2_capture_session_callback((CameraCaptureSession.StateCallback) paramd.args[1]);
+        try {
+            XposedHelpers.findAndHookMethod(deviceClass, "createCaptureSession",
+                    List.class, CameraCaptureSession.StateCallback.class, Handler.class, new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam paramd) {
+                            ensureStagedNow(currentHostPackage);
+                            if (!isInjectionActive() || !hasAnyMedia()) return;
+                            if (paramd.args[0] instanceof List) {
+                                harvestSurfacesFromList((List<?>) paramd.args[0]);
+                                paramd.args[0] = Collections.singletonList(getOrCreateVirtualSinkSurface());
+                                if (paramd.args[1] != null) {
+                                    process_camera2_capture_session_callback((CameraCaptureSession.StateCallback) paramd.args[1]);
+                                }
                             }
                         }
-                    }
-                });
+                    });
+        } catch (Throwable ignored) {
+        }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             try {
@@ -1916,6 +2329,7 @@ public class HookMain implements IXposedHookLoadPackage {
                         List.class, CameraCaptureSession.StateCallback.class, Handler.class, new XC_MethodHook() {
                             @Override
                             protected void beforeHookedMethod(MethodHookParam paramd) {
+                                ensureStagedNow(currentHostPackage);
                                 if (!isInjectionActive() || !hasAnyMedia()) return;
                                 if (paramd.args[0] instanceof List) {
                                     harvestSurfacesFromList((List<?>) paramd.args[0]);
@@ -1935,6 +2349,7 @@ public class HookMain implements IXposedHookLoadPackage {
                         Handler.class, new XC_MethodHook() {
                             @Override
                             protected void beforeHookedMethod(MethodHookParam paramd) {
+                                ensureStagedNow(currentHostPackage);
                                 if (!isInjectionActive() || !hasAnyMedia()) return;
                                 if (paramd.args[1] instanceof List) {
                                     harvestSurfacesFromList((List<?>) paramd.args[1]);
@@ -1955,6 +2370,7 @@ public class HookMain implements IXposedHookLoadPackage {
                         List.class, CameraCaptureSession.StateCallback.class, Handler.class, new XC_MethodHook() {
                             @Override
                             protected void beforeHookedMethod(MethodHookParam param) {
+                                ensureStagedNow(currentHostPackage);
                                 if (!isInjectionActive() || !hasAnyMedia()) return;
                                 if (param.args[0] instanceof List) {
                                     harvestSurfacesFromOutputConfigs((List<?>) param.args[0]);
@@ -1975,8 +2391,8 @@ public class HookMain implements IXposedHookLoadPackage {
                         Handler.class, new XC_MethodHook() {
                             @Override
                             protected void beforeHookedMethod(MethodHookParam param) {
+                                ensureStagedNow(currentHostPackage);
                                 if (!isInjectionActive() || !hasAnyMedia()) return;
-                                // Fixed bug: param.args[1] is the List<OutputConfiguration>, not param.args[0]
                                 if (param.args[1] instanceof List) {
                                     harvestSurfacesFromOutputConfigs((List<?>) param.args[1]);
                                     outputConfiguration = new OutputConfiguration(getOrCreateVirtualSinkSurface());
@@ -1997,6 +2413,7 @@ public class HookMain implements IXposedHookLoadPackage {
                         SessionConfiguration.class, new XC_MethodHook() {
                             @Override
                             protected void beforeHookedMethod(MethodHookParam param) {
+                                ensureStagedNow(currentHostPackage);
                                 if (!isInjectionActive() || !hasAnyMedia()) return;
                                 if (param.args[0] instanceof SessionConfiguration) {
                                     sessionConfiguration = (SessionConfiguration) param.args[0];
@@ -2015,6 +2432,91 @@ public class HookMain implements IXposedHookLoadPackage {
             } catch (Throwable ignored) {
             }
         }
+
+        // Android 12+ (API 31): CameraX Vendor Extensions (Bokeh, Night, HDR, Face Retouch)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            try {
+                XposedBridge.hookAllMethods(deviceClass, "createExtensionSession", new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        ensureStagedNow(currentHostPackage);
+                        if (!isInjectionActive() || !hasAnyMedia()) return;
+                        if (param.args.length > 0 && param.args[0] != null) {
+                            Object extConfig = param.args[0];
+                            try {
+                                Object outConfigs = XposedHelpers.callMethod(extConfig, "getOutputConfigurations");
+                                if (outConfigs instanceof List) {
+                                    harvestSurfacesFromOutputConfigs((List<?>) outConfigs);
+                                }
+                                Object postviewConfig = XposedHelpers.callMethod(extConfig, "getPostviewOutputConfiguration");
+                                if (postviewConfig instanceof OutputConfiguration) {
+                                    harvestSurfacesFromOutputConfigs(Collections.singletonList(postviewConfig));
+                                }
+                                ensureAllRegisteredFeedersRunning();
+                            } catch (Throwable ignored) {
+                            }
+                        }
+                    }
+                });
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
+    private void hookCaptureSessionInstance(Class<?> sessionClass) {
+        if (sessionClass == null || !HOOKED_CAPTURE_SESSIONS.add(sessionClass)) {
+            return;
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            try {
+                XposedBridge.hookAllMethods(sessionClass, "finalizeOutputConfigurations", new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam fParam) {
+                        if (!isInjectionActive() || !hasAnyMedia()) return;
+                        if (fParam.args.length > 0 && fParam.args[0] instanceof List) {
+                            harvestSurfacesFromOutputConfigs((List<?>) fParam.args[0]);
+                            ensureAllRegisteredFeedersRunning();
+                            fParam.setResult(null);
+                        }
+                    }
+                });
+            } catch (Throwable ignored) {
+            }
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            try {
+                XposedBridge.hookAllMethods(sessionClass, "prepare", new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        if (!isInjectionActive() || !hasAnyMedia()) return;
+                        if (param.args.length > 0 && param.args[0] instanceof Surface) {
+                            Surface s = (Surface) param.args[0];
+                            if (s != c2_virtual_surface) {
+                                registerTargetSurface(s);
+                                param.setResult(null);
+                            }
+                        }
+                    }
+                });
+            } catch (Throwable ignored) {
+            }
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            try {
+                XposedBridge.hookAllMethods(sessionClass, "updateOutputConfiguration", new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        if (!isInjectionActive() || !hasAnyMedia()) return;
+                        if (param.args.length > 0 && param.args[0] instanceof OutputConfiguration) {
+                            harvestSurfacesFromOutputConfigs(Collections.singletonList(param.args[0]));
+                            ensureAllRegisteredFeedersRunning();
+                            param.setResult(null);
+                        }
+                    }
+                });
+            } catch (Throwable ignored) {
+            }
+        }
     }
 
     private void process_camera2_capture_session_callback(CameraCaptureSession.StateCallback callback_instance) {
@@ -2029,23 +2531,11 @@ public class HookMain implements IXposedHookLoadPackage {
             XposedHelpers.findAndHookMethod(cbClass, "onConfigured", CameraCaptureSession.class, new XC_MethodHook() {
                 @Override
                 protected void beforeHookedMethod(MethodHookParam param) {
-                    if (param.args[0] != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                        Class<?> sessionClass = param.args[0].getClass();
-                        try {
-                            XposedHelpers.findAndHookMethod(sessionClass, "finalizeOutputConfigurations",
-                                    List.class, new XC_MethodHook() {
-                                        @Override
-                                        protected void beforeHookedMethod(MethodHookParam fParam) {
-                                            if (!isInjectionActive() || !hasAnyMedia()) return;
-                                            if (fParam.args[0] instanceof List) {
-                                                harvestSurfacesFromOutputConfigs((List<?>) fParam.args[0]);
-                                                ensureAllRegisteredFeedersRunning();
-                                                fParam.setResult(null);
-                                            }
-                                        }
-                                    });
-                        } catch (Throwable ignored) {
-                        }
+                    if (param.args.length > 0 && param.args[0] != null) {
+                        hookCaptureSessionInstance(param.args[0].getClass());
+                    }
+                    if (isInjectionActive() && hasAnyMedia()) {
+                        ensureAllRegisteredFeedersRunning();
                     }
                 }
             });
@@ -2064,6 +2554,17 @@ public class HookMain implements IXposedHookLoadPackage {
         }
     }
 
+    @SuppressWarnings("unchecked")
+    private static Set<Surface> getBuilderTargets(@NonNull Object builder) {
+        Object existing = XposedHelpers.getAdditionalInstanceField(builder, "vcamTargets");
+        if (existing instanceof Set) {
+            return (Set<Surface>) existing;
+        }
+        Set<Surface> set = Collections.synchronizedSet(new HashSet<>());
+        XposedHelpers.setAdditionalInstanceField(builder, "vcamTargets", set);
+        return set;
+    }
+
     private void process_camera2_CaptureRequest_builder(Class<?> builderClass) {
         if (builderClass == null || !HOOKED_BUILDERS.add(builderClass)) {
             return;
@@ -2076,6 +2577,7 @@ public class HookMain implements IXposedHookLoadPackage {
                 if (!(param.args[0] instanceof Surface)) return;
                 Surface s = (Surface) param.args[0];
                 if (s != c2_virtual_surface) {
+                    getBuilderTargets(param.thisObject).add(s);
                     registerTargetSurface(s);
                 }
                 param.args[0] = getOrCreateVirtualSinkSurface();
@@ -2088,9 +2590,17 @@ public class HookMain implements IXposedHookLoadPackage {
                 if (!isInjectionActive() || !hasAnyMedia()) return;
                 if (!(param.args[0] instanceof Surface)) return;
                 Surface s = (Surface) param.args[0];
+                Set<Surface> targets = getBuilderTargets(param.thisObject);
+                targets.remove(s);
                 ActiveSurfaceFeeder removed = ACTIVE_FEEDERS.remove(s);
                 if (removed != null) {
                     removed.stop();
+                }
+                if (!targets.isEmpty()) {
+                    // Other targets remain on this Builder! Do NOT remove c2_virtual_surface,
+                    // otherwise builder.build() throws IllegalArgumentException: Request had no output targets!
+                    param.setResult(null);
+                    return;
                 }
                 param.args[0] = getOrCreateVirtualSinkSurface();
             }
@@ -2100,17 +2610,28 @@ public class HookMain implements IXposedHookLoadPackage {
             @Override
             protected void beforeHookedMethod(MethodHookParam param) {
                 if (!isInjectionActive() || !hasAnyMedia()) return;
-                // Ensure feeders are running for all registered surfaces WITHOUT restarting already-running feeders
                 ensureAllRegisteredFeedersRunning();
+                // Trigger on-demand frame push for any JPEG still-capture surface targeted by this request
+                Set<Surface> targets = getBuilderTargets(param.thisObject);
+                for (Surface s : targets) {
+                    ActiveSurfaceFeeder feeder = ACTIVE_FEEDERS.get(s);
+                    if (feeder != null && feeder.bitmapFeeder != null
+                            && (feeder.format == ImageFormat.JPEG || feeder.format == 256)) {
+                        final StaticBitmapFeeder sbf = feeder.bitmapFeeder;
+                        stagingExecutor.execute(sbf::triggerSingleFrame);
+                    }
+                }
             }
 
             @Override
             protected void afterHookedMethod(MethodHookParam param) {
                 if (!isInjectionActive() || !hasAnyMedia()) return;
-                // Evasion countermeasure: hook the produced CaptureRequest instance directly
-                // to neutralize surface reflection inspections by evasive SDKs
                 if (param.getResult() instanceof CaptureRequest) {
                     CaptureRequest req = (CaptureRequest) param.getResult();
+                    Set<Surface> targets = getBuilderTargets(param.thisObject);
+                    if (!targets.isEmpty()) {
+                        XposedHelpers.setAdditionalInstanceField(req, "vcamTargets", new ArrayList<>(targets));
+                    }
                     hookCaptureRequestInstance(req.getClass());
                 }
             }
@@ -2124,13 +2645,21 @@ public class HookMain implements IXposedHookLoadPackage {
             return;
         }
         try {
-            // If SDK attempts to reflect on CaptureRequest surfaces via getTargets(),
-            // ensure the query returns valid expected handles rather than failing
+            // If an SDK outside android.hardware.camera2.* reflects on CaptureRequest.getTargets()
+            // to verify its Surface is bound, return its original registered surfaces!
             XposedHelpers.findAndHookMethod(reqClass, "getTargets", new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) {
                     if (!isInjectionActive() || !hasAnyMedia()) return;
-                    // Keep return value safe and populated
+                    Object saved = XposedHelpers.getAdditionalInstanceField(param.thisObject, "vcamTargets");
+                    if (!(saved instanceof Collection) || ((Collection<?>) saved).isEmpty()) return;
+                    // Check if caller is internal android.hardware.camera2 implementation
+                    for (Class<?> caller : ClassSaveHelper.getCallingClasses()) {
+                        if (caller != null && caller.getName().startsWith("android.hardware.camera2.")) {
+                            return;
+                        }
+                    }
+                    param.setResult(saved);
                 }
             });
         } catch (Throwable ignored) {}
@@ -2192,9 +2721,8 @@ public class HookMain implements IXposedHookLoadPackage {
         }
         int w = meta != null ? meta.width : c2_ori_width;
         int h = meta != null ? meta.height : c2_ori_height;
-        int fmt = meta != null ? meta.format : imageReaderFormat;
+        int fmt = meta != null ? meta.format : (isReader ? ImageFormat.YUV_420_888 : StaticBitmapFeeder.FORMAT_PREVIEW);
 
-        // Also populate legacy fields for compatibility
         if (isReader) {
             if (c2_reader_Surfcae == null) c2_reader_Surfcae = s;
             else if (c2_reader_Surfcae_1 == null && !s.equals(c2_reader_Surfcae)) c2_reader_Surfcae_1 = s;
@@ -2233,17 +2761,17 @@ public class HookMain implements IXposedHookLoadPackage {
         int h = feeder.height > 0 ? feeder.height : 720;
 
         if (feeder.isReaderSurface) {
-            // ImageReader surface:
-            // If format is JPEG or PRIVATE, or we are in image/synthetic mode, use StaticBitmapFeeder
-            // (which supports ImageWriter JPEG injection + Canvas fallback).
-            // If format is YUV_420_888 and we are in video mode, use VideoToFrames hardware decoder.
-            boolean useYuvVideoDecoder = videoMode
-                    && (feeder.format == ImageFormat.YUV_420_888 || feeder.format == ImageFormat.NV21);
+            int readerFmt = feeder.format > 0 ? feeder.format : ImageFormat.YUV_420_888;
+            boolean isJpegReader = (readerFmt == ImageFormat.JPEG || readerFmt == 256);
+            boolean useYuvVideoDecoder = videoMode && !isJpegReader
+                    && (readerFmt == ImageFormat.YUV_420_888 || readerFmt == ImageFormat.NV21 || readerFmt == ImageFormat.YV12);
             if (useYuvVideoDecoder) {
                 try {
                     VideoToFrames vtf = new VideoToFrames();
                     vtf.set_surfcae(s);
                     vtf.setTargetDimensions(w, h);
+                    vtf.setUseImageWriterForSurface(true);
+                    vtf.setSaveFrames("", OutputImageFormat.NV21);
                     String streamUrl = getActiveStreamUrl();
                     File localVid = new File(video_path + "virtual.mp4");
                     if (streamUrl != null) {
@@ -2260,14 +2788,21 @@ public class HookMain implements IXposedHookLoadPackage {
                     feeder.videoDecoder = vtf;
                 } catch (Throwable t) {
                     XposedBridge.log("[VCAM] VideoToFrames start failed, falling back to StaticBitmapFeeder: " + t);
-                    StaticBitmapFeeder sbf = new StaticBitmapFeeder(s, new File(video_path + "1000.bmp"), w, h);
-                    sbf.start();
+                    StaticBitmapFeeder sbf = new StaticBitmapFeeder(s, new File(video_path + "1000.bmp"), w, h, readerFmt);
                     feeder.bitmapFeeder = sbf;
                 }
             } else if (imageMode || videoMode) {
-                StaticBitmapFeeder sbf = new StaticBitmapFeeder(s, new File(video_path + "1000.bmp"), w, h);
-                sbf.start();
+                // Pass exact readerFmt (YUV_420_888 or JPEG) so StaticBitmapFeeder uses ImageWriter
+                // instead of Surface.lockCanvas (which corrupts ImageReader format to RGBA_8888 0x1!)
+                File imgFile = new File(video_path + "1000.bmp");
+                StaticBitmapFeeder sbf = new StaticBitmapFeeder(s, readerFmt, w, h, imgFile.getAbsolutePath());
                 feeder.bitmapFeeder = sbf;
+                if (!isJpegReader) {
+                    sbf.start();
+                } else {
+                    // For JPEG still-capture ImageReader, queue an initial frame and trigger on CaptureRequest.build()
+                    stagingExecutor.execute(sbf::triggerSingleFrame);
+                }
             }
         } else {
             // Preview / Encoder / SurfaceView / TextureView surface:
@@ -2304,13 +2839,13 @@ public class HookMain implements IXposedHookLoadPackage {
                     feeder.mediaPlayer = mp;
                 } catch (Throwable t) {
                     XposedBridge.log("[VCAM] Preview MediaPlayer failed, using StaticBitmapFeeder: " + t);
-                    StaticBitmapFeeder sbf = new StaticBitmapFeeder(s, new File(video_path + "1000.bmp"), w, h);
-                    sbf.start();
+                    StaticBitmapFeeder sbf = new StaticBitmapFeeder(s, new File(video_path + "1000.bmp"), w, h,
+                            StaticBitmapFeeder.FORMAT_PREVIEW);
                     feeder.bitmapFeeder = sbf;
                 }
             } else if (imageMode) {
-                StaticBitmapFeeder sbf = new StaticBitmapFeeder(s, new File(video_path + "1000.bmp"), w, h);
-                sbf.start();
+                StaticBitmapFeeder sbf = new StaticBitmapFeeder(s, new File(video_path + "1000.bmp"), w, h,
+                        StaticBitmapFeeder.FORMAT_PREVIEW);
                 feeder.bitmapFeeder = sbf;
             }
         }
@@ -2396,7 +2931,20 @@ public class HookMain implements IXposedHookLoadPackage {
                 return out;
             }
         }
-        // Fallback: generate test pattern if image could not be decoded
+
+        // Video-mode fallback: extract current decoded video frame so still captures,
+        // TextureView.getBitmap(), and PixelCopy return the live video frame instead of test pattern!
+        Bitmap vidFrame = getLatestVideoFrameBitmap(w, h);
+        if (vidFrame != null) {
+            Bitmap out = FrameTransformPipeline.renderTransformedBitmap(vidFrame, w, h, cfg, 0, hostSensorRot);
+            if (cfg.sensorGrainEnabled) {
+                FrameTransformPipeline.applyTemporalGrainBitmap(out, cfg.grainStrength);
+            }
+            ExifSynthesizer.updatePhotometryFromBitmap(out, activeLensProfile, currentFacing);
+            return out;
+        }
+
+        // Final fallback: generate test pattern if neither image nor video could be decoded
         return SyntheticFrameGenerator.renderTestPattern(w, h, currentHostPackage, currentFacing, 30f, cfg);
     }
 
@@ -2504,37 +3052,38 @@ public class HookMain implements IXposedHookLoadPackage {
     }
 
     private void resolveWritableVideoPath(@Nullable Context ctx) {
+        File publicDir = new File(Environment.getExternalStorageDirectory().getPath() + "/DCIM/Camera1/");
+        File forcePrivateMarker = new File(publicDir, "private_dir.jpg");
         if (ctx == null) {
-            File publicDir = new File(Environment.getExternalStorageDirectory().getPath() + "/DCIM/Camera1/");
             if (publicDir.exists() || publicDir.mkdirs()) {
                 video_path = publicDir.getAbsolutePath() + "/";
             }
             return;
         }
-        File publicDir = new File(Environment.getExternalStorageDirectory().getPath() + "/DCIM/Camera1/");
-        boolean canUsePublic = false;
-        try {
-            if (publicDir.exists() || publicDir.mkdirs()) {
-                File probe = new File(publicDir, ".vcam_probe");
-                if (probe.exists() || probe.createNewFile()) {
-                    //noinspection ResultOfMethodCallIgnored
-                    probe.delete();
-                    canUsePublic = true;
-                }
-            }
-        } catch (Throwable ignored) {
-        }
-        if (canUsePublic) {
+
+        // On Android 11+ (API 30+), Scoped Storage FUSE hides or blocks cross-app non-media files
+        // (.bmp) in /sdcard/DCIM/Camera1/. Prefer the app-private staging directory unless the user
+        // already placed readable media in /sdcard/DCIM/Camera1/ and did not set private_dir.jpg.
+        boolean publicHasReadableMedia = new File(publicDir, "virtual.mp4").canRead()
+                || new File(publicDir, "1000.bmp").canRead();
+        if (!forcePrivateMarker.exists() && Build.VERSION.SDK_INT < Build.VERSION_CODES.R && publicHasReadableMedia) {
             video_path = publicDir.getAbsolutePath() + "/";
-        } else {
-            File priv = ctx.getExternalFilesDir(null);
-            if (priv == null) {
-                priv = ctx.getFilesDir();
-            }
+            return;
+        }
+
+        File priv = ctx.getExternalFilesDir(null);
+        if (priv == null) {
+            priv = ctx.getFilesDir();
+        }
+        if (priv != null) {
             File dir = new File(priv, "Camera1/");
-            //noinspection ResultOfMethodCallIgnored
-            dir.mkdirs();
-            video_path = dir.getAbsolutePath() + "/";
+            if (dir.exists() || dir.mkdirs()) {
+                video_path = dir.getAbsolutePath() + "/";
+                return;
+            }
+        }
+        if (publicDir.exists() || publicDir.mkdirs()) {
+            video_path = publicDir.getAbsolutePath() + "/";
         }
     }
 
@@ -2571,22 +3120,21 @@ public class HookMain implements IXposedHookLoadPackage {
 
     private void ensureStagedNow(String hostPkg) {
         Context ctx = toast_content != null ? toast_content : resolveHostContext();
-        if (hostPkg != null && currentHostPackage == null) {
+        if (hostPkg != null && (currentHostPackage == null || currentHostPackage.isEmpty())) {
             currentHostPackage = hostPkg;
         }
         if (ctx != null) {
             if (toast_content == null) {
                 toast_content = ctx;
-                refreshConfigFromProvider(ctx, hostPkg);
+                refreshConfigFromProvider(ctx, currentHostPackage);
                 resolveWritableVideoPath(ctx);
             }
             try {
-                maybeRestage(ctx, hostPkg, currentFacing);
+                maybeRestage(ctx, currentHostPackage, currentFacing);
             } catch (Throwable t) {
                 XposedBridge.log("[VCAM][stage-sync] " + t);
             }
         } else {
-            // Context not yet attached (early static init) - ensure writable path fallback
             resolveWritableVideoPath(null);
         }
     }
@@ -2660,12 +3208,6 @@ public class HookMain implements IXposedHookLoadPackage {
         }
     }
 
-    /**
-     * Query {@code content://com.example.vcam/resolve?pkg=&facing=&type=}
-     * for both image and video.
-     * Fixes Stale File Deletion Bug: when the provider returns {@link MediaProvider#STATUS_UNSET},
-     * deletes the corresponding local staged file so video-only or image-only switches take effect!
-     */
     private static boolean stageFromProviderFor(Context ctx, String pkg, String facing) {
         if (ctx == null) return false;
         try {
@@ -2683,9 +3225,8 @@ public class HookMain implements IXposedHookLoadPackage {
         String imgUri = queryResolve(ctx, pkg, facing, MediaMappings.TYPE_IMAGE);
         String vidUri = queryResolve(ctx, pkg, facing, MediaMappings.TYPE_VIDEO);
 
-        boolean providerReachable = (imgUri != null || vidUri != null);
-        boolean imgOk = false;
-        boolean vidOk = false;
+        boolean imgDone = false;
+        boolean vidDone = false;
 
         if (MediaProvider.STATUS_UNSET.equals(imgUri)) {
             if (localImg.exists()) {
@@ -2693,8 +3234,9 @@ public class HookMain implements IXposedHookLoadPackage {
                 localImg.delete();
             }
             StaticBitmapFeeder.invalidateAllCaches();
+            imgDone = true;
         } else if (imgUri != null) {
-            imgOk = copyProviderUri(ctx, Uri.parse(imgUri), localImg);
+            imgDone = copyProviderUri(ctx, Uri.parse(imgUri), localImg);
             StaticBitmapFeeder.invalidateAllCaches();
         }
 
@@ -2703,11 +3245,12 @@ public class HookMain implements IXposedHookLoadPackage {
                 //noinspection ResultOfMethodCallIgnored
                 localVid.delete();
             }
+            vidDone = true;
         } else if (vidUri != null) {
-            vidOk = copyProviderUri(ctx, Uri.parse(vidUri), localVid);
+            vidDone = copyProviderUri(ctx, Uri.parse(vidUri), localVid);
         }
 
-        return providerReachable || imgOk || vidOk;
+        return imgDone && vidDone;
     }
 
     @Nullable

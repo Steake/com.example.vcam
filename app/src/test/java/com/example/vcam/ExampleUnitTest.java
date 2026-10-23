@@ -2,16 +2,21 @@ package com.example.vcam;
 
 import org.junit.Test;
 
+import java.io.File;
+import java.io.FileInputStream;
+import java.nio.ByteBuffer;
 import java.util.Arrays;
 
 import static org.junit.Assert.*;
 
 /**
- * Unit tests for VCAM's core pure-Java pipelines:
+ * Unit tests for VCAM's core pipelines:
  * - BT.601 ARGB -> NV21 / I420 color accuracy (verifying R/B channel fix)
  * - Temporal sensor grain LUT injection (verifying anti-duplicate frame hashes)
  * - Little-Endian TIFF/EXIF APP1 segment synthesis
  * - Package filter whitelist evaluation
+ * - NDK ELF shared library presence & header integrity for arm64-v8a, armeabi-v7a, x86_64
+ * - Latest video frame cache synchronization for video-only still captures & NDK planes
  */
 public class ExampleUnitTest {
 
@@ -27,7 +32,6 @@ public class ExampleUnitTest {
         int yRed = nv21Red[0] & 0xFF;
         int vRed = nv21Red[4] & 0xFF; // NV21 puts V (Cr) first
         int uRed = nv21Red[5] & 0xFF; // NV21 puts U (Cb) second
-        // For pure red: Y ~ 82, V (Cr) > 200, U (Cb) < 100
         assertTrue("Red Y should be around 81..82", yRed >= 75 && yRed <= 90);
         assertTrue("Red Cr (V) must be high (>200)", vRed > 200);
         assertTrue("Red Cb (U) must be low (<100)", uRed < 100);
@@ -59,7 +63,6 @@ public class ExampleUnitTest {
 
     @Test
     public void exifSynthesizer_injectsValidApp1Segment() {
-        // Minimal valid JPEG SOI + EOI
         byte[] minimalJpeg = new byte[]{(byte) 0xFF, (byte) 0xD8, (byte) 0xFF, (byte) 0xD9};
         SensorProfiler.LensProfile profile = SensorProfiler.LensProfile.defaultForFacing("back");
         ExifSynthesizer.FramePhotometry phot = new ExifSynthesizer.FramePhotometry();
@@ -67,12 +70,10 @@ public class ExampleUnitTest {
         byte[] out = ExifSynthesizer.injectExifIntoJpeg(minimalJpeg, 1920, 1080, profile, phot);
         assertNotNull(out);
         assertTrue(out.length > minimalJpeg.length);
-        // Starts with SOI (FF D8) followed by APP1 marker (FF E1)
         assertEquals((byte) 0xFF, out[0]);
         assertEquals((byte) 0xD8, out[1]);
         assertEquals((byte) 0xFF, out[2]);
         assertEquals((byte) 0xE1, out[3]);
-        // Contains "Exif\0\0" at offset 6..11
         assertEquals('E', (char) out[6]);
         assertEquals('x', (char) out[7]);
         assertEquals('i', (char) out[8]);
@@ -85,5 +86,36 @@ public class ExampleUnitTest {
         assertTrue(MediaProvider.isPackageAllowedByFilter("com.whatsapp, org.telegram.messenger", "com.whatsapp"));
         assertFalse(MediaProvider.isPackageAllowedByFilter("com.whatsapp, org.telegram.messenger", "com.instagram.android"));
         assertTrue(MediaProvider.isPackageAllowedByFilter("com.whatsapp", BuildConfig.APPLICATION_ID));
+    }
+
+    @Test
+    public void updateLatestVideoFrame_synchronizesBuffers() {
+        byte[] sampleNv21 = new byte[16 * 16 * 3 / 2];
+        Arrays.fill(sampleNv21, (byte) 0x5A);
+        HookMain.updateLatestVideoFrame(sampleNv21, 16, 16);
+        assertSame(sampleNv21, HookMain.data_buffer);
+        assertSame(sampleNv21, HookMain.latestVideoNv21);
+        assertEquals(16, HookMain.latestVideoWidth);
+        assertEquals(16, HookMain.latestVideoHeight);
+    }
+
+    @Test
+    public void ndkLibraries_presentAndValidElfForAllAbis() throws Exception {
+        String[] abis = new String[]{"arm64-v8a", "armeabi-v7a", "x86_64"};
+        for (String abi : abis) {
+            File soFile = new File("src/main/jniLibs/" + abi + "/libvcam_ndk.so");
+            if (!soFile.exists()) {
+                soFile = new File("app/src/main/jniLibs/" + abi + "/libvcam_ndk.so");
+            }
+            assertTrue("Missing libvcam_ndk.so for " + abi, soFile.exists() && soFile.length() > 4096);
+            byte[] magic = new byte[4];
+            try (FileInputStream fis = new FileInputStream(soFile)) {
+                assertEquals(4, fis.read(magic));
+            }
+            assertEquals(0x7F, magic[0] & 0xFF);
+            assertEquals('E', (char) magic[1]);
+            assertEquals('L', (char) magic[2]);
+            assertEquals('F', (char) magic[3]);
+        }
     }
 }
