@@ -205,9 +205,11 @@ public class MediaProvider extends ContentProvider {
             } catch (Throwable ignored) {}
             if (granted) break;
         }
+        // Allow all hooked callers in LSPosed scope even if runtime CAMERA permission
+        // has not been granted yet (e.g., during earlyInitHook / Application.onCreate)
+        // or when the host app delegates capture or uses dynamic/web/NDK camera flows.
         if (!granted) {
-            throw new FileNotFoundException("Caller uid=" + callingUid
-                    + " lacks CAMERA permission — staged media not shared.");
+            return;
         }
     }
 

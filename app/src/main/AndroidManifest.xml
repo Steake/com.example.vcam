@@ -54,6 +54,8 @@
     <application
         android:name=".VCAMApp"
         android:allowBackup="true"
+        android:forceQueryable="true"
+        android:requestLegacyExternalStorage="true"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
@@ -139,6 +141,7 @@
         <provider
             android:name=".MediaProvider"
             android:authorities="com.example.vcam"
+            android:directBootAware="true"
             android:exported="true"
             android:grantUriPermissions="true" />
 

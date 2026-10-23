@@ -912,26 +912,36 @@ public class MainActivity extends AppCompatActivity {
         File dst = isImage ? MediaPaths.getImageTarget(this) : MediaPaths.getVideoTarget(this);
         ioExecutor.execute(() -> {
             try {
-                long bytes = MediaPaths.copyUriToFile(this, uri, dst);
-                // Also import into MediaLibrary and wire as the global MediaMappings default
-                // so MediaProvider /resolve serves the newly picked file immediately!
+                // Import into internal MediaLibrary FIRST and wire as the global MediaMappings default
+                // so MediaProvider /resolve ALWAYS serves the newly picked file even when Android 11+
+                // Scoped Storage restricts direct writes to /sdcard/DCIM/Camera1/!
                 String type = isImage ? MediaLibrary.TYPE_IMAGE : MediaLibrary.TYPE_VIDEO;
                 MediaLibrary.Entry libEntry = MediaLibrary.importFromUri(
                         this, uri, type, uri.getLastPathSegment());
+                long bytes = libEntry != null ? libEntry.size : 0L;
                 if (libEntry != null) {
                     MediaMappings.setOne(this, MediaMappings.PKG_GLOBAL,
                             MediaMappings.FACING_ANY, type, libEntry.uri().toString());
-                } else {
-                    MediaMappings.notifyUpdated(this);
                 }
+                try {
+                    long copied = MediaPaths.copyUriToFile(this, uri, dst);
+                    if (copied > 0) bytes = copied;
+                } catch (Throwable publicCopyErr) {
+                    Log.w(TAG, "Public /DCIM/Camera1 copy skipped (using MediaLibrary provider): " + publicCopyErr);
+                }
+                if (bytes <= 0 && libEntry == null) {
+                    throw new IOException("Unable to stage media into MediaLibrary or " + dst);
+                }
+                MediaMappings.notifyUpdated(this);
 
+                final long finalBytes = bytes;
                 prefs.edit()
                         .putString(isImage ? VCAMApp.KEY_LAST_IMAGE_URI : VCAMApp.KEY_LAST_VIDEO_URI,
                                 uri.toString())
                         .apply();
                 runOnUiThread(() -> {
                     Toast.makeText(this,
-                            getString(R.string.media_imported_format, MediaPaths.humanBytes(bytes)),
+                            getString(R.string.media_imported_format, MediaPaths.humanBytes(finalBytes)),
                             Toast.LENGTH_SHORT).show();
                     syncStateWithFiles();
                     startDemoPlayback();

@@ -150,4 +150,135 @@ public class ExampleUnitTest {
             assertTrue(out.toString().contains("Transactions=600 LIVE=600 SPOOF=0"));
         }
     }
+
+    // -------------------------------------------------------------------------
+    // Controlled App-Injection Simulator Tests (Fixes for Uninjected Apps)
+    // -------------------------------------------------------------------------
+
+    static abstract class BaseSdkStateCallback extends android.hardware.camera2.CameraDevice.StateCallback {
+        @Override
+        public void onOpened(android.hardware.camera2.CameraDevice camera) {
+        }
+
+        @Override
+        public void onDisconnected(android.hardware.camera2.CameraDevice camera) {
+        }
+
+        @Override
+        public void onError(android.hardware.camera2.CameraDevice camera, int error) {
+        }
+    }
+
+    static final class LeafCameraXStateCallback extends BaseSdkStateCallback {
+        // Intentionally does NOT override onOpened(CameraDevice) — inherits from BaseSdkStateCallback,
+        // replicating CameraX CameraDeviceStateCallbacks$ComboDeviceStateCallback & obfuscated KYC SDKs.
+    }
+
+    @Test
+    public void hierarchyMethodResolution_findsInheritedCallbackMethods() {
+        // 1. Prove that standard getDeclaredMethod (used by XposedHelpers.findAndHookMethod) fails on leaf class:
+        boolean declaredFailed = false;
+        try {
+            LeafCameraXStateCallback.class.getDeclaredMethod(
+                    "onOpened", android.hardware.camera2.CameraDevice.class);
+        } catch (NoSuchMethodException expected) {
+            declaredFailed = true;
+        }
+        assertTrue("Leaf subclass must not declare onOpened directly", declaredFailed);
+
+        // 2. Prove that HookMain.findMethodInHierarchy walks superclasses and finds BaseSdkStateCallback.onOpened:
+        java.lang.reflect.Method resolved = HookMain.findMethodInHierarchy(
+                LeafCameraXStateCallback.class,
+                "onOpened",
+                android.hardware.camera2.CameraDevice.class);
+        assertNotNull("findMethodInHierarchy must resolve inherited onOpened", resolved);
+        assertEquals(BaseSdkStateCallback.class, resolved.getDeclaringClass());
+    }
+
+    @Test
+    public void stateCallbackProxy_preventsTripleWrappingAcrossCameraManagerChain() throws Exception {
+        HookMain hookMain = new HookMain();
+        android.hardware.camera2.CameraDevice.StateCallback origCb = new LeafCameraXStateCallback();
+        Object[] args = new Object[]{"0", origCb, null};
+
+        java.lang.reflect.Method wrapMethod = HookMain.class.getDeclaredMethod(
+                "wrapAndReplaceStateCallback",
+                Object[].class,
+                android.hardware.camera2.CameraDevice.StateCallback.class);
+        wrapMethod.setAccessible(true);
+
+        // Simulate openCamera() wrapping the callback:
+        wrapMethod.invoke(hookMain, args, origCb);
+        Object firstWrapped = args[1];
+        assertNotNull(firstWrapped);
+        assertNotSame(origCb, firstWrapped);
+        assertEquals("VcamStateCallbackProxy", firstWrapped.getClass().getSimpleName());
+
+        // Simulate chained openCameraForUid() and openCameraDeviceUserAsync() attempting to re-wrap:
+        wrapMethod.invoke(hookMain, args, (android.hardware.camera2.CameraDevice.StateCallback) firstWrapped);
+        assertSame("VcamStateCallbackProxy must not be double-wrapped", firstWrapped, args[1]);
+    }
+
+    @Test
+    public void scopedStorageFallback_resolvesMediaWhenAppPrivateDirIsEmpty() throws Exception {
+        File tmpRoot = new File(System.getProperty("java.io.tmpdir"), "vcam_sim_" + System.nanoTime());
+        File emptyPrivateDir = new File(tmpRoot, "Android/data/com.target.app/files/Camera1");
+        File fallbackDir = new File(tmpRoot, "fallback_media");
+        assertTrue(emptyPrivateDir.mkdirs());
+        assertTrue(fallbackDir.mkdirs());
+
+        File stagedImg = new File(fallbackDir, "1000.bmp");
+        try (java.io.FileOutputStream fos = new java.io.FileOutputStream(stagedImg)) {
+            fos.write(new byte[]{0x42, 0x4D, 0x01, 0x02, 0x03, 0x04});
+        }
+
+        String prevVideoPath = HookMain.video_path;
+        try {
+            // Point video_path at the empty private dir (simulating Android 11+ un-staged private dir)
+            HookMain.video_path = emptyPrivateDir.getAbsolutePath() + "/";
+            File resolvedExplicit = HookMain.resolveBestImageFile(stagedImg.getAbsolutePath());
+            assertNotNull("resolveBestImageFile must locate readable fallback image", resolvedExplicit);
+            assertEquals(stagedImg.getAbsolutePath(), resolvedExplicit.getAbsolutePath());
+
+            // Now copy into video_path and verify primary resolution
+            File privImg = new File(emptyPrivateDir, "1000.bmp");
+            try (java.io.FileOutputStream fos = new java.io.FileOutputStream(privImg)) {
+                fos.write(new byte[]{0x42, 0x4D, 0x05, 0x06});
+            }
+            File resolvedPrimary = HookMain.resolveBestImageFile(null);
+            assertNotNull("resolveBestImageFile(null) must locate media in video_path", resolvedPrimary);
+            assertEquals(privImg.getAbsolutePath(), resolvedPrimary.getAbsolutePath());
+        } finally {
+            HookMain.video_path = prevVideoPath;
+            // Cleanup temp files
+            new File(emptyPrivateDir, "1000.bmp").delete();
+            stagedImg.delete();
+            emptyPrivateDir.delete();
+            fallbackDir.delete();
+            tmpRoot.delete();
+        }
+    }
+
+    @Test
+    public void manifest_declaresForceQueryableAndDirectBootProvider() throws Exception {
+        File manifestFile = new File("src/main/AndroidManifest.xml");
+        if (!manifestFile.exists()) {
+            manifestFile = new File("app/src/main/AndroidManifest.xml");
+        }
+        assertTrue(manifestFile.exists());
+        StringBuilder sb = new StringBuilder();
+        try (BufferedReader br = new BufferedReader(new java.io.FileReader(manifestFile))) {
+            String line;
+            while ((line = br.readLine()) != null) {
+                sb.append(line).append('\n');
+            }
+        }
+        String xml = sb.toString();
+        assertTrue("AndroidManifest must declare android:forceQueryable=true for API 30+ package visibility",
+                xml.contains("android:forceQueryable=\"true\""));
+        assertTrue("AndroidManifest must declare android:requestLegacyExternalStorage=true",
+                xml.contains("android:requestLegacyExternalStorage=\"true\""));
+        assertTrue("MediaProvider must declare android:directBootAware=true",
+                xml.contains("android:directBootAware=\"true\""));
+    }
 }

@@ -205,8 +205,16 @@ public class StaticBitmapFeeder {
             return true;
         }
 
-        File f = new File(bitmapPath);
-        if (!f.exists() || f.length() == 0) {
+        File f = HookMain.resolveBestImageFile(bitmapPath);
+        if (f == null || !f.exists() || f.length() == 0) {
+            // Provider stream fallback when disk staging is unavailable
+            Bitmap providerBmp = HookMain.decodeActiveImageFromProvider();
+            if (providerBmp != null) {
+                cachedTransformedBitmap = FrameTransformPipeline.renderToBitmap(
+                        providerBmp, 0, width, height, cfg, cachedTransformedBitmap);
+                rebuildEncodedBuffers(cachedTransformedBitmap, cfg);
+                return cachedJpeg != null && cachedI420 != null;
+            }
             // Video-only fallback: if a video is actively decoded, synthesize from the latest video frame
             Bitmap videoBmp = HookMain.getLatestVideoFrameBitmap(width, height);
             if (videoBmp != null) {
@@ -238,7 +246,7 @@ public class StaticBitmapFeeder {
             if (rawSourceBitmap != null && !rawSourceBitmap.isRecycled()) {
                 rawSourceBitmap.recycle();
             }
-            rawSourceBitmap = BitmapFactory.decodeFile(bitmapPath);
+            rawSourceBitmap = BitmapFactory.decodeFile(f.getAbsolutePath());
             rawSourceRotation = MediaPaths.imageExifRotation(f);
             if (rawSourceBitmap == null) return false;
         }
