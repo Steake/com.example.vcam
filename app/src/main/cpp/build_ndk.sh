@@ -39,6 +39,9 @@ long read(int fd, void* buf, unsigned long count) { return 0; }
 long write(int fd, const void* buf, unsigned long count) { return 0; }
 long long lseek(int fd, long long offset, int whence) { return 0; }
 int close(int fd) { return 0; }
+int access(const char* pathname, int mode) { return -1; }
+int faccessat(int dirfd, const char* pathname, int mode, int flags) { return -1; }
+void* android_dlopen_ext(const char* filename, int flags, const void* extinfo) { return 0; }
 int connect(int sockfd, const void* addr, unsigned int addrlen) { return 0; }
 void* ANativeWindow_fromSurface(void* env, void* surface) { return 0; }
 void* ANativeWindow_toSurface(void* env, void* window) { return 0; }

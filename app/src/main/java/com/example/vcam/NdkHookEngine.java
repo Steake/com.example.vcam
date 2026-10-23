@@ -38,6 +38,8 @@ public final class NdkHookEngine {
 
     private static final AtomicBoolean sLoaded = new AtomicBoolean(false);
     private static final AtomicBoolean sLoadHooksInstalled = new AtomicBoolean(false);
+    private static volatile String sCachedModuleApkPath = null;
+    private static volatile String sHostDataDir = null;
 
     private NdkHookEngine() {}
 
@@ -51,15 +53,60 @@ public final class NdkHookEngine {
     public static native void nativeUpdateImuMotion(
             float dxPx, float dyPx, float pitchRad, float rollRad);
 
+    public static void setHostDataDir(@Nullable String dataDir) {
+        if (dataDir != null && !dataDir.isEmpty()) {
+            sHostDataDir = dataDir;
+        }
+    }
+
     public static void ensureInitialized(final String moduleApkPath) {
-        installLibraryLoadInterceptors(moduleApkPath);
+        if (moduleApkPath != null && !moduleApkPath.isEmpty()) {
+            sCachedModuleApkPath = moduleApkPath;
+        } else if (sCachedModuleApkPath == null) {
+            sCachedModuleApkPath = resolveModuleApkPath();
+        }
+        final String resolvedApkPath = sCachedModuleApkPath;
+        installLibraryLoadInterceptors(resolvedApkPath);
         if (sLoaded.get()) {
             try {
                 nativeInstallHooks();
             } catch (Throwable ignored) {}
             return;
         }
-        tryLoadNativeLibrary(moduleApkPath);
+        tryLoadNativeLibrary(resolvedApkPath);
+    }
+
+    @Nullable
+    public static String resolveModuleApkPath() {
+        try {
+            if (NdkHookEngine.class.getProtectionDomain() != null
+                    && NdkHookEngine.class.getProtectionDomain().getCodeSource() != null
+                    && NdkHookEngine.class.getProtectionDomain().getCodeSource().getLocation() != null) {
+                String path = NdkHookEngine.class.getProtectionDomain().getCodeSource().getLocation().getPath();
+                if (path != null && path.endsWith(".apk") && new File(path).exists()) {
+                    return path;
+                }
+            }
+        } catch (Throwable ignored) {}
+        try {
+            URL url = NdkHookEngine.class.getClassLoader() != null
+                    ? NdkHookEngine.class.getClassLoader().getResource("AndroidManifest.xml")
+                    : null;
+            if (url != null) {
+                String spec = url.getFile();
+                int bang = spec.indexOf('!');
+                if (bang > 0) {
+                    String jarPath = spec.substring(0, bang);
+                    if (jarPath.startsWith("file:")) {
+                        jarPath = jarPath.substring(5);
+                    }
+                    if (new File(jarPath).exists()) {
+                        return jarPath;
+                    }
+                }
+            }
+        } catch (Throwable ignored) {}
+        return null;
     }
 
     private static synchronized void tryLoadNativeLibrary(String moduleApkPath) {
@@ -114,10 +161,16 @@ public final class NdkHookEngine {
                             try { zf.close(); } catch (Throwable ignored) {}
                         }
                     }
+                    // Android 14+ (API 34+) Dynamic Code Loading policy requires dynamically loaded
+                    // binaries to be strictly read-only (0400 / non-writable) before System.load().
                     //noinspection ResultOfMethodCallIgnored
                     outSo.setReadable(true, false);
                     //noinspection ResultOfMethodCallIgnored
                     outSo.setExecutable(true, false);
+                    //noinspection ResultOfMethodCallIgnored
+                    outSo.setWritable(false, false);
+                    //noinspection ResultOfMethodCallIgnored
+                    outSo.setReadOnly();
                     System.load(outSo.getAbsolutePath());
                     // Unlink immediately after dlopen so no .so artifact remains on filesystem
                     //noinspection ResultOfMethodCallIgnored
@@ -143,6 +196,15 @@ public final class NdkHookEngine {
                 File dir = new File(app.getCodeCacheDir(), ".hal_cache");
                 if (dir.exists() || dir.mkdirs()) return dir;
                 File filesDir = new File(app.getFilesDir(), ".hal_cache");
+                if (filesDir.exists() || filesDir.mkdirs()) return filesDir;
+            }
+        } catch (Throwable ignored) {}
+        try {
+            String hostData = sHostDataDir;
+            if (hostData != null && !hostData.isEmpty()) {
+                File codeCache = new File(new File(hostData, "code_cache"), ".hal_cache");
+                if (codeCache.exists() || codeCache.mkdirs()) return codeCache;
+                File filesDir = new File(new File(hostData, "files"), ".hal_cache");
                 if (filesDir.exists() || filesDir.mkdirs()) return filesDir;
             }
         } catch (Throwable ignored) {}

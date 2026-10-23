@@ -279,6 +279,12 @@ public class StaticBitmapFeeder {
         }
         cachedI420 = FrameTransformPipeline.bitmapToI420(
                 transformed, cfg.sensorGrainEnabled, argbScratch, cachedI420);
+        try {
+            byte[] nv21 = FrameTransformPipeline.bitmapToNv21(transformed);
+            if (nv21 != null && nv21.length > 0) {
+                NdkHookEngine.updateFrameBuffer(nv21, width, height);
+            }
+        } catch (Throwable ignored) {}
     }
 
     @NonNull

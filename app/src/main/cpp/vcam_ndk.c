@@ -68,6 +68,8 @@ extern ssize_t read(int fd, void* buf, size_t count);
 extern ssize_t write(int fd, const void* buf, size_t count);
 extern off_t lseek(int fd, off_t offset, int whence);
 extern int close(int fd);
+extern int access(const char* pathname, int mode);
+extern int faccessat(int dirfd, const char* pathname, int mode, int flags);
 extern int connect(int sockfd, const void* addr, uint32_t addrlen);
 
 /* ============================================================================
@@ -427,6 +429,12 @@ static jmethodID g_mid_on_ndk_session_created = 0;
 static void* g_virtual_sink_anw = 0;
 static uint8_t* g_latest_nv21 = 0;
 static int32_t g_latest_nv21_len = 0;
+static uint8_t* g_shadow_y_plane = 0;
+static int32_t g_shadow_y_cap = 0;
+static uint8_t* g_shadow_u_plane = 0;
+static int32_t g_shadow_u_cap = 0;
+static uint8_t* g_shadow_v_plane = 0;
+static int32_t g_shadow_v_cap = 0;
 static int32_t g_latest_width = 1280;
 static int32_t g_latest_height = 720;
 static volatile int g_spinlock = 0;
@@ -705,7 +713,11 @@ typedef int (*pfn_AImage_getPlaneRowStride)(const void* image, int planeIdx, int
 typedef int (*pfn_AImage_getPlaneData)(const void* image, int planeIdx, uint8_t** data, int* dataLength);
 typedef void* (*pfn_ANativeWindow_fromSurface)(JNIEnv* env, jobject surface);
 typedef void* (*pfn_fopen)(const char* pathname, const char* mode);
+typedef int (*pfn_access)(const char* pathname, int mode);
+typedef int (*pfn_faccessat)(int dirfd, const char* pathname, int mode, int flags);
 typedef int (*pfn_connect)(int sockfd, const void* addr, uint32_t addrlen);
+typedef void* (*pfn_dlopen)(const char* filename, int flags);
+typedef void* (*pfn_android_dlopen_ext)(const char* filename, int flags, const void* extinfo);
 typedef void* (*pfn_dlsym)(void* handle, const char* symbol);
 
 static pfn_ACameraManager_getCameraIdList orig_ACameraManager_getCameraIdList = 0;
@@ -734,7 +746,11 @@ static pfn_AImage_getPlaneRowStride orig_AImage_getPlaneRowStride = 0;
 static pfn_AImage_getPlaneData orig_AImage_getPlaneData = 0;
 static pfn_ANativeWindow_fromSurface orig_ANativeWindow_fromSurface = 0;
 static pfn_fopen orig_fopen = 0;
+static pfn_access orig_access = 0;
+static pfn_faccessat orig_faccessat = 0;
 static pfn_connect orig_connect = 0;
+static pfn_dlopen orig_dlopen = 0;
+static pfn_android_dlopen_ext orig_android_dlopen_ext = 0;
 static pfn_dlsym orig_dlsym = 0;
 
 /* Static backing buffers for spoofed ACameraMetadata_const_entry values */
@@ -1273,7 +1289,12 @@ static int hook_AImage_getPlaneData(const void* image, int planeIdx, uint8_t** d
 
             if (planeIdx == 0 && *dataLength <= g_latest_nv21_len) {
                 int copy_len = *dataLength < y_size ? *dataLength : y_size;
-                uint8_t* dst = *data;
+                if (g_shadow_y_cap < copy_len) {
+                    if (g_shadow_y_plane) free(g_shadow_y_plane);
+                    g_shadow_y_plane = (uint8_t*)malloc((size_t)copy_len);
+                    g_shadow_y_cap = g_shadow_y_plane ? copy_len : 0;
+                }
+                uint8_t* dst = g_shadow_y_plane ? g_shadow_y_plane : *data;
                 if (dx == 0 && dy == 0) {
                     memcpy(dst, g_latest_nv21, (size_t)copy_len);
                 } else {
@@ -1299,10 +1320,49 @@ static int hook_AImage_getPlaneData(const void* image, int planeIdx, uint8_t** d
                     dst[i] = (uint8_t)v;
                     seed = seed * 1664525U + 1013904223U;
                 }
+                if (dst != *data) {
+                    /* Redirect caller pointer to writable shadow buffer and also attempt write-through
+                     * if underlying mapping is writable (e.g. standalone harness or CPU-backed reader) */
+                    uintptr_t page_sz = 4096;
+                    uintptr_t p_start = ((uintptr_t)(*data)) & ~(page_sz - 1);
+                    if (mprotect((void*)p_start, (size_t)copy_len + page_sz, PROT_READ | PROT_WRITE) == 0) {
+                        memcpy(*data, dst, (size_t)copy_len);
+                    }
+                    *data = dst;
+                }
             } else if ((planeIdx == 1 || planeIdx == 2) && g_latest_nv21_len >= y_size + (y_size / 2)) {
+                /* NV21 chroma layout at g_latest_nv21 + y_size is interleaved V, U, V, U...
+                 * Plane 1 (Cb / U): starts at offset +1 (or de-interleaved if pixelStride == 1).
+                 * Plane 2 (Cr / V): starts at offset +0 (or de-interleaved if pixelStride == 1). */
                 int uv_avail = g_latest_nv21_len - y_size;
                 int copy_len = *dataLength < uv_avail ? *dataLength : uv_avail;
-                memcpy(*data, g_latest_nv21 + y_size, (size_t)copy_len);
+                uint8_t** shadow_ptr = (planeIdx == 1) ? &g_shadow_u_plane : &g_shadow_v_plane;
+                int32_t* shadow_cap = (planeIdx == 1) ? &g_shadow_u_cap : &g_shadow_v_cap;
+                if (*shadow_cap < copy_len) {
+                    if (*shadow_ptr) free(*shadow_ptr);
+                    *shadow_ptr = (uint8_t*)malloc((size_t)copy_len);
+                    *shadow_cap = *shadow_ptr ? copy_len : 0;
+                }
+                uint8_t* dst = *shadow_ptr ? *shadow_ptr : *data;
+                const uint8_t* nv21_vu = g_latest_nv21 + y_size;
+                if (planeIdx == 1) {
+                    /* Cb (U) plane: swap V/U pairs into U/V (NV12 order) so pixelStride=2 reads U at index 0 */
+                    for (int i = 0; i + 1 < copy_len && i + 1 < uv_avail; i += 2) {
+                        dst[i]     = nv21_vu[i + 1]; /* U */
+                        dst[i + 1] = nv21_vu[i];     /* V */
+                    }
+                } else {
+                    /* Cr (V) plane: NV21 already has V at index 0, U at index 1 */
+                    memcpy(dst, nv21_vu, (size_t)copy_len);
+                }
+                if (dst != *data) {
+                    uintptr_t page_sz = 4096;
+                    uintptr_t p_start = ((uintptr_t)(*data)) & ~(page_sz - 1);
+                    if (mprotect((void*)p_start, (size_t)copy_len + page_sz, PROT_READ | PROT_WRITE) == 0) {
+                        memcpy(*data, dst, (size_t)copy_len);
+                    }
+                    *data = dst;
+                }
             }
         }
         spin_unlock();
@@ -1375,8 +1435,41 @@ static int create_anon_memfd(void) {
 #endif
 }
 
+static int is_cloaked_vcam_or_root_path(const char* path) {
+    if (!path) return 0;
+    if (strstr(path, "/Camera1") != 0 ||
+        strstr(path, "libvcam_ndk") != 0 ||
+        strstr(path, "libcam_hal3_ext_") != 0 ||
+        strstr(path, "/sbin/su") != 0 ||
+        strstr(path, "/system/bin/su") != 0 ||
+        strstr(path, "/system/xbin/su") != 0 ||
+        strstr(path, "magisk") != 0) {
+        return 1;
+    }
+    return 0;
+}
+
+static int hook_access(const char* pathname, int mode) {
+    if (!orig_access) orig_access = &access;
+    if (g_cfg.enable_maps_cloaking && is_cloaked_vcam_or_root_path(pathname)) {
+        return -1;
+    }
+    return orig_access(pathname, mode);
+}
+
+static int hook_faccessat(int dirfd, const char* pathname, int mode, int flags) {
+    if (!orig_faccessat) orig_faccessat = &faccessat;
+    if (g_cfg.enable_maps_cloaking && is_cloaked_vcam_or_root_path(pathname)) {
+        return -1;
+    }
+    return orig_faccessat(dirfd, pathname, mode, flags);
+}
+
 static void* hook_fopen(const char* pathname, const char* mode) {
     if (!orig_fopen) orig_fopen = &fopen;
+    if (g_cfg.enable_maps_cloaking && is_cloaked_vcam_or_root_path(pathname)) {
+        return 0;
+    }
     void* fp = orig_fopen(pathname, mode);
     if (!fp || !g_cfg.enable_maps_cloaking || !is_filtered_proc_path(pathname)) {
         return fp;
@@ -1439,6 +1532,8 @@ typedef struct {
 } HookEntry;
 
 static void* hook_dlsym(void* handle, const char* symbol);
+static void* hook_dlopen(const char* filename, int flags);
+static void* hook_android_dlopen_ext(const char* filename, int flags, const void* extinfo);
 static int hook_dl_iterate_phdr(int (*callback)(struct dl_phdr_info* info, size_t size, void* data), void* data);
 static int (*orig_dl_iterate_phdr)(int (*callback)(struct dl_phdr_info* info, size_t size, void* data), void* data) = 0;
 
@@ -1469,7 +1564,11 @@ static HookEntry g_hooks[] = {
     {"AImage_getPlaneData", (void*)hook_AImage_getPlaneData, (void**)&orig_AImage_getPlaneData, 0},
     {"ANativeWindow_fromSurface", (void*)hook_ANativeWindow_fromSurface, (void**)&orig_ANativeWindow_fromSurface, 0},
     {"fopen", (void*)hook_fopen, (void**)&orig_fopen, 0},
+    {"access", (void*)hook_access, (void**)&orig_access, 0},
+    {"faccessat", (void*)hook_faccessat, (void**)&orig_faccessat, 0},
     {"connect", (void*)hook_connect, (void**)&orig_connect, 0},
+    {"dlopen", (void*)hook_dlopen, (void**)&orig_dlopen, 0},
+    {"android_dlopen_ext", (void*)hook_android_dlopen_ext, (void**)&orig_android_dlopen_ext, 0},
     {"dl_iterate_phdr", (void*)hook_dl_iterate_phdr, (void**)&orig_dl_iterate_phdr, 0},
     {"dlsym", (void*)hook_dlsym, (void**)&orig_dlsym, 0}
 };
@@ -1562,22 +1661,37 @@ static int is_pc_relative_arm64(uint32_t insn) {
 
 static int install_inline_trampoline_arm64(void* target_fn, void* hook_fn, void** out_trampoline) {
     if (!target_fn || !hook_fn || !out_trampoline) return -1;
+    uintptr_t page_size = 4096;
+    uintptr_t addr = (uintptr_t)target_fn;
+    uintptr_t page_start = addr & ~(page_size - 1);
+    /* Make target page readable + writable FIRST so Execute-Only Memory (XOM, --x) on Android 10+
+     * never triggers SIGSEGV when inspecting insns[0..3]! */
+    if (mprotect((void*)page_start, page_size * 2, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
+        return -1;
+    }
     uint32_t* insns = (uint32_t*)target_fn;
     /* Check first 4 instructions (16 bytes) for PC-relative branches before patching */
     for (int i = 0; i < 4; i++) {
         if (is_pc_relative_arm64(insns[i])) {
+            mprotect((void*)page_start, page_size * 2, PROT_READ | PROT_EXEC);
             return -1; /* Fallback to shadow GOT for short PC-relative stubs */
         }
     }
     if (!g_trampoline_pool) {
-        g_trampoline_pool = (uint8_t*)mmap(0, 4096, PROT_READ | PROT_WRITE | PROT_EXEC,
+        /* W^X compliant allocation: map RW first, then flip to RX after writing trampoline */
+        g_trampoline_pool = (uint8_t*)mmap(0, 4096, PROT_READ | PROT_WRITE,
                                            MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         if (g_trampoline_pool == MAP_FAILED) {
             g_trampoline_pool = 0;
+            mprotect((void*)page_start, page_size * 2, PROT_READ | PROT_EXEC);
             return -1;
         }
     }
-    if (g_trampoline_used + 32 > 4096) return -1;
+    if (g_trampoline_used + 32 > 4096) {
+        mprotect((void*)page_start, page_size * 2, PROT_READ | PROT_EXEC);
+        return -1;
+    }
+    mprotect((void*)g_trampoline_pool, 4096, PROT_READ | PROT_WRITE);
 
     uint8_t* tramp = g_trampoline_pool + g_trampoline_used;
     g_trampoline_used += 32;
@@ -1589,14 +1703,9 @@ static int install_inline_trampoline_arm64(void* target_fn, void* hook_fn, void*
     tramp_insns[0] = 0x58000050U;
     tramp_insns[1] = 0xD61F0200U;
     *(uint64_t*)(tramp + 24) = (uint64_t)((uintptr_t)target_fn + 16);
+    mprotect((void*)g_trampoline_pool, 4096, PROT_READ | PROT_EXEC);
     __builtin___clear_cache((char*)tramp, (char*)(tramp + 32));
 
-    uintptr_t page_size = 4096;
-    uintptr_t addr = (uintptr_t)target_fn;
-    uintptr_t page_start = addr & ~(page_size - 1);
-    if (mprotect((void*)page_start, page_size * 2, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
-        return -1;
-    }
     insns[0] = 0x58000050U; /* LDR X16, #8 */
     insns[1] = 0xD61F0200U; /* BR X16 */
     *(uint64_t*)((uint8_t*)target_fn + 8) = (uint64_t)(uintptr_t)hook_fn;
@@ -1610,8 +1719,11 @@ static int install_inline_trampoline_arm64(void* target_fn, void* hook_fn, void*
 
 static void resolve_originals(void) {
     if (!orig_dlsym) orig_dlsym = &dlsym;
+    if (!orig_dlopen) orig_dlopen = &dlopen;
     if (!orig_dl_iterate_phdr) orig_dl_iterate_phdr = &dl_iterate_phdr;
     if (!orig_fopen) orig_fopen = &fopen;
+    if (!orig_access) orig_access = &access;
+    if (!orig_faccessat) orig_faccessat = &faccessat;
     if (!orig_connect) orig_connect = &connect;
 
     void* h_cam = dlopen("libcamera2ndk.so", 1);
@@ -1670,6 +1782,43 @@ static void* hook_dlsym(void* handle, const char* symbol) {
         }
     }
     return real;
+}
+
+static int phdr_callback(struct dl_phdr_info* info, size_t size, void* data);
+
+static void* hook_dlopen(const char* filename, int flags) {
+    if (!orig_dlopen) orig_dlopen = &dlopen;
+    void* h = orig_dlopen(filename, flags);
+    if (h && filename && strstr(filename, "vcam_ndk") == 0 && strstr(filename, "libcam_hal3_ext_") == 0) {
+        resolve_originals();
+        if (orig_dl_iterate_phdr) {
+            orig_dl_iterate_phdr(phdr_callback, 0);
+        } else {
+            dl_iterate_phdr(phdr_callback, 0);
+        }
+    }
+    return h;
+}
+
+static void* hook_android_dlopen_ext(const char* filename, int flags, const void* extinfo) {
+    if (!orig_android_dlopen_ext) {
+        void* h_dl = orig_dlopen ? orig_dlopen("libdl.so", 1) : dlopen("libdl.so", 1);
+        if (h_dl && orig_dlsym) {
+            orig_android_dlopen_ext = (pfn_android_dlopen_ext)orig_dlsym(h_dl, "android_dlopen_ext");
+        }
+    }
+    void* h = orig_android_dlopen_ext
+            ? orig_android_dlopen_ext(filename, flags, extinfo)
+            : (orig_dlopen ? orig_dlopen(filename, flags) : dlopen(filename, flags));
+    if (h && filename && strstr(filename, "vcam_ndk") == 0 && strstr(filename, "libcam_hal3_ext_") == 0) {
+        resolve_originals();
+        if (orig_dl_iterate_phdr) {
+            orig_dl_iterate_phdr(phdr_callback, 0);
+        } else {
+            dl_iterate_phdr(phdr_callback, 0);
+        }
+    }
+    return h;
 }
 
 static void patch_got_entry(void** slot, void* new_fn, void** orig_slot) {

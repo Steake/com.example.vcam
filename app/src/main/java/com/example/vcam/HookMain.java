@@ -599,6 +599,9 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
         inst.ensureStagedNow(currentHostPackage);
         if (!inst.isInjectionActive() || !inst.hasAnyMedia()) return;
         if (surface == c2_virtual_surface) return;
+        if (!cameraSessionActive) {
+            onNdkCameraOpened();
+        }
 
         if (isImageReader || format == ImageFormat.YUV_420_888 || format == ImageFormat.JPEG || format == ImageFormat.NV21) {
             int w = width > 0 ? width : inst.c2_ori_width;
@@ -1015,8 +1018,15 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
             return;
         }
         sInstance = this;
-        if (sModuleApkPath == null && lpparam.appInfo != null && BuildConfig.APPLICATION_ID.equals(lpparam.packageName)) {
-            sModuleApkPath = lpparam.appInfo.sourceDir;
+        if (sModuleApkPath == null) {
+            if (lpparam.appInfo != null && BuildConfig.APPLICATION_ID.equals(lpparam.packageName)) {
+                sModuleApkPath = lpparam.appInfo.sourceDir;
+            } else {
+                sModuleApkPath = NdkHookEngine.resolveModuleApkPath();
+            }
+        }
+        if (lpparam.appInfo != null && lpparam.appInfo.dataDir != null) {
+            NdkHookEngine.setHostDataDir(lpparam.appInfo.dataDir);
         }
         final boolean isSelfManager = BuildConfig.APPLICATION_ID.equals(lpparam.packageName);
 
@@ -1215,23 +1225,130 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
             });
         } catch (Throwable ignored) {}
 
-        // Cloak /DCIM/Camera1 & vcam_native artifacts from host SDK file-existence probes
+        // Cloak /Camera1 (both Sumsub EXTERNAL /DCIM/Camera1 & INTERNAL getExternalFilesDir/Camera1),
+        // libvcam_ndk/libcam_hal3_ext_ native artifacts, and su/Magisk binaries from host SDK probes
+        XC_MethodHook fileBoolCloakHook = new XC_MethodHook() {
+            @Override
+            protected void afterHookedMethod(MethodHookParam param) {
+                if (Boolean.TRUE.equals(IN_INTERNAL_CHECK.get())) return;
+                if (!Boolean.TRUE.equals(param.getResult())) return;
+                if (!(param.thisObject instanceof File)) return;
+                String path = ((File) param.thisObject).getPath();
+                if (isCloakedFilePath(path) && !isInternalVcamCaller()) {
+                    param.setResult(Boolean.FALSE);
+                }
+            }
+        };
         try {
-            XposedHelpers.findAndHookMethod(File.class, "exists", new XC_MethodHook() {
+            XposedHelpers.findAndHookMethod(File.class, "exists", fileBoolCloakHook);
+        } catch (Throwable ignored) {}
+        try {
+            XposedHelpers.findAndHookMethod(File.class, "canRead", fileBoolCloakHook);
+        } catch (Throwable ignored) {}
+        try {
+            XposedHelpers.findAndHookMethod(File.class, "canWrite", fileBoolCloakHook);
+        } catch (Throwable ignored) {}
+        try {
+            XposedHelpers.findAndHookMethod(File.class, "length", new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) {
                     if (Boolean.TRUE.equals(IN_INTERNAL_CHECK.get())) return;
-                    if (!Boolean.TRUE.equals(param.getResult())) return;
                     if (!(param.thisObject instanceof File)) return;
                     String path = ((File) param.thisObject).getPath();
-                    if (path == null) return;
-                    if (path.contains("/DCIM/Camera1") || path.contains("libvcam_ndk")) {
-                        if (!isInternalVcamCaller()) {
-                            param.setResult(Boolean.FALSE);
-                        }
+                    if (isCloakedFilePath(path) && !isInternalVcamCaller()) {
+                        param.setResult(0L);
                     }
                 }
             });
+        } catch (Throwable ignored) {}
+
+        // Sanitize Build.TAGS ("test-keys" -> "release-keys") and emulator Build properties
+        sanitizeBuildFieldsForHost();
+
+        // Hook RootBeer (used by Sumsub com.sumsub.sns.internal.util.root.a) if present in host ClassLoader
+        try {
+            Class<?> rootBeerClass = XposedHelpers.findClassIfExists("com.scottyab.rootbeer.RootBeer", classLoader);
+            if (rootBeerClass != null) {
+                XC_MethodHook alwaysFalse = new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        param.setResult(Boolean.FALSE);
+                    }
+                };
+                for (String rbMethod : new String[]{
+                        "isRooted", "isRootedWithoutBusyBoxCheck", "isRootedWithBusyBoxCheck",
+                        "detectRootManagementApps", "detectPotentiallyDangerousApps",
+                        "detectTestKeys", "checkForBusyBoxBinary", "checkForSuBinary",
+                        "checkSuExists", "checkForRWPaths", "checkForDangerousProps",
+                        "checkForRootNative", "detectRootCloakingApps", " checkForMagiskBinary"
+                }) {
+                    try {
+                        XposedBridge.hookAllMethods(rootBeerClass, rbMethod.trim(), alwaysFalse);
+                    } catch (Throwable ignored) {}
+                }
+            }
+        } catch (Throwable ignored) {}
+
+        // Hook SensorManager listener dispatch so Persona RealCameraStatsManager never sees
+        // dead 0.0 rad/s gyroscope telemetry during an active camera session
+        try {
+            Class<?> sysSensorMgr = XposedHelpers.findClassIfExists("android.hardware.SystemSensorManager$SensorEventQueue", classLoader);
+            if (sysSensorMgr != null) {
+                XposedBridge.hookAllMethods(sysSensorMgr, "dispatchSensorEvent", new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        if (!cameraSessionActive || param.args == null || param.args.length < 2) return;
+                        if (param.args[1] instanceof float[]) {
+                            float[] vals = (float[]) param.args[1];
+                            if (vals.length >= 3 && vals[0] == 0.0f && vals[1] == 0.0f && vals[2] == 0.0f) {
+                                double t = System.nanoTime() * 1e-9;
+                                vals[0] = (float) (0.016 * Math.sin(t * 5.7) + 0.005 * Math.cos(t * 11.3));
+                                vals[1] = (float) (0.015 * Math.cos(t * 4.9) + 0.004 * Math.sin(t * 9.7));
+                                vals[2] = (float) (0.012 * Math.sin(t * 6.3));
+                            }
+                        }
+                    }
+                });
+            }
+        } catch (Throwable ignored) {}
+    }
+
+    private static boolean isCloakedFilePath(@Nullable String path) {
+        if (path == null || path.isEmpty()) return false;
+        if (path.contains("/Camera1") || path.endsWith("/Camera1")
+                || path.contains("libvcam_ndk") || path.contains("libcam_hal3_ext_")) {
+            return true;
+        }
+        String lower = path.toLowerCase(java.util.Locale.ROOT);
+        if (lower.endsWith("/su") || lower.endsWith("/superuser.apk")
+                || lower.contains("/magisk") || lower.contains("/busybox")) {
+            return true;
+        }
+        return false;
+    }
+
+    private static void sanitizeBuildFieldsForHost() {
+        try {
+            if (Build.TAGS != null && Build.TAGS.contains("test-keys")) {
+                XposedHelpers.setStaticObjectField(Build.class, "TAGS", "release-keys");
+            }
+            if (Build.FINGERPRINT != null && (Build.FINGERPRINT.startsWith("generic")
+                    || Build.FINGERPRINT.contains("vbox") || Build.FINGERPRINT.contains("test-keys")
+                    || Build.FINGERPRINT.contains("sdk_gphone"))) {
+                XposedHelpers.setStaticObjectField(Build.class, "FINGERPRINT",
+                        "google/husky/husky:14/UQ1A.240205.004/11269751:user/release-keys");
+            }
+            if (Build.MODEL != null && (Build.MODEL.contains("google_sdk")
+                    || Build.MODEL.contains("Emulator")
+                    || Build.MODEL.contains("Android SDK built for")
+                    || Build.MODEL.contains("sdk_gphone"))) {
+                XposedHelpers.setStaticObjectField(Build.class, "MODEL", "Pixel 8 Pro");
+                XposedHelpers.setStaticObjectField(Build.class, "MANUFACTURER", "Google");
+                XposedHelpers.setStaticObjectField(Build.class, "BRAND", "google");
+                XposedHelpers.setStaticObjectField(Build.class, "DEVICE", "husky");
+                XposedHelpers.setStaticObjectField(Build.class, "PRODUCT", "husky");
+                XposedHelpers.setStaticObjectField(Build.class, "HARDWARE", "shiba");
+            }
         } catch (Throwable ignored) {}
     }
 
@@ -1276,10 +1393,17 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
         List<StackTraceElement> cleaned = new ArrayList<>(orig.length);
         for (StackTraceElement elem : orig) {
             String cn = elem.getClassName();
-            if (cn != null && (cn.contains("xposed") || cn.contains("lspd")
-                    || cn.contains("com.example.vcam") || cn.contains("sandhook")
-                    || cn.contains("edxposed"))) {
-                continue;
+            if (cn != null) {
+                String lower = cn.toLowerCase(java.util.Locale.ROOT);
+                if (lower.contains("xposed") || lower.contains("lsposed")
+                        || lower.contains("lspd") || lower.contains("lsphooker")
+                        || lower.contains("edhooker") || lower.contains("com.example.vcam")
+                        || lower.contains("sandhook") || lower.contains("pine")
+                        || lower.contains("yahfa") || lower.contains("whale")
+                        || lower.contains("substrate") || lower.contains("zygisk")
+                        || lower.contains("riru")) {
+                    continue;
+                }
             }
             cleaned.add(elem);
         }
@@ -2188,6 +2312,12 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                 if (stateCb instanceof VcamStateCallbackProxy) {
                     return;
                 }
+                // Detect Sumsub CameraTrace dummy stack-probe (com.sumsub.sns.internal.util.camera.g on "cam-monitor-thread"):
+                // It opens the camera solely to inspect Throwable/Thread/VMStack frames in onOpened and immediately closes it.
+                // Do not wrap or hook this dummy probe so its stack is 100% stock and its delayed onClosed never tears down CameraX!
+                if (isDummyTraceProbeCallback(stateCb, param.args)) {
+                    return;
+                }
                 c2_state_cb = stateCb;
                 c2_state_callback = stateCb.getClass();
                 if (!isInjectionActive()) {
@@ -2325,10 +2455,35 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
         }
     }
 
+    private static boolean isDummyTraceProbeCallback(@NonNull CameraDevice.StateCallback stateCb, @Nullable Object[] args) {
+        String cbName = stateCb.getClass().getName();
+        if (cbName.startsWith("com.sumsub.sns.internal.util.camera.")) {
+            return true;
+        }
+        if (args != null) {
+            for (Object arg : args) {
+                if (arg instanceof Handler) {
+                    Looper looper = ((Handler) arg).getLooper();
+                    if (looper != null && looper.getThread() != null) {
+                        String tName = looper.getThread().getName();
+                        if ("cam-monitor-thread".equals(tName)) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
     private synchronized void onCameraDeviceOpened(@Nullable CameraDevice camera) {
-        if (camera != null && Boolean.TRUE.equals(INITIALIZED_CAMERA_DEVICES.put(camera, Boolean.TRUE))) {
-            // Already initialized for this exact CameraDevice open lifecycle
-            return;
+        if (camera != null) {
+            if (Boolean.TRUE.equals(INITIALIZED_CAMERA_DEVICES.get(camera))) {
+                // Already initialized for this exact CameraDevice open lifecycle
+                return;
+            }
+            INITIALIZED_CAMERA_DEVICES.clear();
+            INITIALIZED_CAMERA_DEVICES.put(camera, Boolean.TRUE);
         }
         stopAllCamera2Feeders();
         getOrCreateVirtualSinkSurface();
@@ -2345,7 +2500,11 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
 
     private synchronized void onCameraDeviceClosed(@Nullable CameraDevice camera) {
         if (camera != null) {
-            INITIALIZED_CAMERA_DEVICES.remove(camera);
+            Boolean wasTracked = INITIALIZED_CAMERA_DEVICES.remove(camera);
+            if (wasTracked == null || !INITIALIZED_CAMERA_DEVICES.isEmpty()) {
+                // Ignore close events from untracked probe devices or superseded sessions
+                return;
+            }
         }
         cameraSessionActive = false;
         ImuMotionCorrelator.getInstance().stop();
@@ -3256,7 +3415,14 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
         }
 
         // Final fallback: generate test pattern if neither image nor video could be decoded
-        return SyntheticFrameGenerator.renderTestPattern(w, h, currentHostPackage, currentFacing, 30f, cfg);
+        Bitmap fallbackBmp = SyntheticFrameGenerator.renderTestPattern(w, h, currentHostPackage, currentFacing, 30f, cfg);
+        if (fallbackBmp != null) {
+            try {
+                byte[] nv21 = FrameTransformPipeline.bitmapToNv21(fallbackBmp);
+                NdkHookEngine.updateFrameBuffer(nv21, fallbackBmp.getWidth(), fallbackBmp.getHeight());
+            } catch (Throwable ignored) {}
+        }
+        return fallbackBmp;
     }
 
     @Nullable
