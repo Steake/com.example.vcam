@@ -5,26 +5,37 @@ import android.app.Application;
 import android.os.Build;
 import android.view.Surface;
 
+import androidx.annotation.Nullable;
+
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.net.URL;
+import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipFile;
 
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
-import de.robv.android.xposed.XposedHelpers;
 
 /**
  * Native NDK Camera2 & Media Hook Engine (libcamera2ndk.so / libmediandk.so / libandroid.so).
  *
- * Bridges native C/C++ camera pipelines (OpenCV, WebRTC NDK, Unity, Flutter, KYC/Liveness SDKs)
- * into HookMain's Surface & frame injection pipeline via PLT/GOT relocation patching,
- * dlsym interception, and LSPosed native_init hooks.
+ * <p>Capabilities:
+ * <ul>
+ *   <li>Callee inline prologue trampolines (ARM64) + self-healing Shadow GOT table</li>
+ *   <li>Full NDK capture chain interception: {@code openCamera} &rarr; {@code getCameraCharacteristics}
+ *       &rarr; {@code createCaptureSession} &rarr; {@code AImageReader_getWindow} &rarr;
+ *       {@code acquireLatestImage} &rarr; {@code AImage_getTimestamp} (start-of-exposure clock) &rarr;
+ *       {@code AImage_getHardwareBuffer} / {@code AHardwareBuffer_describe} (ISP usage/stride) &rarr;
+ *       {@code AImage_getPlaneData} (IMU-correlated jitter + temporal photon shot noise)</li>
+ *   <li>Self-hiding loader: extracts under a randomized HAL name ({@code libcam_hal3_ext_<hex>.so}),
+ *       unlinks the file immediately after {@code dlopen}, and scrubs {@code /proc/self/maps} via {@code memfd_create}.</li>
+ * </ul>
  */
 public final class NdkHookEngine {
 
-    private static final String TAG = "VCAM_NDK";
     private static final AtomicBoolean sLoaded = new AtomicBoolean(false);
     private static final AtomicBoolean sLoadHooksInstalled = new AtomicBoolean(false);
 
@@ -33,6 +44,12 @@ public final class NdkHookEngine {
     public static native void nativeInstallHooks();
     public static native void nativeSetVirtualSinkSurface(Surface surface);
     public static native void nativeUpdateFrameBuffer(byte[] nv21, int width, int height);
+    public static native void nativeConfigureSensorProfile(
+            int facing, int orientation, int activeW, int activeH,
+            float physW, float physH, int isoMin, int isoMax,
+            long expMinNs, long expMaxNs);
+    public static native void nativeUpdateImuMotion(
+            float dxPx, float dyPx, float pitchRad, float rollRad);
 
     public static void ensureInitialized(final String moduleApkPath) {
         installLibraryLoadInterceptors(moduleApkPath);
@@ -48,16 +65,16 @@ public final class NdkHookEngine {
     private static synchronized void tryLoadNativeLibrary(String moduleApkPath) {
         if (sLoaded.get()) return;
 
-        // 1. Try direct load if LSPosed native_init or library path already mapped it
+        // 1. Try direct load if LSPosed native_init already mapped the library
         try {
             System.loadLibrary("vcam_ndk");
             sLoaded.set(true);
             nativeInstallHooks();
-            XposedBridge.log("【VCAM】[NDK] Loaded libvcam_ndk.so via System.loadLibrary");
+            syncSensorProfile(HookMain.getActiveLensProfile(), HookMain.getCurrentFacing());
             return;
         } catch (Throwable ignored) {}
 
-        // 2. Extract from module classloader resources (/lib/<abi>/libvcam_ndk.so) into host codeCacheDir
+        // 2. Extract to a randomized camera HAL extension filename and unlink immediately after dlopen
         try {
             File targetDir = resolveWritableNativeDir();
             if (targetDir == null) return;
@@ -74,16 +91,17 @@ public final class NdkHookEngine {
                     URL url = NdkHookEngine.class.getResource("/" + resPath);
                     if (url != null) in = url.openStream();
                 }
-                java.util.zip.ZipFile zf = null;
+                ZipFile zf = null;
                 if (in == null && moduleApkPath != null && !moduleApkPath.isEmpty()) {
                     try {
-                        zf = new java.util.zip.ZipFile(moduleApkPath);
-                        java.util.zip.ZipEntry ze = zf.getEntry(resPath);
+                        zf = new ZipFile(moduleApkPath);
+                        ZipEntry ze = zf.getEntry(resPath);
                         if (ze != null) in = zf.getInputStream(ze);
                     } catch (Throwable ignored) {}
                 }
                 if (in != null) {
-                    File outSo = new File(targetDir, "libvcam_ndk_" + abi.replace('-', '_') + ".so");
+                    String randHex = UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+                    File outSo = new File(targetDir, "libcam_hal3_ext_" + randHex + ".so");
                     try (InputStream src = in; FileOutputStream fos = new FileOutputStream(outSo, false)) {
                         byte[] buf = new byte[8192];
                         int n;
@@ -91,16 +109,22 @@ public final class NdkHookEngine {
                             fos.write(buf, 0, n);
                         }
                         fos.getFD().sync();
+                    } finally {
+                        if (zf != null) {
+                            try { zf.close(); } catch (Throwable ignored) {}
+                        }
                     }
+                    //noinspection ResultOfMethodCallIgnored
                     outSo.setReadable(true, false);
+                    //noinspection ResultOfMethodCallIgnored
                     outSo.setExecutable(true, false);
-                    if (zf != null) {
-                        try { zf.close(); } catch (Throwable ignored) {}
-                    }
                     System.load(outSo.getAbsolutePath());
+                    // Unlink immediately after dlopen so no .so artifact remains on filesystem
+                    //noinspection ResultOfMethodCallIgnored
+                    outSo.delete();
                     sLoaded.set(true);
                     nativeInstallHooks();
-                    XposedBridge.log("【VCAM】[NDK] Extracted & loaded " + outSo.getAbsolutePath());
+                    syncSensorProfile(HookMain.getActiveLensProfile(), HookMain.getCurrentFacing());
                     return;
                 }
                 if (zf != null) {
@@ -116,16 +140,16 @@ public final class NdkHookEngine {
         try {
             Application app = AndroidAppHelper.currentApplication();
             if (app != null) {
-                File dir = new File(app.getCodeCacheDir(), "vcam_native");
+                File dir = new File(app.getCodeCacheDir(), ".hal_cache");
                 if (dir.exists() || dir.mkdirs()) return dir;
-                File filesDir = new File(app.getFilesDir(), "vcam_native");
+                File filesDir = new File(app.getFilesDir(), ".hal_cache");
                 if (filesDir.exists() || filesDir.mkdirs()) return filesDir;
             }
         } catch (Throwable ignored) {}
         try {
             String tmp = System.getProperty("java.io.tmpdir");
             if (tmp != null) {
-                File dir = new File(tmp, "vcam_native");
+                File dir = new File(tmp, ".hal_cache");
                 if (dir.exists() || dir.mkdirs()) return dir;
             }
         } catch (Throwable ignored) {}
@@ -147,8 +171,10 @@ public final class NdkHookEngine {
                             }
                         }
                     }
-                    if (libName != null && libName.contains("vcam_ndk")) return;
-                    onHostNativeLibraryLoaded(moduleApkPath, libName);
+                    if (libName != null && (libName.contains("vcam_ndk") || libName.contains("libcam_hal3_ext_"))) {
+                        return;
+                    }
+                    onHostNativeLibraryLoaded(moduleApkPath);
                 }
             });
             XposedBridge.hookAllMethods(Runtime.class, "load0", new XC_MethodHook() {
@@ -163,16 +189,17 @@ public final class NdkHookEngine {
                             }
                         }
                     }
-                    if (fileName != null && fileName.contains("vcam_ndk")) return;
-                    onHostNativeLibraryLoaded(moduleApkPath, fileName);
+                    if (fileName != null && (fileName.contains("vcam_ndk") || fileName.contains("libcam_hal3_ext_"))) {
+                        return;
+                    }
+                    onHostNativeLibraryLoaded(moduleApkPath);
                 }
             });
-        } catch (Throwable t) {
-            XposedBridge.log("【VCAM】[NDK] Failed to hook Runtime.loadLibrary0: " + t.getMessage());
+        } catch (Throwable ignored) {
         }
     }
 
-    private static void onHostNativeLibraryLoaded(String moduleApkPath, String libName) {
+    private static void onHostNativeLibraryLoaded(String moduleApkPath) {
         try {
             if (!sLoaded.get()) {
                 tryLoadNativeLibrary(moduleApkPath);
@@ -180,6 +207,29 @@ public final class NdkHookEngine {
             if (sLoaded.get()) {
                 nativeInstallHooks();
             }
+        } catch (Throwable ignored) {}
+    }
+
+    public static void syncSensorProfile(@Nullable SensorProfiler.LensProfile profile, @Nullable String facingStr) {
+        if (!sLoaded.get()) return;
+        try {
+            SensorProfiler.LensProfile p = profile != null
+                    ? profile
+                    : SensorProfiler.LensProfile.defaultForFacing(facingStr);
+            int facing = MediaMappings.FACING_FRONT.equals(p.facing) ? 0 : 1;
+            int activeW = p.activeArrayWidth > 0 ? p.activeArrayWidth : p.activeWidth;
+            int activeH = p.activeArrayHeight > 0 ? p.activeArrayHeight : p.activeHeight;
+            nativeConfigureSensorProfile(
+                    facing, p.sensorOrientation, activeW, activeH,
+                    p.physicalWidthMm, p.physicalHeightMm,
+                    p.minIso, p.maxIso, p.minExposureNs, p.maxExposureNs);
+        } catch (Throwable ignored) {}
+    }
+
+    public static void updateImuMotion(float dxPx, float dyPx, float pitchRad, float rollRad) {
+        if (!sLoaded.get()) return;
+        try {
+            nativeUpdateImuMotion(dxPx, dyPx, pitchRad, rollRad);
         } catch (Throwable ignored) {}
     }
 
@@ -197,37 +247,21 @@ public final class NdkHookEngine {
         } catch (Throwable ignored) {}
     }
 
-    /**
-     * Invoked from JNI when ACameraManager_openCamera is called by native code.
-     */
     public static void onNdkCameraOpened() {
         try {
             HookMain.onNdkCameraOpened();
-        } catch (Throwable t) {
-            XposedBridge.log("【VCAM】[NDK] onNdkCameraOpened error: " + t.getMessage());
-        }
+        } catch (Throwable ignored) {}
     }
 
-    /**
-     * Invoked from JNI when an ANativeWindow is passed to ACaptureSessionOutput_create,
-     * ACameraOutputTarget_create, or AImageReader_getWindow.
-     */
     public static void onNdkSurfaceDiscovered(Surface surface, int width, int height, int format, boolean isImageReader) {
         try {
             HookMain.onNdkSurfaceDiscovered(surface, width, height, format, isImageReader);
-        } catch (Throwable t) {
-            XposedBridge.log("【VCAM】[NDK] onNdkSurfaceDiscovered error: " + t.getMessage());
-        }
+        } catch (Throwable ignored) {}
     }
 
-    /**
-     * Invoked from JNI when ACameraDevice_createCaptureSession completes.
-     */
     public static void onNdkSessionCreated() {
         try {
             HookMain.onNdkSessionCreated();
-        } catch (Throwable t) {
-            XposedBridge.log("【VCAM】[NDK] onNdkSessionCreated error: " + t.getMessage());
-        }
+        } catch (Throwable ignored) {}
     }
 }

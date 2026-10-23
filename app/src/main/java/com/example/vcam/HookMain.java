@@ -479,6 +479,8 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
         if (!inst.isInjectionActive() || !inst.hasAnyMedia()) return;
         Surface sink = inst.getOrCreateVirtualSinkSurface();
         NdkHookEngine.updateVirtualSinkSurface(sink);
+        NdkHookEngine.syncSensorProfile(activeLensProfile, currentFacing);
+        ImuMotionCorrelator.getInstance().start(inst.toast_content != null ? inst.toast_content : resolveHostContext());
         cameraSessionActive = true;
         InAppOverlayManager.onCameraSessionActive(true);
         inst.maybePostInAppNotification(inst.toast_content, currentHostPackage);
@@ -1974,6 +1976,40 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
             hookCaptureRequestInstance(CaptureRequest.class);
         } catch (Throwable ignored) {
         }
+        try {
+            XposedHelpers.findAndHookMethod(CameraCharacteristics.class, "get",
+                    CameraCharacteristics.Key.class, new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            if (!isMetadataPatchActive() || param.args.length == 0 || param.args[0] == null) {
+                                return;
+                            }
+                            CameraCharacteristics.Key<?> key = (CameraCharacteristics.Key<?>) param.args[0];
+                            String name = key.getName();
+                            Object res = param.getResult();
+                            if (CameraCharacteristics.LENS_FACING.getName().equals(name)) {
+                                // Never allow LENS_FACING_EXTERNAL (2) to be reported to KYC/IAD SDKs
+                                if (res instanceof Integer && ((Integer) res) == CameraMetadata.LENS_FACING_EXTERNAL) {
+                                    param.setResult(MediaMappings.FACING_FRONT.equals(currentFacing)
+                                            ? CameraMetadata.LENS_FACING_FRONT
+                                            : CameraMetadata.LENS_FACING_BACK);
+                                }
+                            } else if (CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE.getName().equals(name)) {
+                                // Enforce SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME (1)
+                                param.setResult(CameraMetadata.SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME);
+                            } else if (CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL.getName().equals(name)) {
+                                if (res instanceof Integer) {
+                                    int lvl = (Integer) res;
+                                    if (lvl == CameraMetadata.INFO_SUPPORTED_HARDWARE_LEVEL_LEGACY
+                                            || lvl == CameraMetadata.INFO_SUPPORTED_HARDWARE_LEVEL_EXTERNAL) {
+                                        param.setResult(CameraMetadata.INFO_SUPPORTED_HARDWARE_LEVEL_FULL);
+                                    }
+                                }
+                            }
+                        }
+                    });
+        } catch (Throwable ignored) {
+        }
 
         // Hook OutputConfiguration addSurface & setPhysicalCameraId
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
@@ -2031,6 +2067,8 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
         }
         stopAllCamera2Feeders();
         getOrCreateVirtualSinkSurface();
+        NdkHookEngine.syncSensorProfile(activeLensProfile, currentFacing);
+        ImuMotionCorrelator.getInstance().start(toast_content != null ? toast_content : resolveHostContext());
         cameraSessionActive = true;
         InAppOverlayManager.onCameraSessionActive(true);
         maybePostInAppNotification(toast_content, currentHostPackage);
@@ -2045,6 +2083,7 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
             INITIALIZED_CAMERA_DEVICES.remove(camera);
         }
         cameraSessionActive = false;
+        ImuMotionCorrelator.getInstance().stop();
         InAppOverlayManager.onCameraSessionActive(false);
         VirtualAudioFeeder.stopAllSessions();
         stopAllCamera2Feeders();

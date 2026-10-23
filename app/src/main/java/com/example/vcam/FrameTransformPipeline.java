@@ -133,7 +133,14 @@ public final class FrameTransformPipeline {
         float offsetX = cfg.panX * (dstW * 0.5f);
         float offsetY = cfg.panY * (dstH * 0.5f);
 
-        // Optional micro-jitter when sensorGrainEnabled is active (0.25px natural hand tremor)
+        // Correlate frame optical flow with real hardware IMU (Accelerometer/Gyroscope) + natural hand tremor
+        ImuMotionCorrelator imu = ImuMotionCorrelator.getInstance();
+        offsetX += imu.getDxPx();
+        offsetY += imu.getDyPx();
+        float rollDeg = (float) Math.toDegrees(imu.getRollRad());
+        if (Math.abs(rollDeg) > 0.01f) {
+            m.postRotate(rollDeg);
+        }
         if (cfg.sensorGrainEnabled) {
             long tick = SystemClock.elapsedRealtime() / 66L;
             offsetX += ((tick % 3) - 1) * 0.25f;

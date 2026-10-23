@@ -506,8 +506,9 @@ public class VideoToFrames implements Runnable {
 
         int targetBoxW = Math.max(2, Math.round(srcW * scaleX));
         int targetBoxH = Math.max(2, Math.round(srcH * scaleY));
-        int offsetX = (dstW - targetBoxW) / 2 + Math.round(cfg.panX * dstW * 0.5f);
-        int offsetY = (dstH - targetBoxH) / 2 + Math.round(cfg.panY * dstH * 0.5f);
+        ImuMotionCorrelator imu = ImuMotionCorrelator.getInstance();
+        int offsetX = (dstW - targetBoxW) / 2 + Math.round(cfg.panX * dstW * 0.5f) + Math.round(imu.getDxPx());
+        int offsetY = (dstH - targetBoxH) / 2 + Math.round(cfg.panY * dstH * 0.5f) + Math.round(imu.getDyPx());
 
         int srcYSize = srcW * srcH;
         for (int dy = 0; dy < dstH; dy++) {

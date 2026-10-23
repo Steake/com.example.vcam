@@ -2,27 +2,27 @@ package com.example.vcam;
 
 import org.junit.Test;
 
+import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileInputStream;
-import java.nio.ByteBuffer;
+import java.io.InputStreamReader;
 import java.util.Arrays;
 
 import static org.junit.Assert.*;
 
 /**
- * Unit tests for VCAM's core pipelines:
+ * Unit & IAD Validation Harness tests for VCAM:
  * - BT.601 ARGB -> NV21 / I420 color accuracy (verifying R/B channel fix)
  * - Temporal sensor grain LUT injection (verifying anti-duplicate frame hashes)
  * - Little-Endian TIFF/EXIF APP1 segment synthesis
  * - Package filter whitelist evaluation
- * - NDK ELF shared library presence & header integrity for arm64-v8a, armeabi-v7a, x86_64
- * - Latest video frame cache synchronization for video-only still captures & NDK planes
+ * - IMU Accelerometer/Gyroscope to Optical-Flow motion correlation (ARGOS / Persona check)
+ * - NDK ELF shared library presence & 600-transaction Persona/Sumsub/Bixelab IAD harness
  */
 public class ExampleUnitTest {
 
     @Test
     public void argbToNv21_preservesRedAndBlueCorrectly() {
-        // Pure Red pixel in Android ARGB_8888: 0xFFFF0000 (R=255, G=0, B=0)
         int[] redPixels = new int[]{
                 0xFFFF0000, 0xFFFF0000,
                 0xFFFF0000, 0xFFFF0000
@@ -30,13 +30,12 @@ public class ExampleUnitTest {
         byte[] nv21Red = FrameTransformPipeline.argbToNv21(redPixels, 2, 2);
         assertEquals(6, nv21Red.length);
         int yRed = nv21Red[0] & 0xFF;
-        int vRed = nv21Red[4] & 0xFF; // NV21 puts V (Cr) first
-        int uRed = nv21Red[5] & 0xFF; // NV21 puts U (Cb) second
+        int vRed = nv21Red[4] & 0xFF;
+        int uRed = nv21Red[5] & 0xFF;
         assertTrue("Red Y should be around 81..82", yRed >= 75 && yRed <= 90);
         assertTrue("Red Cr (V) must be high (>200)", vRed > 200);
         assertTrue("Red Cb (U) must be low (<100)", uRed < 100);
 
-        // Pure Blue pixel in Android ARGB_8888: 0xFF0000FF (R=0, G=0, B=255)
         int[] bluePixels = new int[]{
                 0xFF0000FF, 0xFF0000FF,
                 0xFF0000FF, 0xFF0000FF
@@ -100,7 +99,22 @@ public class ExampleUnitTest {
     }
 
     @Test
-    public void ndkLibraries_presentAndValidElfForAllAbis() throws Exception {
+    public void imuMotionCorrelator_correlatesHandMovementAndHonorsStillDeadband() {
+        // 1. Device resting stationary on desk -> near-zero shift (< 0.05 px)
+        float[] still = ImuMotionCorrelator.computeCorrelatedShift(
+                0.001f, -0.001f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
+        assertTrue("Stationary device must have minimal jitter", Math.abs(still[0]) < 0.05f && Math.abs(still[1]) < 0.05f);
+
+        // 2. User pitches & yaws phone during liveness prompt -> proportional directional optical shift
+        float[] moving = ImuMotionCorrelator.computeCorrelatedShift(
+                0.20f, -0.15f, 0.05f, 0.4f, 0.3f, 0.0f, 0.0f, 0.0f);
+        assertTrue("Positive yaw/accel must induce positive X shift", moving[0] > 0.5f);
+        assertTrue("Positive pitch/accel must induce positive Y shift", moving[1] > 0.5f);
+        assertTrue("Roll rate must induce non-zero roll angle", Math.abs(moving[3]) > 0.001f);
+    }
+
+    @Test
+    public void ndkLibraries_presentAndPass600TransactionIadHarness() throws Exception {
         String[] abis = new String[]{"arm64-v8a", "armeabi-v7a", "x86_64"};
         for (String abi : abis) {
             File soFile = new File("src/main/jniLibs/" + abi + "/libvcam_ndk.so");
@@ -116,6 +130,24 @@ public class ExampleUnitTest {
             assertEquals('E', (char) magic[1]);
             assertEquals('L', (char) magic[2]);
             assertEquals('F', (char) magic[3]);
+        }
+
+        File harnessBin = new File("/tmp/vcam_iad_harness/vcam_iad_harness");
+        if (harnessBin.exists() && harnessBin.canExecute()) {
+            ProcessBuilder pb = new ProcessBuilder(harnessBin.getAbsolutePath());
+            pb.directory(harnessBin.getParentFile());
+            pb.redirectErrorStream(true);
+            Process proc = pb.start();
+            StringBuilder out = new StringBuilder();
+            try (BufferedReader br = new BufferedReader(new InputStreamReader(proc.getInputStream()))) {
+                String line;
+                while ((line = br.readLine()) != null) {
+                    out.append(line).append("\n");
+                }
+            }
+            int exitCode = proc.waitFor();
+            assertEquals("Native IAD harness failed: " + out, 0, exitCode);
+            assertTrue(out.toString().contains("Transactions=600 LIVE=600 SPOOF=0"));
         }
     }
 }
