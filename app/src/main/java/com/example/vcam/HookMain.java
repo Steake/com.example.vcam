@@ -183,17 +183,71 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
     private static final Set<String> EXCLUDED_SYSTEM_PACKAGES = Collections.unmodifiableSet(
             new HashSet<>(Arrays.asList(
                     "android",
+                    "system",
                     "com.android.systemui",
+                    "com.google.android.systemui",
+                    "com.miui.systemui",
+                    "com.sec.android.systemui",
+                    "com.oplus.systemui",
+                    "com.coloros.systemui",
+                    "com.oneplus.systemui",
                     "com.android.phone",
                     "com.android.se",
                     "com.android.bluetooth",
                     "com.android.nfc",
+                    "com.android.settings",
+                    "com.android.shell",
+                    "com.android.keyguard",
+                    "com.android.launcher",
+                    "com.android.launcher3",
                     "com.android.providers.settings",
                     "com.android.providers.media",
                     "com.android.providers.contacts",
-                    "com.android.providers.telephony"
+                    "com.android.providers.telephony",
+                    "de.robv.android.xposed.installer",
+                    "org.lsposed.manager"
             ))
     );
+
+    private static boolean isExcludedSystemPackage(@NonNull XC_LoadPackage.LoadPackageParam lpparam) {
+        String pkg = lpparam.packageName;
+        if (pkg == null || pkg.isEmpty()) return true;
+        if (EXCLUDED_SYSTEM_PACKAGES.contains(pkg)) return true;
+        String lower = pkg.toLowerCase(java.util.Locale.ROOT);
+        if (lower.contains("systemui") || lower.contains("keyguard")
+                || lower.contains(".launcher") || lower.contains("inputmethod")
+                || lower.startsWith("com.android.providers.")
+                || lower.startsWith("com.android.server.")
+                || lower.startsWith("com.qualcomm.")) {
+            return true;
+        }
+        if (lpparam.appInfo != null) {
+            int appId = lpparam.appInfo.uid % 100000;
+            // Never hook core system UIDs (< 10000: system_server=1000, radio=1001, bluetooth=1002, etc.)
+            if (appId > 0 && appId < 10000) {
+                return true;
+            }
+        }
+        if ( isUserLockedDirectBoot()) {
+            return true;
+        }
+        return false;
+    }
+
+    private static boolean isUserLockedDirectBoot() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                Application app = AndroidAppHelper.currentApplication();
+                if (app != null) {
+                    android.os.UserManager um = app.getSystemService(android.os.UserManager.class);
+                    if (um != null && !um.isUserUnlocked()) {
+                        return true;
+                    }
+                }
+            }
+        } catch (Throwable ignored) {}
+        return false;
+    }
 
     private static final Set<Class<?>> HOOKED_STATE_CALLBACKS =
             Collections.synchronizedSet(new HashSet<>());
@@ -1014,7 +1068,7 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
         if (lpparam == null || lpparam.packageName == null) {
             return;
         }
-        if (EXCLUDED_SYSTEM_PACKAGES.contains(lpparam.packageName)) {
+        if (isExcludedSystemPackage(lpparam)) {
             return;
         }
         sInstance = this;
@@ -3692,6 +3746,14 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
     }
 
     private static void refreshConfigFromProvider(@NonNull Context ctx, @NonNull String pkg) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            try {
+                android.os.UserManager um = ctx.getSystemService(android.os.UserManager.class);
+                if (um != null && !um.isUserUnlocked()) {
+                    return;
+                }
+            } catch (Throwable ignored) {}
+        }
         Cursor c = null;
         try {
             Uri u = Uri.parse("content://com.example.vcam/config")

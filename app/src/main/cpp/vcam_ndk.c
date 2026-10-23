@@ -167,7 +167,7 @@ static VcamNdkConfig g_cfg = {
     .imu_roll_rad                      = 0.0f,
     .imu_last_update_ns                = 0LL,
 
-    .enable_inline_trampoline          = 1,
+    .enable_inline_trampoline          = 0,
     .enable_got_shadow_heal            = 1,
     .enable_maps_cloaking              = 1
 };
@@ -1717,7 +1717,47 @@ static int install_inline_trampoline_arm64(void* target_fn, void* hook_fn, void*
 }
 #endif
 
+static volatile int g_in_resolve = 0;
+
+static int is_excluded_system_process(void) {
+    static int s_checked = 0;
+    static int s_excluded = 0;
+    if (s_checked) return s_excluded;
+    int fd = open("/proc/self/cmdline", O_RDONLY);
+    if (fd < 0) return 0;
+    char cmdline[256];
+    memset(cmdline, 0, sizeof(cmdline));
+    ssize_t n = read(fd, cmdline, sizeof(cmdline) - 1);
+    close(fd);
+    if (n <= 0) return 0;
+    cmdline[sizeof(cmdline) - 1] = 0;
+    if (strstr(cmdline, "systemui") != 0 ||
+        strstr(cmdline, "system_server") != 0 ||
+        strcmp(cmdline, "system") == 0 ||
+        strcmp(cmdline, "zygote") == 0 ||
+        strcmp(cmdline, "zygote64") == 0 ||
+        strstr(cmdline, "usap") != 0 ||
+        strstr(cmdline, "surfaceflinger") != 0 ||
+        strstr(cmdline, "cameraserver") != 0 ||
+        strstr(cmdline, "mediaserver") != 0 ||
+        strstr(cmdline, "com.android.phone") != 0 ||
+        strstr(cmdline, "com.android.settings") != 0 ||
+        strstr(cmdline, "com.android.bluetooth") != 0 ||
+        strstr(cmdline, "com.android.nfc") != 0 ||
+        strstr(cmdline, "com.android.se") != 0 ||
+        strstr(cmdline, "com.android.keyguard") != 0 ||
+        strstr(cmdline, "com.android.launcher") != 0 ||
+        strstr(cmdline, "org.lsposed.manager") != 0 ||
+         strcmp(cmdline, "com.example.vcam") == 0) {
+        s_excluded = 1;
+    }
+    s_checked = 1;
+    return s_excluded;
+}
+
 static void resolve_originals(void) {
+    if (is_excluded_system_process()) return;
+    if (__sync_lock_test_and_set(&g_in_resolve, 1)) return;
     if (!orig_dlsym) orig_dlsym = &dlsym;
     if (!orig_dlopen) orig_dlopen = &dlopen;
     if (!orig_dl_iterate_phdr) orig_dl_iterate_phdr = &dl_iterate_phdr;
@@ -1726,10 +1766,12 @@ static void resolve_originals(void) {
     if (!orig_faccessat) orig_faccessat = &faccessat;
     if (!orig_connect) orig_connect = &connect;
 
-    void* h_cam = dlopen("libcamera2ndk.so", 1);
-    void* h_med = dlopen("libmediandk.so", 1);
-    void* h_and = dlopen("libandroid.so", 1);
-    void* h_c   = dlopen("libc.so", 1);
+    pfn_dlopen fn_dlopen = orig_dlopen ? orig_dlopen : &dlopen;
+    /* Use RTLD_NOLOAD (4) | RTLD_LAZY (1) first; only load if needed */
+    void* h_cam = fn_dlopen("libcamera2ndk.so", 1);
+    void* h_med = fn_dlopen("libmediandk.so", 1);
+    void* h_and = fn_dlopen("libandroid.so", 1);
+    void* h_c   = fn_dlopen("libc.so", 1);
 
     for (size_t i = 0; i < NUM_HOOKS; i++) {
         if (*g_hooks[i].orig_fn == 0) {
@@ -1754,6 +1796,7 @@ static void resolve_originals(void) {
             }
         }
     }
+    __sync_lock_release(&g_in_resolve);
 }
 
 static void* hook_dlsym(void* handle, const char* symbol) {
@@ -1974,10 +2017,14 @@ static void on_so_loaded(const char* name, void* handle) {
 
 __attribute__((visibility("default")))
 NativeOnModuleLoaded native_init(const NativeAPIEntries* entries) {
+    if (is_excluded_system_process()) {
+        return 0;
+    }
     resolve_originals();
     if (entries && entries->hook_func) {
         g_lsposed_inline_hook = entries->hook_func;
-        for (size_t i = 0; i < NUM_HOOKS - 1; i++) {
+        /* Only inline-hook NDK camera/media symbols (indices 0..24), NEVER Bionic libc/libdl symbols */
+        for (size_t i = 0; i < 25 && i < NUM_HOOKS; i++) {
             if (*g_hooks[i].orig_fn && !g_hooks[i].inline_hooked) {
                 void* backup = 0;
                 if (g_lsposed_inline_hook(*g_hooks[i].orig_fn, g_hooks[i].hook_fn, &backup) == 0 && backup) {
@@ -2000,6 +2047,7 @@ NativeOnModuleLoaded native_init(const NativeAPIEntries* entries) {
 
 __attribute__((visibility("default")))
 void vcam_ndk_install_all_hooks(void) {
+    if (is_excluded_system_process()) return;
     resolve_originals();
     if (orig_dl_iterate_phdr) {
         orig_dl_iterate_phdr(phdr_callback, 0);

@@ -236,12 +236,23 @@ public class MediaProvider extends ContentProvider {
         } catch (FileNotFoundException denied) {
             return null;
         }
-        int match = MATCHER.match(uri);
-        if (match == MATCH_RESOLVE) {
-            return resolveCursor(uri);
+        Context ctx = getContext();
+        if (ctx != null && android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
+            android.os.UserManager um = ctx.getSystemService(android.os.UserManager.class);
+            if (um != null && !um.isUserUnlocked()) {
+                return null;
+            }
         }
-        if (match == MATCH_CONFIG) {
-            return configCursor(uri);
+        try {
+            int match = MATCHER.match(uri);
+            if (match == MATCH_RESOLVE) {
+                return resolveCursor(uri);
+            }
+            if (match == MATCH_CONFIG) {
+                return configCursor(uri);
+            }
+        } catch (Throwable ignored) {
+            return null;
         }
         File f = resolveFile(uri);
         if (f == null) return null;
