@@ -1,17 +1,58 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="purple_200">#FFBB86FC</color>
-    <color name="purple_500">#FF6200EE</color>
-    <color name="purple_700">#FF3700B3</color>
-    <color name="teal_200">#FF03DAC5</color>
-    <color name="teal_700">#FF018786</color>
+    <!-- Legacy compatibility swatches -->
+    <color name="purple_200">#FFD0BCFF</color>
+    <color name="purple_500">#FF6750A4</color>
+    <color name="purple_700">#FF4F378B</color>
+    <color name="teal_200">#FF5EEAD4</color>
+    <color name="teal_700">#FF0F766E</color>
     <color name="black">#FF000000</color>
     <color name="white">#FFFFFFFF</color>
 
-    <color name="md_primary">#6750A4</color>
-    <color name="md_on_primary">#FFFFFF</color>
-    <color name="md_primary_container">#EADDFF</color>
-    <color name="md_on_primary_container">#21005D</color>
-    <color name="md_secondary">#625B71</color>
-    <color name="md_on_secondary">#FFFFFF</color>
+    <!-- Studio Light Palette -->
+    <color name="md_theme_light_primary">#FF4F46E5</color>
+    <color name="md_theme_light_onPrimary">#FFFFFFFF</color>
+    <color name="md_theme_light_primaryContainer">#FFE0E7FF</color>
+    <color name="md_theme_light_onPrimaryContainer">#FF1E1B4B</color>
+    <color name="md_theme_light_secondary">#FF0D9488</color>
+    <color name="md_theme_light_onSecondary">#FFFFFFFF</color>
+    <color name="md_theme_light_secondaryContainer">#FFCCFBF1</color>
+    <color name="md_theme_light_onSecondaryContainer">#FF042F2E</color>
+    <color name="md_theme_light_tertiary">#FFD97706</color>
+    <color name="md_theme_light_onTertiary">#FFFFFFFF</color>
+    <color name="md_theme_light_tertiaryContainer">#FFFEF3C7</color>
+    <color name="md_theme_light_onTertiaryContainer">#FF451A03</color>
+    <color name="md_theme_light_surface">#FFF8FAFC</color>
+    <color name="md_theme_light_onSurface">#FF0F172A</color>
+    <color name="md_theme_light_surfaceVariant">#FFE2E8F0</color>
+    <color name="md_theme_light_onSurfaceVariant">#FF334155</color>
+    <color name="md_theme_light_outline">#FF64748B</color>
+    <color name="md_theme_light_outlineVariant">#FFCBD5E1</color>
+
+    <!-- Studio Dark Palette (Default Broadcast/Optics Console Aesthetic) -->
+    <color name="md_theme_dark_primary">#FF818CF8</color>
+    <color name="md_theme_dark_onPrimary">#FF0F172A</color>
+    <color name="md_theme_dark_primaryContainer">#FF312E81</color>
+    <color name="md_theme_dark_onPrimaryContainer">#FFE0E7FF</color>
+    <color name="md_theme_dark_secondary">#FF2DD4BF</color>
+    <color name="md_theme_dark_onSecondary">#FF042F2E</color>
+    <color name="md_theme_dark_secondaryContainer">#FF115E59</color>
+    <color name="md_theme_dark_onSecondaryContainer">#FFCCFBF1</color>
+    <color name="md_theme_dark_tertiary">#FFFBBF24</color>
+    <color name="md_theme_dark_onTertiary">#FF451A03</color>
+    <color name="md_theme_dark_tertiaryContainer">#FF78350F</color>
+    <color name="md_theme_dark_onTertiaryContainer">#FFFEF3C7</color>
+    <color name="md_theme_dark_surface">#FF0B0F17</color>
+    <color name="md_theme_dark_onSurface">#FFF1F5F9</color>
+    <color name="md_theme_dark_surfaceVariant">#FF161E2E</color>
+    <color name="md_theme_dark_onSurfaceVariant">#FF94A3B8</color>
+    <color name="md_theme_dark_outline">#FF475569</color>
+    <color name="md_theme_dark_outlineVariant">#FF1E293B</color>
+
+    <!-- Status & Studio Telemetry Accents -->
+    <color name="vcam_status_armed_bg">#FF064E3B</color>
+    <color name="vcam_status_armed_fg">#FF6EE7B7</color>
+    <color name="vcam_status_warn_bg">#FF78350F</color>
+    <color name="vcam_status_warn_fg">#FFFCD34D</color>
+    <color name="vcam_viewport_bg">#FF070A0F</color>
 </resources>

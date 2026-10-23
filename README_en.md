@@ -1,3 +1,1 @@
-# android_virtual_cam
-
-English is now the default README. See [README.md](./README.md).
+See [README.md](README.md) for the complete English documentation and architecture guide.

@@ -1,11 +1,11 @@
 <?xml version='1.0' encoding='utf-8'?>
 <resources>
-    <string name="app_name">Virtual Camera</string>
-    <string name="xposed_description">Android Virtual Camera</string>
+    <string name="app_name">VCAM Studio</string>
+    <string name="xposed_description">VCAM — Camera1 / Camera2 / CameraX / NDK Sensor-Level Virtual Camera &amp; IAD Counter-Telemetry Suite</string>
 
-    <string name="click_to_go_to_repo">Go to repository</string>
-    <string name="description">Visit the online repository for the latest updates, usage instructions, and to report bugs.</string>
-    <string name="Warning">Do not use for any illegal purpose. You bear full responsibility for all consequences.</string>
+    <string name="click_to_go_to_repo">GitHub Repository (Steake/com.example.vcam)</string>
+    <string name="description">Hardware-sovereign Camera1 / Camera2 / CameraX / NDK (libcamera2ndk &amp; libmediandk) interception console.</string>
+    <string name="Warning">A pocket computer is the private property of the citizen who purchased the silicon—not a leased panopticon for biometric rent-seekers, KYC vendors, or self-appointed telemetry inquisitors. VCAM intercepts Java and NDK camera pipelines at the hardware boundary, synthesizing optics, monotonic sensor timestamps, and IMU-correlated motion without asking permission from a remote landlord.</string>
 
     <string name="switch1">Force permission warning display</string>
     <string name="switch2">Disable module temporarily (on = disabled)</string>
@@ -14,7 +14,7 @@
     <string name="switch5">Disable toast notifications</string>
     <string name="switch_loop">Loop video playback</string>
     <string name="switch_mute">Mute video audio</string>
-    <string name="gitee">Gitee (faster in mainland China)</string>
+    <string name="gitee">Run Native NDK &amp; Sensor Telemetry Audit</string>
 
     <string name="permission_lack_warn">Missing permissions</string>
     <string name="permission_description">VCAM needs \"All files access\" (Android 11+) or READ/WRITE external storage so it can place the image/video under /DCIM/Camera1/ where the Xposed hook reads them. Without this, imports will silently fail.</string>
@@ -79,12 +79,12 @@
     <string name="onboarding_next">Next</string>
     <string name="onboarding_skip">Skip</string>
     <string name="onboarding_done">Done</string>
-    <string name="onboarding_title_1">Enable in LSPosed</string>
-    <string name="onboarding_body_1">Install VCAM as a module and enable its scope for the camera-using apps you want to inject.</string>
-    <string name="onboarding_title_2">Select your media</string>
-    <string name="onboarding_body_2">Pick an image and/or video from the Source media card. The file is copied to the hook\'s expected location automatically.</string>
-    <string name="onboarding_title_3">Open the target camera app</string>
-    <string name="onboarding_body_3">Launch the camera inside your target app. Use the in-app config dialog from the overflow menu to swap media on the fly.</string>
+    <string name="onboarding_title_1">Hardware Sovereignty</string>
+    <string name="onboarding_body_1">Your camera bus belongs to you, not to third-party verification catechisms. VCAM intercepts Camera1, Camera2, CameraX, and NDK (libcamera2ndk / libmediandk) pipelines with full sensor-level attestation synthesis.</string>
+    <string name="onboarding_title_2">Zero-Permission Media Staging</string>
+    <string name="onboarding_body_2">Stage images or videos directly from the studio console. Media is served zero-copy over VCAM\'s Binder ContentProvider and mirrored to /DCIM/Camera1/ when legacy storage is enabled.</string>
+    <string name="onboarding_title_3">Arm in LSPosed</string>
+    <string name="onboarding_body_3">Enable VCAM in LSPosed, add your target applications to the scope, and relaunch them. System processes (SystemUI, system_server, Keyguard) are automatically excluded at boot.</string>
 
     <string name="injected_title">VCAM in-app config</string>
     <string name="injected_subtitle_format">Configuring for %1$s</string>

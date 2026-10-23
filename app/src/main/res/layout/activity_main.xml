@@ -38,7 +38,8 @@
                 android:layout_height="wrap_content"
                 android:layout_marginBottom="16dp"
                 app:cardCornerRadius="20dp"
-                app:strokeWidth="0dp">
+                app:strokeWidth="1dp"
+                app:strokeColor="?attr/colorOutlineVariant">
 
                 <LinearLayout
                     android:layout_width="match_parent"
@@ -65,6 +66,13 @@
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
                             android:text="@string/chip_module_unknown" />
+
+                        <com.google.android.material.chip.Chip
+                            android:id="@+id/chip_ndk_status"
+                            style="@style/Widget.Material3.Chip.Assist"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="NDK + IAD Cloak: Armed" />
 
                         <com.google.android.material.chip.Chip
                             android:id="@+id/chip_image"
@@ -104,7 +112,8 @@
                 android:layout_height="wrap_content"
                 android:layout_marginBottom="16dp"
                 app:cardCornerRadius="20dp"
-                app:strokeWidth="0dp">
+                app:strokeWidth="1dp"
+                app:strokeColor="?attr/colorOutlineVariant">
 
                 <LinearLayout
                     android:layout_width="match_parent"
@@ -123,7 +132,7 @@
                         android:layout_width="match_parent"
                         android:layout_height="240dp"
                         android:layout_marginTop="12dp"
-                        android:background="#121417" />
+                        android:background="@color/vcam_viewport_bg" />
 
                     <!-- Aspect Ratio & Rotation Quick Bar -->
                     <TextView
@@ -298,7 +307,8 @@
                 android:layout_height="wrap_content"
                 android:layout_marginBottom="16dp"
                 app:cardCornerRadius="20dp"
-                app:strokeWidth="0dp">
+                app:strokeWidth="1dp"
+                app:strokeColor="?attr/colorOutlineVariant">
 
                 <LinearLayout
                     android:layout_width="match_parent"
@@ -318,7 +328,7 @@
                         android:layout_height="200dp"
                         android:layout_marginTop="12dp"
                         android:adjustViewBounds="true"
-                        android:background="#121417"
+                        android:background="@color/vcam_viewport_bg"
                         android:contentDescription="@string/cd_preview"
                         android:scaleType="fitCenter" />
 
@@ -410,7 +420,8 @@
                 android:layout_height="wrap_content"
                 android:layout_marginBottom="16dp"
                 app:cardCornerRadius="20dp"
-                app:strokeWidth="0dp">
+                app:strokeWidth="1dp"
+                app:strokeColor="?attr/colorOutlineVariant">
 
                 <LinearLayout
                     android:layout_width="match_parent"
@@ -492,7 +503,8 @@
                 android:layout_height="wrap_content"
                 android:layout_marginBottom="16dp"
                 app:cardCornerRadius="20dp"
-                app:strokeWidth="0dp">
+                app:strokeWidth="1dp"
+                app:strokeColor="?attr/colorOutlineVariant">
 
                 <LinearLayout
                     android:layout_width="match_parent"
@@ -617,7 +629,8 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 app:cardCornerRadius="20dp"
-                app:strokeWidth="0dp">
+                app:strokeWidth="1dp"
+                app:strokeColor="?attr/colorOutlineVariant">
 
                 <LinearLayout
                     android:layout_width="match_parent"

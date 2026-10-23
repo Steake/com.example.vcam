@@ -132,7 +132,7 @@ public class CameraVerifyActivity extends AppCompatActivity {
     }
 
     private void updateStagedImageHash() {
-        File img = MediaPaths.getImageTarget(this);
+        File img = MediaPaths.resolveEffectiveImageFile(this);
         if (!img.exists() || img.length() == 0) {
             hashView.setText(R.string.verify_no_staged_image);
             return;
@@ -186,8 +186,8 @@ public class CameraVerifyActivity extends AppCompatActivity {
             TransformConfig cfg = TransformConfig.loadGlobal(this);
             int srcW = 1280;
             int srcH = 720;
-            File vid = MediaPaths.getVideoTarget(this);
-            File img = MediaPaths.getImageTarget(this);
+            File vid = MediaPaths.resolveEffectiveVideoFile(this);
+            File img = MediaPaths.resolveEffectiveImageFile(this);
             if (vid.exists() && vid.length() > 0) {
                 int[] r = MediaPaths.videoResolution(vid);
                 if (r != null) {

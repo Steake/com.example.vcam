@@ -79,7 +79,17 @@ public class MainActivity extends AppCompatActivity {
     private TextView sensorProfileSummary;
     private TextView transformStatusLine;
 
-    private Chip chipModule, chipImage, chipVideo, chipRes, chipSize;
+    private Chip chipModule, chipNdkStatus, chipImage, chipVideo, chipRes, chipSize;
+    private com.google.android.material.button.MaterialButton btnAspectFit;
+    private com.google.android.material.button.MaterialButton btnAspectFill;
+    private com.google.android.material.button.MaterialButton btnAspectStretch;
+    private com.google.android.material.button.MaterialButton btnRotateAuto;
+    private com.google.android.material.button.MaterialButton btnRotate90;
+    private com.google.android.material.button.MaterialButton btnMirrorH;
+    private com.google.android.material.button.MaterialButton btnSrcMedia;
+    private com.google.android.material.button.MaterialButton btnSrcPattern;
+    private com.google.android.material.button.MaterialButton btnSrcQr;
+    private com.google.android.material.button.MaterialButton btnSrcStream;
     private ImageView preview;
     private TextInputEditText pkgFilter, customImagePath, customVideoPath;
 
@@ -133,6 +143,10 @@ public class MainActivity extends AppCompatActivity {
 
         // Status chips + preview
         chipModule = findViewById(R.id.chip_module);
+        chipNdkStatus = findViewById(R.id.chip_ndk_status);
+        if (chipNdkStatus != null) {
+            chipNdkStatus.setOnClickListener(v -> showDiagnosticsDialog());
+        }
         chipImage = findViewById(R.id.chip_image);
         chipVideo = findViewById(R.id.chip_video);
         chipRes = findViewById(R.id.chip_resolution);
@@ -187,15 +201,13 @@ public class MainActivity extends AppCompatActivity {
                 new ActivityResultContracts.RequestMultiplePermissions(),
                 res -> syncStateWithFiles());
 
-        // Buttons
+        // Buttons — SAF GetContent + MediaLibrary + MediaProvider work with zero storage permissions!
         findViewById(R.id.btn_pick_image).setOnClickListener(v -> {
-            if (!hasStoragePermission()) { requestStoragePermission(); return; }
-            MediaPaths.defaultDir();
+            if (hasStoragePermission()) MediaPaths.defaultDir();
             pickImageLauncher.launch("image/*");
         });
         findViewById(R.id.btn_pick_video).setOnClickListener(v -> {
-            if (!hasStoragePermission()) { requestStoragePermission(); return; }
-            MediaPaths.defaultDir();
+            if (hasStoragePermission()) MediaPaths.defaultDir();
             pickVideoLauncher.launch("video/*");
         });
 
@@ -216,20 +228,13 @@ public class MainActivity extends AppCompatActivity {
         MediaMigration.migrateIfNeeded(this);
 
         findViewById(R.id.button).setOnClickListener(v -> {
-            Uri uri = Uri.parse("https://github.com/w2016561536/android_virtual_cam");
+            Uri uri = Uri.parse("https://github.com/Steake/com.example.vcam");
             startActivity(new Intent(Intent.ACTION_VIEW, uri));
         });
-        findViewById(R.id.button2).setOnClickListener(v -> {
-            Uri uri = Uri.parse("https://gitee.com/w2016561536/android_virtual_cam");
-            startActivity(new Intent(Intent.ACTION_VIEW, uri));
-        });
+        findViewById(R.id.button2).setOnClickListener(v -> showDiagnosticsDialog());
 
         wireSwitchesToFiles();
         wireDemoCard();
-
-        if (!hasStoragePermission()) {
-            requestStoragePermission();
-        }
 
         if (!prefs.getBoolean(VCAMApp.KEY_ONBOARDING_DONE, false)) {
             startActivity(new Intent(this, OnboardingActivity.class));
@@ -304,14 +309,18 @@ public class MainActivity extends AppCompatActivity {
 
     private void showDiagnosticsDialog() {
         StringBuilder diag = new StringBuilder();
-        diag.append("• LSPosed Active: ").append(MediaPaths.isXposedLikelyActive() ? "YES" : "NO / UNKNOWN").append("\n");
-        diag.append("• Storage Permission: ").append(hasStoragePermission() ? "GRANTED" : "DENIED").append("\n");
-        diag.append("• Target SDK: ").append(getApplicationInfo().targetSdkVersion).append("\n");
+        diag.append("• Version: ").append(BuildConfig.VERSION_NAME).append(" (code ").append(BuildConfig.VERSION_CODE).append(")\n");
+        diag.append("• LSPosed / Xposed Hook: ").append(MediaPaths.isXposedLikelyActive() ? "ACTIVE" : "STANDBY (Enable in LSPosed)").append("\n");
+        diag.append("• Native NDK Engine (libvcam_ndk.so): ").append(NdkHookEngine.isNativeLoaded() ? "LOADED (ELF PLT/GOT + dlsym + /proc cloak)" : "ARMED (Loads in target process)").append("\n");
+        diag.append("• Direct-Boot / SystemUI Guard: ARMED (system_server & SystemUI excluded)\n");
+        diag.append("• Sensor Attestation & IMU Correlator: ARMED (Persona 2.60 / Sumsub 1.47)\n");
+        diag.append("• Storage Mode: ").append(hasStoragePermission() ? "All-Files + ContentProvider" : "Zero-Permission ContentProvider").append("\n");
+        diag.append("• Target SDK: ").append(getApplicationInfo().targetSdkVersion).append(" (Android ").append(Build.VERSION.RELEASE).append(")\n");
 
-        File img = MediaPaths.getImageTarget(this);
-        File vid = MediaPaths.getVideoTarget(this);
-        diag.append("• Staged Image: ").append(img.exists() ? (img.length() + " bytes") : "None").append("\n");
-        diag.append("• Staged Video: ").append(vid.exists() ? (vid.length() + " bytes") : "None").append("\n");
+        File img = MediaPaths.resolveEffectiveImageFile(this);
+        File vid = MediaPaths.resolveEffectiveVideoFile(this);
+        diag.append("• Effective Image: ").append(img.exists() && img.length() > 0 ? (img.getName() + " (" + MediaPaths.humanBytes(img.length()) + ")") : "None").append("\n");
+        diag.append("• Effective Video: ").append(vid.exists() && vid.length() > 0 ? (vid.getName() + " (" + MediaPaths.humanBytes(vid.length()) + ")") : "None").append("\n");
 
         TransformConfig cfg = TransformConfig.loadGlobal(this);
         diag.append("• Global Source Mode: ").append(cfg.sourceMode).append("\n");
@@ -319,7 +328,7 @@ public class MainActivity extends AppCompatActivity {
         diag.append("• HUD Enabled: ").append(cfg.overlayEnabled ? "YES" : "NO").append("\n");
         diag.append("• Sensor Grain: ").append(cfg.sensorGrainEnabled ? "YES" : "NO").append("\n");
         diag.append("• EXIF Patch: ").append(prefs.getBoolean(VCAMApp.KEY_METADATA_PATCH_ENABLED, true) ? "YES" : "NO").append("\n");
-        diag.append("• Anti-Detection Cloaking: ACTIVE\n");
+        diag.append("• Anti-Detection Cloaking: ACTIVE (Stack + /proc/self/maps + PackageManager)\n");
 
         new AlertDialog.Builder(this)
                 .setTitle(R.string.menu_diagnostics)
@@ -348,7 +357,18 @@ public class MainActivity extends AppCompatActivity {
     // Aspect Ratio, Rotation, Mirror & Source Mode Studio
     // ---------------------------------------------------------------------
     private void wireTransformAndSourceStudio() {
-        findViewById(R.id.btn_aspect_fit).setOnClickListener(v -> {
+        btnAspectFit = findViewById(R.id.btn_aspect_fit);
+        btnAspectFill = findViewById(R.id.btn_aspect_fill);
+        btnAspectStretch = findViewById(R.id.btn_aspect_stretch);
+        btnRotateAuto = findViewById(R.id.btn_rotate_auto);
+        btnRotate90 = findViewById(R.id.btn_rotate_90);
+        btnMirrorH = findViewById(R.id.btn_mirror_h);
+        btnSrcMedia = findViewById(R.id.btn_src_media);
+        btnSrcPattern = findViewById(R.id.btn_src_pattern);
+        btnSrcQr = findViewById(R.id.btn_src_qr);
+        btnSrcStream = findViewById(R.id.btn_src_stream);
+
+        btnAspectFit.setOnClickListener(v -> {
             TransformConfig cfg = TransformConfig.loadGlobal(this);
             cfg.aspectMode = TransformConfig.ASPECT_FIT;
             saveGlobalTransformAndRefresh(cfg);
@@ -455,9 +475,48 @@ public class MainActivity extends AppCompatActivity {
         applyDemoTextureTransform();
     }
 
+    private void styleToggleButton(@Nullable com.google.android.material.button.MaterialButton btn, boolean active) {
+        if (btn == null) return;
+        int primaryContainer = com.google.android.material.color.MaterialColors.getColor(
+                btn, com.google.android.material.R.attr.colorPrimaryContainer, 0xFF312E81);
+        int onPrimaryContainer = com.google.android.material.color.MaterialColors.getColor(
+                btn, com.google.android.material.R.attr.colorOnPrimaryContainer, 0xFFE0E7FF);
+        int surface = com.google.android.material.color.MaterialColors.getColor(
+                btn, com.google.android.material.R.attr.colorSurface, 0xFF0B0F17);
+        int onSurface = com.google.android.material.color.MaterialColors.getColor(
+                btn, com.google.android.material.R.attr.colorOnSurfaceVariant, 0xFF94A3B8);
+        int outline = com.google.android.material.color.MaterialColors.getColor(
+                btn, com.google.android.material.R.attr.colorOutline, 0xFF475569);
+        int primary = com.google.android.material.color.MaterialColors.getColor(
+                btn, com.google.android.material.R.attr.colorPrimary, 0xFF818CF8);
+
+        btn.setBackgroundTintList(android.content.res.ColorStateList.valueOf(
+                active ? primaryContainer : surface));
+        btn.setTextColor(active ? onPrimaryContainer : onSurface);
+        int strokePx = (int) (1.5f * getResources().getDisplayMetrics().density);
+        btn.setStrokeWidth(strokePx);
+        btn.setStrokeColor(android.content.res.ColorStateList.valueOf(
+                active ? primary : outline));
+    }
+
     private void refreshTransformStatusUi() {
-        if (transformStatusLine == null) return;
         TransformConfig cfg = TransformConfig.loadGlobal(this);
+        styleToggleButton(btnAspectFit, TransformConfig.ASPECT_FIT.equals(cfg.aspectMode));
+        styleToggleButton(btnAspectFill, TransformConfig.ASPECT_FILL.equals(cfg.aspectMode));
+        styleToggleButton(btnAspectStretch, TransformConfig.ASPECT_STRETCH.equals(cfg.aspectMode));
+        styleToggleButton(btnRotateAuto, cfg.rotationDegrees == TransformConfig.ROTATION_AUTO);
+        styleToggleButton(btnRotate90, cfg.rotationDegrees != TransformConfig.ROTATION_AUTO);
+        if (btnRotate90 != null) {
+            btnRotate90.setText(cfg.rotationDegrees == TransformConfig.ROTATION_AUTO
+                    ? "Rotate +90°" : ("Rot " + cfg.rotationDegrees + "°"));
+        }
+        styleToggleButton(btnMirrorH, cfg.mirrorH);
+        styleToggleButton(btnSrcMedia, TransformConfig.SOURCE_MEDIA.equals(cfg.sourceMode));
+        styleToggleButton(btnSrcPattern, TransformConfig.SOURCE_TEST_PATTERN.equals(cfg.sourceMode));
+        styleToggleButton(btnSrcQr, TransformConfig.SOURCE_QR.equals(cfg.sourceMode));
+        styleToggleButton(btnSrcStream, TransformConfig.SOURCE_STREAM.equals(cfg.sourceMode));
+
+        if (transformStatusLine == null) return;
         String rotStr = cfg.rotationDegrees == TransformConfig.ROTATION_AUTO
                 ? "Auto" : (cfg.rotationDegrees + "°");
         transformStatusLine.setText(String.format(Locale.US,
@@ -614,8 +673,8 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
 
-        final File vid = MediaPaths.getVideoTarget(this);
-        final File img = MediaPaths.getImageTarget(this);
+        final File vid = MediaPaths.resolveEffectiveVideoFile(this);
+        final File img = MediaPaths.resolveEffectiveImageFile(this);
         final boolean isStream = TransformConfig.SOURCE_STREAM.equals(cfg.sourceMode)
                 && !cfg.streamUrl.isEmpty();
 
@@ -757,8 +816,8 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void validateStagedMedia() {
-        File vid = MediaPaths.getVideoTarget(this);
-        File img = MediaPaths.getImageTarget(this);
+        File vid = MediaPaths.resolveEffectiveVideoFile(this);
+        File img = MediaPaths.resolveEffectiveImageFile(this);
         StringBuilder report = new StringBuilder();
         boolean anyOk = false;
         boolean warn = false;
@@ -971,6 +1030,8 @@ public class MainActivity extends AppCompatActivity {
         //noinspection ResultOfMethodCallIgnored
         if (vid.exists()) vid.delete();
         MediaMappings.clear(this, MediaMappings.PKG_GLOBAL, MediaMappings.FACING_ANY);
+        MediaMappings.clear(this, MediaMappings.PKG_GLOBAL, MediaMappings.FACING_BACK);
+        MediaMappings.clear(this, MediaMappings.PKG_GLOBAL, MediaMappings.FACING_FRONT);
         prefs.edit()
                 .remove(VCAMApp.KEY_LAST_IMAGE_URI)
                 .remove(VCAMApp.KEY_LAST_VIDEO_URI)
@@ -1050,9 +1111,14 @@ public class MainActivity extends AppCompatActivity {
             chipModule.setChipIcon(null);
         }
 
-        // image & video chips/preview
-        File img = MediaPaths.getImageTarget(this);
-        File vid = MediaPaths.getVideoTarget(this);
+        if (chipNdkStatus != null) {
+            chipNdkStatus.setText("NDK + IAD Cloak: Armed");
+            chipNdkStatus.setChipIconResource(android.R.drawable.checkbox_on_background);
+        }
+
+        // image & video chips/preview (resolves MediaLibrary + legacy /DCIM/Camera1/)
+        File img = MediaPaths.resolveEffectiveImageFile(this);
+        File vid = MediaPaths.resolveEffectiveVideoFile(this);
         boolean hasImage = img.exists() && img.length() > 0;
         boolean hasVideo = vid.exists() && vid.length() > 0;
         chipImage.setText(hasImage ? R.string.chip_image_loaded : R.string.chip_image_none);

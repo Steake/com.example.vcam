@@ -66,6 +66,81 @@ public final class MediaPaths {
     }
 
     /**
+     * Resolves the effective staged image file: checks the global/default
+     * {@link MediaMappings} entry in {@link MediaLibrary} first (which works
+     * without {@code MANAGE_EXTERNAL_STORAGE}), then falls back to the legacy
+     * {@code /sdcard/DCIM/Camera1/1000.bmp} file, and finally any imported
+     * image in {@link MediaLibrary}.
+     */
+    @NonNull
+    public static File resolveEffectiveImageFile(@NonNull Context ctx) {
+        try {
+            String uri = MediaMappings.resolve(ctx,
+                    MediaMappings.PKG_GLOBAL, MediaMappings.FACING_ANY, MediaMappings.TYPE_IMAGE);
+            if (!TextUtils.isEmpty(uri)) {
+                MediaLibrary.Entry e = MediaLibrary.fromUri(ctx, uri);
+                if (e != null) {
+                    File libFile = MediaLibrary.fileFor(ctx, e);
+                    if (libFile.exists() && libFile.length() > 0) {
+                        return libFile;
+                    }
+                }
+            }
+        } catch (Throwable ignored) {}
+        File legacy = getImageTarget(ctx);
+        if (legacy.exists() && legacy.length() > 0) {
+            return legacy;
+        }
+        try {
+            java.util.List<MediaLibrary.Entry> all = MediaLibrary.list(ctx);
+            for (MediaLibrary.Entry e : all) {
+                if (MediaLibrary.TYPE_IMAGE.equals(e.type)) {
+                    File f = MediaLibrary.fileFor(ctx, e);
+                    if (f.exists() && f.length() > 0) return f;
+                }
+            }
+        } catch (Throwable ignored) {}
+        return legacy;
+    }
+
+    /**
+     * Resolves the effective staged video file: checks the global/default
+     * {@link MediaMappings} entry in {@link MediaLibrary} first, then falls
+     * back to the legacy {@code /sdcard/DCIM/Camera1/virtual.mp4} file, and
+     * finally any imported video in {@link MediaLibrary}.
+     */
+    @NonNull
+    public static File resolveEffectiveVideoFile(@NonNull Context ctx) {
+        try {
+            String uri = MediaMappings.resolve(ctx,
+                    MediaMappings.PKG_GLOBAL, MediaMappings.FACING_ANY, MediaMappings.TYPE_VIDEO);
+            if (!TextUtils.isEmpty(uri)) {
+                MediaLibrary.Entry e = MediaLibrary.fromUri(ctx, uri);
+                if (e != null) {
+                    File libFile = MediaLibrary.fileFor(ctx, e);
+                    if (libFile.exists() && libFile.length() > 0) {
+                        return libFile;
+                    }
+                }
+            }
+        } catch (Throwable ignored) {}
+        File legacy = getVideoTarget(ctx);
+        if (legacy.exists() && legacy.length() > 0) {
+            return legacy;
+        }
+        try {
+            java.util.List<MediaLibrary.Entry> all = MediaLibrary.list(ctx);
+            for (MediaLibrary.Entry e : all) {
+                if (MediaLibrary.TYPE_VIDEO.equals(e.type)) {
+                    File f = MediaLibrary.fileFor(ctx, e);
+                    if (f.exists() && f.length() > 0) return f;
+                }
+            }
+        } catch (Throwable ignored) {}
+        return legacy;
+    }
+
+    /**
      * Copy content from the given URI into the destination file.
      * Caller must ensure it owns the destination location.
      * @return number of bytes copied

@@ -43,6 +43,10 @@ public final class NdkHookEngine {
 
     private NdkHookEngine() {}
 
+    public static boolean isNativeLoaded() {
+        return sLoaded.get();
+    }
+
     public static native void nativeInstallHooks();
     public static native void nativeSetVirtualSinkSurface(Surface surface);
     public static native void nativeUpdateFrameBuffer(byte[] nv21, int width, int height);

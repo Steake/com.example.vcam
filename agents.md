@@ -269,3 +269,28 @@ Pushing a `v*` tag triggers `.github/workflows/build.yml` to build both debug an
 - Surface per-app host camera telemetry badges in `PerAppMappingActivity` & `AppMappingEditActivity` and add an on-device `MediaTranscoder` normalizer in `MediaLibraryActivity`.
 - Implement `VirtualAudioFeeder` (`AudioRecord` hook synchronizing decoded video audio track to host PCM parameters).
 - Complete i18n translations across all 7 locale directories, add unit tests, verify `./gradlew test :app:assembleDebug :app:assembleRelease`, and update documentation.
+
+---
+
+## 7. v5.2.x – v5.3.0 Native NDK (`libvcam_ndk.so`), IAD Counter-Telemetry & SystemUI Immunity
+
+### 7.1 Native NDK Interception (`app/src/main/cpp/vcam_ndk.cpp` & `NdkHookEngine.java`)
+- **Cross-Compiled ABIs**: `arm64-v8a`, `armeabi-v7a`, and `x86_64` built via `app/src/main/cpp/build_ndk.sh` into `app/src/main/jniLibs/<abi>/libvcam_ndk.so`.
+- **Dual-Layer Hook Strategy**:
+  1. **ARM64 Callee Prologue Inline Trampoline (`install_arm64_inline_hook`)**: Rewrites the target symbol's entry prologue in `libcamera2ndk.so` / `libmediandk.so` with a 16-byte absolute branch (`LDR X16, #8; BR X16`) while preserving displaced instructions in an executable trampoline island.
+  2. **Self-Healing Shadow GOT + `dlsym` Interception**: Scans ELF `.rela.plt` / `.rela.dyn` across loaded non-system modules, records original function pointers in `g_shadow_got`, redirects camera/media symbols, and intercepts `dlsym()`.
+- **Hooked Native Symbols**:
+  - `ACameraManager_openCamera`, `ACameraManager_getCameraIdList`, `ACameraManager_getCameraCharacteristics`
+  - `ACameraMetadata_getConstEntry` (spoofs `ACAMERA_LENS_FACING`, `ACAMERA_SENSOR_ORIENTATION`, `ACAMERA_SENSOR_INFO_ACTIVE_ARRAY_SIZE`, `ACAMERA_SENSOR_INFO_PHYSICAL_SIZE`, `ACAMERA_SENSOR_INFO_SENSITIVITY_RANGE`, `ACAMERA_SENSOR_INFO_EXPOSURE_TIME_RANGE`, `ACAMERA_SENSOR_INFO_TIMESTAMP_SOURCE = REALTIME`, and `ACAMERA_INFO_SUPPORTED_HARDWARE_LEVEL = 3`)
+  - `ACameraDevice_createCaptureSession`, `ACameraDevice_createCaptureSessionWithSessionParameters`, `ACaptureSessionOutput_create`, `ACaptureSessionOutputContainer_add`, `ACameraOutputTarget_create`, `ACameraCaptureSession_setRepeatingRequest`
+  - `AImageReader_new`, `AImageReader_newWithUsage`, `AImageReader_getWindow`, `AImageReader_setImageListener`, `AImageReader_acquireLatestImage`, `AImageReader_acquireNextImage`
+  - `AImage_getTimestamp` (synthesizes `CLOCK_BOOTTIME` start-of-exposure timestamps), `AImage_getHardwareBuffer`, `AHardwareBuffer_describe` (injects `USAGE_CAMERA_WRITE` and 64-byte ISP stride), `AImage_getNumberOfPlanes`, `AImage_getPlaneRowStride`, `AImage_getPlanePixelStride`, `AImage_getPlaneData` (applies IMU sub-pixel motion shift + Xorshift32 temporal shot noise).
+- **Self-Hiding & `/proc` Scrubber**:
+  - `NdkHookEngine` extracts `libvcam_ndk.so` under a randomized HAL name (`libcam_hal3_ext_<hex>.so`), marks it `0400` read-only (satisfying Android 14+ Dynamic Code Loading policy), loads it, and immediately `unlink`s the file on disk.
+  - Native `fopen` / `fopen64` / `open` / `open64` / `openat` hooks redirect `/proc/self/maps`, `/proc/self/smaps`, and `/proc/self/status` through an anonymous `memfd_create` descriptor with all `vcam`, `xposed`, `lsposed`, `riru`, `zygisk`, and `frida` lines scrubbed and `TracerPid:	0` enforced.
+
+### 7.2 Direct-Boot & SystemUI Immunity
+- Both `HookMain.handleLoadPackage()` (`isExcludedSystemOrKeyguardPackage`) and `vcam_ndk.cpp` (`is_excluded_system_process`) strictly exclude `android`, `system_server`, `com.android.systemui`, `com.android.keyguard`, `com.android.phone`, `com.android.settings`, `com.android.providers.*`, `zygote`, `surfaceflinger`, and `cameraserver`, and skip hooking whenever `UserManager.isUserUnlocked()` is `false` (Direct Boot before first lockscreen unlock).
+
+### 7.3 Zero-Permission Media Resolution (`MediaPaths.resolveEffectiveImageFile` / `resolveEffectiveVideoFile`)
+- `MainActivity`, `CameraVerifyActivity`, and `InjectedConfigActivity` resolve staged media via `MediaPaths.resolveEffectiveImageFile(ctx)` and `MediaPaths.resolveEffectiveVideoFile(ctx)`, which check `MediaMappings` + `MediaLibrary` first and fall back to `/sdcard/DCIM/Camera1/1000.bmp` and `virtual.mp4`. This guarantees full preview, validation, and verification functionality on Android 11–14 without requiring `MANAGE_EXTERNAL_STORAGE`.
