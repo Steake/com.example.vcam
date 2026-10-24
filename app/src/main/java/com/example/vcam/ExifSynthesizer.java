@@ -357,9 +357,21 @@ public final class ExifSynthesizer {
                     CaptureResult.Key.class,
                     new XC_MethodHook() {
                         @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+                            if (param.thisObject != null
+                                    && Boolean.TRUE.equals(XposedHelpers.getAdditionalInstanceField(
+                                            param.thisObject, "vcamVirtualResult"))) {
+                                param.setResult(null);
+                            }
+                        }
+
+                        @Override
                         protected void afterHookedMethod(MethodHookParam param) {
                             if (SensorProfiler.bypassHookForProfiler) return;
-                            if (!HookMain.isMetadataPatchActive()) return;
+                            boolean isVirtual = param.thisObject != null
+                                    && Boolean.TRUE.equals(XposedHelpers.getAdditionalInstanceField(
+                                            param.thisObject, "vcamVirtualResult"));
+                            if (!isVirtual && !HookMain.isMetadataPatchActive()) return;
                             if (param.args.length == 0 || !(param.args[0] instanceof CaptureResult.Key)) {
                                 return;
                             }
@@ -371,12 +383,40 @@ public final class ExifSynthesizer {
                                 param.setResult(CURRENT_PHOTOMETRY.computedExposureNs);
                             } else if (CaptureResult.SENSOR_SENSITIVITY.getName().equals(name)) {
                                 param.setResult(CURRENT_PHOTOMETRY.computedIso);
+                            } else if (CaptureResult.SENSOR_TIMESTAMP.getName().equals(name)) {
+                                if (isVirtual || param.getResult() == null) {
+                                    param.setResult(SystemClock.elapsedRealtimeNanos());
+                                }
                             } else if (CaptureResult.CONTROL_AE_STATE.getName().equals(name)) {
                                 param.setResult(CameraMetadata.CONTROL_AE_STATE_CONVERGED);
                             } else if (CaptureResult.CONTROL_AF_STATE.getName().equals(name)) {
                                 param.setResult(CameraMetadata.CONTROL_AF_STATE_FOCUSED_LOCKED);
                             } else if (CaptureResult.CONTROL_AWB_STATE.getName().equals(name)) {
                                 param.setResult(CameraMetadata.CONTROL_AWB_STATE_CONVERGED);
+                            } else if (CaptureResult.CONTROL_AE_MODE.getName().equals(name)) {
+                                if (isVirtual || param.getResult() == null) {
+                                    param.setResult(CameraMetadata.CONTROL_AE_MODE_ON);
+                                }
+                            } else if (CaptureResult.CONTROL_AF_MODE.getName().equals(name)) {
+                                if (isVirtual || param.getResult() == null) {
+                                    param.setResult(CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_PICTURE);
+                                }
+                            } else if (CaptureResult.CONTROL_AWB_MODE.getName().equals(name)) {
+                                if (isVirtual || param.getResult() == null) {
+                                    param.setResult(CameraMetadata.CONTROL_AWB_MODE_AUTO);
+                                }
+                            } else if (CaptureResult.FLASH_STATE.getName().equals(name)) {
+                                if (isVirtual || param.getResult() == null) {
+                                    param.setResult(CameraMetadata.FLASH_STATE_READY);
+                                }
+                            } else if (CaptureResult.SCALER_CROP_REGION.getName().equals(name)) {
+                                if (isVirtual || param.getResult() == null) {
+                                    param.setResult(new android.graphics.Rect(0, 0, 4032, 3024));
+                                }
+                            } else if (CaptureResult.JPEG_ORIENTATION.getName().equals(name)) {
+                                if (isVirtual || param.getResult() == null) {
+                                    param.setResult(0);
+                                }
                             } else if (CaptureResult.LENS_STATE.getName().equals(name)) {
                                 param.setResult(CameraMetadata.LENS_STATE_STATIONARY);
                             } else if (CaptureResult.LENS_FOCUS_DISTANCE.getName().equals(name)) {
@@ -394,6 +434,67 @@ public final class ExifSynthesizer {
                             }
                         }
                     });
+            try {
+                XposedHelpers.findAndHookMethod("android.hardware.camera2.CaptureResult", classLoader,
+                        "getRequest", new XC_MethodHook() {
+                            @Override
+                            protected void beforeHookedMethod(MethodHookParam param) {
+                                if (param.thisObject != null
+                                        && Boolean.TRUE.equals(XposedHelpers.getAdditionalInstanceField(
+                                                param.thisObject, "vcamVirtualResult"))) {
+                                    param.setResult(XposedHelpers.getAdditionalInstanceField(
+                                            param.thisObject, "vcamRequest"));
+                                }
+                            }
+                        });
+                XposedHelpers.findAndHookMethod("android.hardware.camera2.CaptureResult", classLoader,
+                        "getFrameNumber", new XC_MethodHook() {
+                            @Override
+                            protected void beforeHookedMethod(MethodHookParam param) {
+                                if (param.thisObject != null
+                                        && Boolean.TRUE.equals(XposedHelpers.getAdditionalInstanceField(
+                                                param.thisObject, "vcamVirtualResult"))) {
+                                    Object fn = XposedHelpers.getAdditionalInstanceField(param.thisObject, "vcamFrameNumber");
+                                    param.setResult(fn instanceof Long ? (Long) fn : CURRENT_PHOTOMETRY.frameNumber);
+                                }
+                            }
+                        });
+                XposedHelpers.findAndHookMethod("android.hardware.camera2.CaptureResult", classLoader,
+                        "getSequenceId", new XC_MethodHook() {
+                            @Override
+                            protected void beforeHookedMethod(MethodHookParam param) {
+                                if (param.thisObject != null
+                                        && Boolean.TRUE.equals(XposedHelpers.getAdditionalInstanceField(
+                                                param.thisObject, "vcamVirtualResult"))) {
+                                    param.setResult(1);
+                                }
+                            }
+                        });
+                XposedHelpers.findAndHookMethod("android.hardware.camera2.TotalCaptureResult", classLoader,
+                        "getPartialResults", new XC_MethodHook() {
+                            @Override
+                            protected void beforeHookedMethod(MethodHookParam param) {
+                                if (param.thisObject != null
+                                        && Boolean.TRUE.equals(XposedHelpers.getAdditionalInstanceField(
+                                                param.thisObject, "vcamVirtualResult"))) {
+                                    param.setResult(java.util.Collections.emptyList());
+                                }
+                            }
+                        });
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    XposedHelpers.findAndHookMethod("android.hardware.camera2.TotalCaptureResult", classLoader,
+                            "getPhysicalCameraResults", new XC_MethodHook() {
+                                @Override
+                                protected void beforeHookedMethod(MethodHookParam param) {
+                                    if (param.thisObject != null
+                                            && Boolean.TRUE.equals(XposedHelpers.getAdditionalInstanceField(
+                                                    param.thisObject, "vcamVirtualResult"))) {
+                                        param.setResult(java.util.Collections.emptyMap());
+                                    }
+                                }
+                            });
+                }
+            } catch (Throwable ignored) {}
             captureResultHooked = true;
         } catch (Throwable t) {
             XposedBridge.log("[VCAM][metadata-patch] " + t);

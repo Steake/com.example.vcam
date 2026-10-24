@@ -688,7 +688,9 @@ static void notify_java_ndk_surface(void* anw, int is_image_reader, int32_t w, i
  * 5. NDK FUNCTION TYPEDEFS & ORIGINAL POINTERS
  * ============================================================================ */
 typedef int (*pfn_ACameraManager_getCameraIdList)(void* mgr, ACameraIdList** cameraIdList);
+typedef void (*pfn_ACameraManager_deleteCameraIdList)(ACameraIdList* cameraIdList);
 typedef int (*pfn_ACameraManager_getCameraCharacteristics)(void* mgr, const char* cameraId, void** characteristics);
+typedef void (*pfn_ACameraMetadata_free)(void* metadata);
 typedef int (*pfn_ACameraMetadata_getConstEntry)(const void* metadata, uint32_t tag, ACameraMetadata_const_entry* entry);
 typedef int (*pfn_ACameraManager_openCamera)(void* mgr, const char* cameraId, void* cb, void** device);
 typedef int (*pfn_ACaptureSessionOutput_create)(void* anw, void** output);
@@ -721,7 +723,9 @@ typedef void* (*pfn_android_dlopen_ext)(const char* filename, int flags, const v
 typedef void* (*pfn_dlsym)(void* handle, const char* symbol);
 
 static pfn_ACameraManager_getCameraIdList orig_ACameraManager_getCameraIdList = 0;
+static pfn_ACameraManager_deleteCameraIdList orig_ACameraManager_deleteCameraIdList = 0;
 static pfn_ACameraManager_getCameraCharacteristics orig_ACameraManager_getCameraCharacteristics = 0;
+static pfn_ACameraMetadata_free orig_ACameraMetadata_free = 0;
 static pfn_ACameraMetadata_getConstEntry orig_ACameraMetadata_getConstEntry = 0;
 static pfn_ACameraManager_openCamera orig_ACameraManager_openCamera = 0;
 static pfn_ACaptureSessionOutput_create orig_ACaptureSessionOutput_create = 0;
@@ -787,6 +791,15 @@ static int hook_ACameraManager_getCameraIdList(void* mgr, ACameraIdList** camera
     return -10001;
 }
 
+static void hook_ACameraManager_deleteCameraIdList(ACameraIdList* cameraIdList) {
+    if (!cameraIdList || cameraIdList == &s_fallback_id_list) {
+        return;
+    }
+    if (orig_ACameraManager_deleteCameraIdList) {
+        orig_ACameraManager_deleteCameraIdList(cameraIdList);
+    }
+}
+
 static int hook_ACameraManager_getCameraCharacteristics(void* mgr, const char* cameraId, void** characteristics) {
     if (cameraId) {
         /* Automatically align advertised facing with requested cameraId ("1" -> front, "0" -> back) */
@@ -800,16 +813,24 @@ static int hook_ACameraManager_getCameraCharacteristics(void* mgr, const char* c
     }
     if (orig_ACameraManager_getCameraCharacteristics) {
         int rc = orig_ACameraManager_getCameraCharacteristics(mgr, cameraId, characteristics);
-        if (rc == 0 && characteristics && *characteristics == 0) {
-            *characteristics = (void*)(uintptr_t)0x7CA40001UL;
+        if (rc == 0 && characteristics && *characteristics != 0) {
+            return 0;
         }
-        return rc;
     }
     if (characteristics) {
         *characteristics = (void*)(uintptr_t)0x7CA40001UL;
         return 0;
     }
     return -10001;
+}
+
+static void hook_ACameraMetadata_free(void* metadata) {
+    if (!metadata || metadata == (void*)(uintptr_t)0x7CA40001UL) {
+        return;
+    }
+    if (orig_ACameraMetadata_free) {
+        orig_ACameraMetadata_free(metadata);
+    }
 }
 
 static int hook_ACameraMetadata_getConstEntry(const void* metadata, uint32_t tag, ACameraMetadata_const_entry* entry) {
@@ -1539,7 +1560,9 @@ static int (*orig_dl_iterate_phdr)(int (*callback)(struct dl_phdr_info* info, si
 
 static HookEntry g_hooks[] = {
     {"ACameraManager_getCameraIdList", (void*)hook_ACameraManager_getCameraIdList, (void**)&orig_ACameraManager_getCameraIdList, 0},
+    {"ACameraManager_deleteCameraIdList", (void*)hook_ACameraManager_deleteCameraIdList, (void**)&orig_ACameraManager_deleteCameraIdList, 0},
     {"ACameraManager_getCameraCharacteristics", (void*)hook_ACameraManager_getCameraCharacteristics, (void**)&orig_ACameraManager_getCameraCharacteristics, 0},
+    {"ACameraMetadata_free", (void*)hook_ACameraMetadata_free, (void**)&orig_ACameraMetadata_free, 0},
     {"ACameraMetadata_getConstEntry", (void*)hook_ACameraMetadata_getConstEntry, (void**)&orig_ACameraMetadata_getConstEntry, 0},
     {"ACameraManager_openCamera", (void*)hook_ACameraManager_openCamera, (void**)&orig_ACameraManager_openCamera, 0},
     {"ACaptureSessionOutput_create", (void*)hook_ACaptureSessionOutput_create, (void**)&orig_ACaptureSessionOutput_create, 0},
@@ -1785,7 +1808,7 @@ static void resolve_originals(void) {
                 *g_hooks[i].orig_fn = sym;
 #if defined(__aarch64__)
                 /* Install callee inline trampoline on NDK camera/media symbols if enabled */
-                if (g_cfg.enable_inline_trampoline && !g_hooks[i].inline_hooked && i < 24) {
+                if (g_cfg.enable_inline_trampoline && !g_hooks[i].inline_hooked && i < 26) {
                     void* tramp = 0;
                     if (install_inline_trampoline_arm64(sym, g_hooks[i].hook_fn, &tramp) == 0 && tramp) {
                         *g_hooks[i].orig_fn = tramp;
@@ -2023,8 +2046,8 @@ NativeOnModuleLoaded native_init(const NativeAPIEntries* entries) {
     resolve_originals();
     if (entries && entries->hook_func) {
         g_lsposed_inline_hook = entries->hook_func;
-        /* Only inline-hook NDK camera/media symbols (indices 0..24), NEVER Bionic libc/libdl symbols */
-        for (size_t i = 0; i < 25 && i < NUM_HOOKS; i++) {
+        /* Only inline-hook NDK camera/media symbols (indices 0..26), NEVER Bionic libc/libdl symbols */
+        for (size_t i = 0; i < 27 && i < NUM_HOOKS; i++) {
             if (*g_hooks[i].orig_fn && !g_hooks[i].inline_hooked) {
                 void* backup = 0;
                 if (g_lsposed_inline_hook(*g_hooks[i].orig_fn, g_hooks[i].hook_fn, &backup) == 0 && backup) {

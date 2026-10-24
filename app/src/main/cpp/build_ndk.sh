@@ -6,11 +6,7 @@ JNILIBS_DIR="${SCRIPT_DIR}/../jniLibs"
 STUB_DIR="/tmp/vcam_bionic_stubs"
 mkdir -p "${STUB_DIR}"
 
-cat << 'STUB_C' > "${STUB_DIR}/stubs.c"
-int __android_log_print(int prio, const char* tag, const char* fmt, ...) { return 0; }
-void* dlopen(const char* filename, int flag) { return 0; }
-void* dlsym(void* handle, const char* symbol) { return 0; }
-int dl_iterate_phdr(void* callback, void* data) { return 0; }
+cat << 'STUB_C' > "${STUB_DIR}/stubs_c.c"
 int mprotect(void* addr, unsigned long len, int prot) { return 0; }
 void* mmap(void* addr, unsigned long length, int prot, int flags, int fd, long long offset) { return (void*)-1; }
 int munmap(void* addr, unsigned long length) { return 0; }
@@ -41,8 +37,21 @@ long long lseek(int fd, long long offset, int whence) { return 0; }
 int close(int fd) { return 0; }
 int access(const char* pathname, int mode) { return -1; }
 int faccessat(int dirfd, const char* pathname, int mode, int flags) { return -1; }
-void* android_dlopen_ext(const char* filename, int flags, const void* extinfo) { return 0; }
 int connect(int sockfd, const void* addr, unsigned int addrlen) { return 0; }
+STUB_C
+
+cat << 'STUB_DL' > "${STUB_DIR}/stubs_dl.c"
+void* dlopen(const char* filename, int flag) { return 0; }
+void* dlsym(void* handle, const char* symbol) { return 0; }
+int dl_iterate_phdr(void* callback, void* data) { return 0; }
+void* android_dlopen_ext(const char* filename, int flags, const void* extinfo) { return 0; }
+STUB_DL
+
+cat << 'STUB_LOG' > "${STUB_DIR}/stubs_log.c"
+int __android_log_print(int prio, const char* tag, const char* fmt, ...) { return 0; }
+STUB_LOG
+
+cat << 'STUB_ANDROID' > "${STUB_DIR}/stubs_android.c"
 void* ANativeWindow_fromSurface(void* env, void* surface) { return 0; }
 void* ANativeWindow_toSurface(void* env, void* window) { return 0; }
 void ANativeWindow_acquire(void* window) {}
@@ -50,7 +59,7 @@ void ANativeWindow_release(void* window) {}
 int ANativeWindow_getWidth(void* window) { return 0; }
 int ANativeWindow_getHeight(void* window) { return 0; }
 int ANativeWindow_getFormat(void* window) { return 0; }
-STUB_C
+STUB_ANDROID
 
 build_arch() {
     local abi="$1"
@@ -60,14 +69,14 @@ build_arch() {
     local arch_stub="${STUB_DIR}/${abi}"
     mkdir -p "${out_dir}" "${arch_stub}"
 
-    "${cc}" -shared -fPIC -nostdlib "${STUB_DIR}/stubs.c" -Wl,-soname,libc.so -o "${arch_stub}/libc.so"
-    "${cc}" -shared -fPIC -nostdlib "${STUB_DIR}/stubs.c" -Wl,-soname,libdl.so -o "${arch_stub}/libdl.so"
-    "${cc}" -shared -fPIC -nostdlib "${STUB_DIR}/stubs.c" -Wl,-soname,liblog.so -o "${arch_stub}/liblog.so"
-    "${cc}" -shared -fPIC -nostdlib "${STUB_DIR}/stubs.c" -Wl,-soname,libandroid.so -o "${arch_stub}/libandroid.so"
+    "${cc}" -shared -fPIC -nostdlib "${STUB_DIR}/stubs_c.c" -Wl,-soname,libc.so -o "${arch_stub}/libc.so"
+    "${cc}" -shared -fPIC -nostdlib "${STUB_DIR}/stubs_dl.c" -Wl,-soname,libdl.so -o "${arch_stub}/libdl.so"
+    "${cc}" -shared -fPIC -nostdlib "${STUB_DIR}/stubs_log.c" -Wl,-soname,liblog.so -o "${arch_stub}/liblog.so"
+    "${cc}" -shared -fPIC -nostdlib "${STUB_DIR}/stubs_android.c" -Wl,-soname,libandroid.so -o "${arch_stub}/libandroid.so"
 
-    "${cc}" -shared -fPIC -O2 -Wall -Wextra -fno-stack-protector -nostdlib \
+    "${cc}" -shared -fPIC -ffreestanding -O2 -Wall -Wextra -fno-stack-protector -nostdlib \
         "${SCRIPT_DIR}/vcam_ndk.c" \
-        -L"${arch_stub}" -lc -ldl -llog -landroid -lgcc \
+        -L"${arch_stub}" -Wl,--no-as-needed -lc -ldl -llog -landroid -lgcc \
         -Wl,-soname,libvcam_ndk.so \
         -Wl,--hash-style=both \
         -o "${out_dir}/libvcam_ndk.so"

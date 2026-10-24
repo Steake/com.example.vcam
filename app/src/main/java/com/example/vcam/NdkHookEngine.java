@@ -37,6 +37,7 @@ import de.robv.android.xposed.XposedBridge;
 public final class NdkHookEngine {
 
     private static final AtomicBoolean sLoaded = new AtomicBoolean(false);
+    private static final AtomicBoolean sExtractionFailed = new AtomicBoolean(false);
     private static final AtomicBoolean sLoadHooksInstalled = new AtomicBoolean(false);
     private static volatile String sCachedModuleApkPath = null;
     private static volatile String sHostDataDir = null;
@@ -114,7 +115,7 @@ public final class NdkHookEngine {
     }
 
     private static synchronized void tryLoadNativeLibrary(String moduleApkPath) {
-        if (sLoaded.get()) return;
+        if (sLoaded.get() || sExtractionFailed.get()) return;
 
         // 1. Try direct load if LSPosed native_init already mapped the library
         try {
@@ -130,11 +131,23 @@ public final class NdkHookEngine {
             File targetDir = resolveWritableNativeDir();
             if (targetDir == null) return;
 
+            File[] staleFiles = targetDir.listFiles();
+            if (staleFiles != null) {
+                for (File stale : staleFiles) {
+                    if (stale != null && stale.getName().startsWith("libcam_hal3_ext_")) {
+                        //noinspection ResultOfMethodCallIgnored
+                        stale.delete();
+                    }
+                }
+            }
+
             String[] abis = Build.SUPPORTED_ABIS != null && Build.SUPPORTED_ABIS.length > 0
                     ? Build.SUPPORTED_ABIS
                     : new String[]{"arm64-v8a", "armeabi-v7a", "x86_64"};
 
             ClassLoader cl = NdkHookEngine.class.getClassLoader();
+            Throwable lastLoadError = null;
+            boolean attemptedLoad = false;
             for (String abi : abis) {
                 String resPath = "lib/" + abi + "/libvcam_ndk.so";
                 InputStream in = cl != null ? cl.getResourceAsStream(resPath) : null;
@@ -153,42 +166,57 @@ public final class NdkHookEngine {
                 if (in != null) {
                     String randHex = UUID.randomUUID().toString().replace("-", "").substring(0, 8);
                     File outSo = new File(targetDir, "libcam_hal3_ext_" + randHex + ".so");
-                    try (InputStream src = in; FileOutputStream fos = new FileOutputStream(outSo, false)) {
-                        byte[] buf = new byte[8192];
-                        int n;
-                        while ((n = src.read(buf)) > 0) {
-                            fos.write(buf, 0, n);
+                    try {
+                        try (InputStream src = in; FileOutputStream fos = new FileOutputStream(outSo, false)) {
+                            byte[] buf = new byte[8192];
+                            int n;
+                            while ((n = src.read(buf)) > 0) {
+                                fos.write(buf, 0, n);
+                            }
+                            fos.getFD().sync();
+                        } finally {
+                            if (zf != null) {
+                                try { zf.close(); } catch (Throwable ignored) {}
+                            }
                         }
-                        fos.getFD().sync();
+                        // Android 14+ (API 34+) Dynamic Code Loading policy requires dynamically loaded
+                        // binaries to be strictly read-only (0400 / non-writable) before System.load().
+                        //noinspection ResultOfMethodCallIgnored
+                        outSo.setReadable(true, false);
+                        //noinspection ResultOfMethodCallIgnored
+                        outSo.setExecutable(true, false);
+                        //noinspection ResultOfMethodCallIgnored
+                        outSo.setWritable(false, false);
+                        //noinspection ResultOfMethodCallIgnored
+                        outSo.setReadOnly();
+                        attemptedLoad = true;
+                        System.load(outSo.getAbsolutePath());
+                        sLoaded.set(true);
+                        nativeInstallHooks();
+                        syncSensorProfile(HookMain.getActiveLensProfile(), HookMain.getCurrentFacing());
+                        return;
+                    } catch (Throwable loadErr) {
+                        lastLoadError = loadErr;
                     } finally {
-                        if (zf != null) {
-                            try { zf.close(); } catch (Throwable ignored) {}
-                        }
+                        // Unlink immediately after dlopen (or failed dlopen) so no .so artifact remains on filesystem
+                        //noinspection ResultOfMethodCallIgnored
+                        outSo.setWritable(true, true);
+                        //noinspection ResultOfMethodCallIgnored
+                        outSo.delete();
                     }
-                    // Android 14+ (API 34+) Dynamic Code Loading policy requires dynamically loaded
-                    // binaries to be strictly read-only (0400 / non-writable) before System.load().
-                    //noinspection ResultOfMethodCallIgnored
-                    outSo.setReadable(true, false);
-                    //noinspection ResultOfMethodCallIgnored
-                    outSo.setExecutable(true, false);
-                    //noinspection ResultOfMethodCallIgnored
-                    outSo.setWritable(false, false);
-                    //noinspection ResultOfMethodCallIgnored
-                    outSo.setReadOnly();
-                    System.load(outSo.getAbsolutePath());
-                    // Unlink immediately after dlopen so no .so artifact remains on filesystem
-                    //noinspection ResultOfMethodCallIgnored
-                    outSo.delete();
-                    sLoaded.set(true);
-                    nativeInstallHooks();
-                    syncSensorProfile(HookMain.getActiveLensProfile(), HookMain.getCurrentFacing());
-                    return;
                 }
                 if (zf != null) {
                     try { zf.close(); } catch (Throwable ignored) {}
                 }
             }
+            if (attemptedLoad && !sLoaded.get()) {
+                sExtractionFailed.set(true);
+                if (lastLoadError != null) {
+                    XposedBridge.log("【VCAM】[NDK] Extraction load fallback: " + lastLoadError.getMessage());
+                }
+            }
         } catch (Throwable t) {
+            sExtractionFailed.set(true);
             XposedBridge.log("【VCAM】[NDK] Extraction load fallback: " + t.getMessage());
         }
     }
