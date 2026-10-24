@@ -210,8 +210,15 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
     );
 
     private static boolean isExcludedSystemPackage(@NonNull XC_LoadPackage.LoadPackageParam lpparam) {
+        int myAppId = android.os.Process.myUid() % 100000;
+        // Never hook core system UIDs (< 10000: root=0, system_server=1000, radio=1001, etc.)
+        // or isolated WebView/sandboxed processes (90000..99999)
+        if (myAppId < 10000 || (myAppId >= 90000 && myAppId <= 99999)) {
+            return true;
+        }
         String pkg = lpparam.packageName;
-        if (pkg == null || pkg.isEmpty()) return true;
+        if (pkg == null || pkg.isEmpty() || "android".equals(pkg) || "system".equals(pkg)) return true;
+        if ("system".equals(lpparam.processName) || "android".equals(lpparam.processName)) return true;
         if (EXCLUDED_SYSTEM_PACKAGES.contains(pkg)) return true;
         String lower = pkg.toLowerCase(java.util.Locale.ROOT);
         if (lower.contains("systemui") || lower.contains("keyguard")
@@ -223,12 +230,11 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
         }
         if (lpparam.appInfo != null) {
             int appId = lpparam.appInfo.uid % 100000;
-            // Never hook core system UIDs (< 10000: system_server=1000, radio=1001, bluetooth=1002, etc.)
-            if (appId > 0 && appId < 10000) {
+            if (appId < 10000 || (appId >= 90000 && appId <= 99999)) {
                 return true;
             }
         }
-        if ( isUserLockedDirectBoot()) {
+        if (isUserLockedDirectBoot()) {
             return true;
         }
         return false;
@@ -1151,15 +1157,22 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                             InAppOverlayManager.registerLifecycle((Application) ctx);
                         }
                         registerMappingUpdatedReceiver(toast_content);
-                        refreshConfigFromProvider(toast_content, lpparam.packageName);
-                        if (!isSelfManager && cfgOverlayHudEnabled) {
-                            InAppOverlayManager.setOverlayEnabled(true);
-                        }
                         resolveWritableVideoPath(toast_content);
-                        ensureStagedNow(lpparam.packageName);
-                        if (!isSelfManager) {
-                            NdkHookEngine.ensureInitialized(sModuleApkPath);
-                        }
+                        final Context asyncCtx = toast_content;
+                        stagingExecutor.execute(() -> {
+                            try {
+                                refreshConfigFromProvider(asyncCtx, lpparam.packageName);
+                                if (!isSelfManager && cfgOverlayHudEnabled) {
+                                    InAppOverlayManager.setOverlayEnabled(true);
+                                }
+                                ensureStagedNow(lpparam.packageName);
+                                if (!isSelfManager) {
+                                    NdkHookEngine.ensureInitialized(sModuleApkPath);
+                                }
+                            } catch (Throwable t) {
+                                XposedBridge.log("[VCAM][early-init-async] " + t);
+                            }
+                        });
                     } catch (Throwable t) {
                         XposedBridge.log("[VCAM][early-init] " + t);
                     }
@@ -1196,9 +1209,14 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                                     lastStagedKey = null;
                                     try {
                                         registerMappingUpdatedReceiver(toast_content);
-                                        refreshConfigFromProvider(toast_content, lpparam.packageName);
                                         resolveWritableVideoPath(toast_content);
-                                        ensureStagedNow(lpparam.packageName);
+                                        final Context asyncCtx = toast_content;
+                                        stagingExecutor.execute(() -> {
+                                            try {
+                                                refreshConfigFromProvider(asyncCtx, lpparam.packageName);
+                                                ensureStagedNow(lpparam.packageName);
+                                            } catch (Throwable ignored) {}
+                                        });
                                     } catch (Throwable ignored) {}
                                 }
                             }
@@ -2903,6 +2921,58 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
             XposedBridge.hookAllMethods(cmGlobal, "extractCameraIdListLocked", cameraIdListHook);
         } catch (Throwable ignored) {}
 
+        // Ensure CameraX / Persona SDK AvailabilityCallback always receives onCameraAvailable("0") and ("1")
+        // even when cameraserver is unavailable and CameraManagerGlobal.mDeviceStatus is empty.
+        try {
+            XposedBridge.hookAllMethods(CameraManager.class, "registerAvailabilityCallback", new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    if (param.hasThrowable()) {
+                        param.setThrowable(null);
+                    }
+                    if (param.args == null) return;
+                    CameraManager.AvailabilityCallback availCb = null;
+                    for (Object arg : param.args) {
+                        if (arg instanceof CameraManager.AvailabilityCallback) {
+                            availCb = (CameraManager.AvailabilityCallback) arg;
+                            break;
+                        }
+                    }
+                    if (availCb == null) return;
+                    final CameraManager.AvailabilityCallback finalCb = availCb;
+                    dispatchOnCameraCallbackThread(param.args, () -> {
+                        try {
+                            finalCb.onCameraAvailable("0");
+                            finalCb.onCameraAvailable("1");
+                        } catch (Throwable ignored) {}
+                    });
+                }
+            });
+        } catch (Throwable ignored) {}
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            try {
+                XposedBridge.hookAllMethods(CameraManager.class, "getConcurrentCameraIds", new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) {
+                        if (param.hasThrowable() || param.getResult() == null) {
+                            param.setThrowable(null);
+                            param.setResult(Collections.emptySet());
+                        }
+                    }
+                });
+                XposedBridge.hookAllMethods(CameraManager.class, "isConcurrentSessionConfigurationSupported", new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) {
+                        if (param.hasThrowable()) {
+                            param.setThrowable(null);
+                            param.setResult(Boolean.FALSE);
+                        }
+                    }
+                });
+            } catch (Throwable ignored) {}
+        }
+
         // Ensure CameraManager.getCameraCharacteristics(String) returns a valid synthetic
         // CameraCharacteristics when cameraserver is down or throws CameraAccessException
         try {
@@ -3338,6 +3408,7 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
             INITIALIZED_CAMERA_DEVICES.put(camera, Boolean.TRUE);
         }
         stopAllCamera2Feeders();
+        need_recreate = true;
         getOrCreateVirtualSinkSurface();
         NdkHookEngine.syncSensorProfile(activeLensProfile, currentFacing);
         ImuMotionCorrelator.getInstance().start(toast_content != null ? toast_content : resolveHostContext());
@@ -3431,13 +3502,21 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
      * EGL 1x1 Pbuffer consumer that drains {@code updateTexImage()} on every incoming HAL frame
      * so multi-stream / RECORD / STILL_CAPTURE sessions never stall the HAL BufferQueue.
      */
+    private static final Set<SurfaceTexture> ATTACHED_SINK_TEXTURES =
+            Collections.synchronizedSet(Collections.newSetFromMap(new WeakHashMap<>()));
+
     private static SurfaceTexture createManagedSinkSurfaceTexture() {
-        int texId = 32 + sRandom.nextInt(200);
         final SurfaceTexture st;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            st = new SurfaceTexture(texId, false);
+            // Create in detached mode so attachToGLContext(texId) succeeds on sSinkDrainThread
+            st = new SurfaceTexture(false);
         } else {
+            int texId = 32 + sRandom.nextInt(200);
             st = new SurfaceTexture(texId);
+            try {
+                st.detachFromGLContext();
+            } catch (Throwable ignored) {
+            }
         }
         st.setDefaultBufferSize(640, 480);
         attachSinkDrainListener(st);
@@ -3453,14 +3532,30 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                 sSinkDrainHandler = new Handler(sSinkDrainThread.getLooper());
                 sSinkDrainHandler.post(HookMain::initSinkEglContextOnDrainThread);
             }
+            final int texId = 32 + sRandom.nextInt(200);
             SurfaceTexture.OnFrameAvailableListener listener = surfaceTexture -> {
                 try {
+                    if (sEglDisplay == EGL14.EGL_NO_DISPLAY || sEglContext == EGL14.EGL_NO_CONTEXT) {
+                        initSinkEglContextOnDrainThread();
+                    }
                     if (sEglDisplay != EGL14.EGL_NO_DISPLAY && sEglContext != EGL14.EGL_NO_CONTEXT) {
+                        EGL14.eglMakeCurrent(sEglDisplay, sEglPbuffer, sEglPbuffer, sEglContext);
+                        if (ATTACHED_SINK_TEXTURES.add(surfaceTexture)) {
+                            try {
+                                surfaceTexture.attachToGLContext(texId);
+                            } catch (Throwable ignored) {
+                            }
+                        }
                         surfaceTexture.updateTexImage();
                     } else {
                         surfaceTexture.releaseTexImage();
                     }
-                } catch (Throwable ignored) {
+                } catch (Throwable t) {
+                    try {
+                        surfaceTexture.attachToGLContext(texId);
+                        surfaceTexture.updateTexImage();
+                    } catch (Throwable ignored) {
+                    }
                 }
             };
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
@@ -3507,22 +3602,34 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
             NdkHookEngine.updateVirtualSinkSurface(c2_virtual_surface);
             return c2_virtual_surface;
         }
-        if (c2_virtual_surface != null) {
-            try {
-                c2_virtual_surface.release();
-            } catch (Throwable ignored) {
-            }
-        }
-        if (c2_virtual_surfaceTexture != null) {
-            try {
-                c2_virtual_surfaceTexture.release();
-            } catch (Throwable ignored) {
-            }
-        }
+        final Surface oldSurface = c2_virtual_surface;
+        final SurfaceTexture oldSt = c2_virtual_surfaceTexture;
         c2_virtual_surfaceTexture = createManagedSinkSurfaceTexture();
         c2_virtual_surface = new Surface(c2_virtual_surfaceTexture);
         need_recreate = false;
         NdkHookEngine.updateVirtualSinkSurface(c2_virtual_surface);
+        if (oldSurface != null || oldSt != null) {
+            Runnable releaseOld = () -> {
+                if (oldSurface != null) {
+                    try {
+                        oldSurface.release();
+                    } catch (Throwable ignored) {
+                    }
+                }
+                if (oldSt != null) {
+                    ATTACHED_SINK_TEXTURES.remove(oldSt);
+                    try {
+                        oldSt.release();
+                    } catch (Throwable ignored) {
+                    }
+                }
+            };
+            if (sSinkDrainHandler != null) {
+                sSinkDrainHandler.postDelayed(releaseOld, 3000L);
+            } else {
+                releaseOld.run();
+            }
+        }
         return c2_virtual_surface;
     }
 
