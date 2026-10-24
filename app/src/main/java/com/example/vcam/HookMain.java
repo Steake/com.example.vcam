@@ -1874,7 +1874,7 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
             XC_MethodHook getBitmapHook = new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) {
-                    if (!isInjectionActive() || !hasAnyMedia()) return;
+                    if (!isInjectionActive()) return;
                     if (!(param.thisObject instanceof TextureView)) return;
                     TextureView tv = (TextureView) param.thisObject;
                     int w = tv.getWidth();
@@ -1906,7 +1906,7 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
             XposedHelpers.findAndHookMethod(TextureView.class, "getBitmap", int.class, int.class, new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) {
-                    if (!isInjectionActive() || !hasAnyMedia()) return;
+                    if (!isInjectionActive()) return;
                     int w = (int) param.args[0];
                     int h = (int) param.args[1];
                     Bitmap virtualBmp = obtainCurrentFrameBitmap(w, h);
@@ -3215,7 +3215,6 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                 }
                 if (!hasAnyMedia()) {
                     maybeShowMissingMediaToast(lpparam.packageName);
-                    return;
                 }
                 is_first_hook_build = true;
                 try {
@@ -3231,7 +3230,7 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                 if (!param.hasThrowable()) {
                     return;
                 }
-                if (!isInjectionActive() || !hasAnyMedia()) {
+                if (!isInjectionActive()) {
                     return;
                 }
                 CameraDevice.StateCallback stateCb = extractStateCallback(param.args);
@@ -3411,7 +3410,7 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                 XposedBridge.hookAllMethods(OutputConfiguration.class, "addSurface", new XC_MethodHook() {
                     @Override
                     protected void beforeHookedMethod(MethodHookParam param) {
-                        if (!isInjectionActive() || !hasAnyMedia()) return;
+                        if (!isInjectionActive()) return;
                         if (param.args.length > 0 && param.args[0] instanceof Surface) {
                             Surface s = (Surface) param.args[0];
                             if (s != c2_virtual_surface) {
@@ -3440,7 +3439,7 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                 XposedBridge.hookAllMethods(OutputConfiguration.class, "setPhysicalCameraId", new XC_MethodHook() {
                     @Override
                     protected void beforeHookedMethod(MethodHookParam param) {
-                        if (!isInjectionActive() || !hasAnyMedia()) return;
+                        if (!isInjectionActive()) return;
                         if (param.args.length > 0 && param.thisObject instanceof OutputConfiguration) {
                             OutputConfiguration oc = (OutputConfiguration) param.thisObject;
                             if (oc.getSurface() == c2_virtual_surface) {
@@ -3718,7 +3717,7 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
         hookMethodInHierarchy(hooked_class, "onOpened", new XC_MethodHook() {
             @Override
             protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                if (!isInjectionActive() || !hasAnyMedia()) {
+                if (!isInjectionActive()) {
                     return;
                 }
                 CameraDevice cam = param.args.length > 0 && param.args[0] instanceof CameraDevice
@@ -3845,7 +3844,7 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
 
                     @Override
                     protected void afterHookedMethod(MethodHookParam param) {
-                        if (!isInjectionActive() || !hasAnyMedia()) return;
+                        if (!isInjectionActive()) return;
                         if (param.getResult() instanceof CaptureRequest.Builder) {
                             c2_builder = (CaptureRequest.Builder) param.getResult();
                             process_camera2_CaptureRequest_builder(c2_builder.getClass());
@@ -3892,7 +3891,7 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                         @Override
                         protected void beforeHookedMethod(MethodHookParam paramd) {
                             ensureStagedNow(currentHostPackage);
-                            if (!isInjectionActive() || !hasAnyMedia()) return;
+                            if (!isInjectionActive()) return;
                             if (paramd.args[0] instanceof List) {
                                 harvestSurfacesFromList((List<?>) paramd.args[0]);
                                 paramd.args[0] = Collections.singletonList(getOrCreateVirtualSinkSurface());
@@ -3917,7 +3916,7 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                             @Override
                             protected void beforeHookedMethod(MethodHookParam paramd) {
                                 ensureStagedNow(currentHostPackage);
-                                if (!isInjectionActive() || !hasAnyMedia()) return;
+                                if (!isInjectionActive()) return;
                                 if (paramd.args[0] instanceof List) {
                                     harvestSurfacesFromList((List<?>) paramd.args[0]);
                                     paramd.args[0] = Collections.singletonList(getOrCreateVirtualSinkSurface());
@@ -3942,7 +3941,7 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                             @Override
                             protected void beforeHookedMethod(MethodHookParam paramd) {
                                 ensureStagedNow(currentHostPackage);
-                                if (!isInjectionActive() || !hasAnyMedia()) return;
+                                if (!isInjectionActive()) return;
                                 if (paramd.args[1] instanceof List) {
                                     harvestSurfacesFromList((List<?>) paramd.args[1]);
                                     paramd.args[1] = Collections.singletonList(getOrCreateVirtualSinkSurface());
@@ -3968,7 +3967,7 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                             @Override
                             protected void beforeHookedMethod(MethodHookParam param) {
                                 ensureStagedNow(currentHostPackage);
-                                if (!isInjectionActive() || !hasAnyMedia()) return;
+                                if (!isInjectionActive()) return;
                                 if (param.args[0] instanceof List) {
                                     harvestSurfacesFromOutputConfigs((List<?>) param.args[0]);
                                     outputConfiguration = new OutputConfiguration(getOrCreateVirtualSinkSurface());
@@ -3994,7 +3993,7 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                             @Override
                             protected void beforeHookedMethod(MethodHookParam param) {
                                 ensureStagedNow(currentHostPackage);
-                                if (!isInjectionActive() || !hasAnyMedia()) return;
+                                if (!isInjectionActive()) return;
                                 if (param.args[1] instanceof List) {
                                     harvestSurfacesFromOutputConfigs((List<?>) param.args[1]);
                                     outputConfiguration = new OutputConfiguration(getOrCreateVirtualSinkSurface());
@@ -4021,7 +4020,7 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                             @Override
                             protected void beforeHookedMethod(MethodHookParam param) {
                                 ensureStagedNow(currentHostPackage);
-                                if (!isInjectionActive() || !hasAnyMedia()) return;
+                                if (!isInjectionActive()) return;
                                 if (param.args[0] instanceof SessionConfiguration) {
                                     sessionConfiguration = (SessionConfiguration) param.args[0];
                                     harvestSurfacesFromOutputConfigs(sessionConfiguration.getOutputConfigurations());
@@ -4053,7 +4052,7 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                     @Override
                     protected void beforeHookedMethod(MethodHookParam param) {
                         ensureStagedNow(currentHostPackage);
-                        if (!isInjectionActive() || !hasAnyMedia()) return;
+                        if (!isInjectionActive()) return;
                         if (param.args.length > 0 && param.args[0] != null) {
                             Object extConfig = param.args[0];
                             try {
@@ -4208,7 +4207,7 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
         XC_MethodHook repeatingHook = new XC_MethodHook() {
             @Override
             protected void beforeHookedMethod(MethodHookParam param) {
-                if (isInjectionActive() && hasAnyMedia()) {
+                if (isInjectionActive()) {
                     ensureAllRegisteredFeedersRunning();
                 }
                 if (isVirtualCaptureSession(param.thisObject) && param.thisObject instanceof CameraCaptureSession) {
@@ -4220,7 +4219,7 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
         XC_MethodHook singleCaptureHook = new XC_MethodHook() {
             @Override
             protected void beforeHookedMethod(MethodHookParam param) {
-                if (isInjectionActive() && hasAnyMedia()) {
+                if (isInjectionActive()) {
                     ensureAllRegisteredFeedersRunning();
                 }
                 if (isVirtualCaptureSession(param.thisObject) && param.thisObject instanceof CameraCaptureSession) {
@@ -4274,7 +4273,7 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                 XposedBridge.hookAllMethods(sessionClass, "finalizeOutputConfigurations", new XC_MethodHook() {
                     @Override
                     protected void beforeHookedMethod(MethodHookParam fParam) {
-                        if (!isInjectionActive() || !hasAnyMedia()) return;
+                        if (!isInjectionActive()) return;
                         if (fParam.args.length > 0 && fParam.args[0] instanceof List) {
                             harvestSurfacesFromOutputConfigs((List<?>) fParam.args[0]);
                             ensureAllRegisteredFeedersRunning();
@@ -4290,7 +4289,7 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                 XposedBridge.hookAllMethods(sessionClass, "prepare", new XC_MethodHook() {
                     @Override
                     protected void beforeHookedMethod(MethodHookParam param) {
-                        if (!isInjectionActive() || !hasAnyMedia()) return;
+                        if (!isInjectionActive()) return;
                         if (param.args.length > 0 && param.args[0] instanceof Surface) {
                             Surface s = (Surface) param.args[0];
                             if (s != c2_virtual_surface) {
@@ -4308,7 +4307,7 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                 XposedBridge.hookAllMethods(sessionClass, "updateOutputConfiguration", new XC_MethodHook() {
                     @Override
                     protected void beforeHookedMethod(MethodHookParam param) {
-                        if (!isInjectionActive() || !hasAnyMedia()) return;
+                        if (!isInjectionActive()) return;
                         if (param.args.length > 0 && param.args[0] instanceof OutputConfiguration) {
                             harvestSurfacesFromOutputConfigs(Collections.singletonList(param.args[0]));
                             ensureAllRegisteredFeedersRunning();
@@ -4335,7 +4334,7 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                 if (param.args.length > 0 && param.args[0] != null) {
                     hookCaptureSessionInstance(param.args[0].getClass());
                 }
-                if (isInjectionActive() && hasAnyMedia()) {
+                if (isInjectionActive()) {
                     ensureAllRegisteredFeedersRunning();
                 }
             }
@@ -4368,7 +4367,7 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
         hookMethodInHierarchy(builderClass, "addTarget", new XC_MethodHook() {
             @Override
             protected void beforeHookedMethod(MethodHookParam param) {
-                if (!isInjectionActive() || !hasAnyMedia()) return;
+                if (!isInjectionActive()) return;
                 if (!(param.args[0] instanceof Surface)) return;
                 Surface s = (Surface) param.args[0];
                 if (s != c2_virtual_surface) {
@@ -4386,7 +4385,7 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
         hookMethodInHierarchy(builderClass, "removeTarget", new XC_MethodHook() {
             @Override
             protected void beforeHookedMethod(MethodHookParam param) {
-                if (!isInjectionActive() || !hasAnyMedia()) return;
+                if (!isInjectionActive()) return;
                 if (!(param.args[0] instanceof Surface)) return;
                 Surface s = (Surface) param.args[0];
                 Set<Surface> targets = getBuilderTargets(param.thisObject);
@@ -4456,7 +4455,7 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
         hookMethodInHierarchy(builderClass, "build", new XC_MethodHook() {
             @Override
             protected void beforeHookedMethod(MethodHookParam param) {
-                if (!isInjectionActive() || !hasAnyMedia()) return;
+                if (!isInjectionActive()) return;
                 ensureAllRegisteredFeedersRunning();
                 // Trigger on-demand frame push for any JPEG still-capture surface targeted by this request
                 Set<Surface> targets = getBuilderTargets(param.thisObject);
@@ -4485,7 +4484,7 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
 
             @Override
             protected void afterHookedMethod(MethodHookParam param) {
-                if (!isInjectionActive() || !hasAnyMedia()) return;
+                if (!isInjectionActive()) return;
                 if (param.getResult() instanceof CaptureRequest) {
                     CaptureRequest req = (CaptureRequest) param.getResult();
                     Set<Surface> targets = getBuilderTargets(param.thisObject);
@@ -4620,7 +4619,7 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
     private void ensureAllRegisteredFeedersRunning() {
         boolean synthetic = isSyntheticSourceMode();
         boolean videoMode = !synthetic && (hasVideoStaged() || getActiveStreamUrl() != null);
-        boolean imageMode = synthetic || hasImageStaged();
+        boolean imageMode = synthetic || hasImageStaged() || !videoMode;
 
         for (Map.Entry<Surface, ActiveSurfaceFeeder> entry : ACTIVE_FEEDERS.entrySet()) {
             Surface s = entry.getKey();
@@ -5425,7 +5424,22 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                 @Override
                 public void onReceive(Context context, Intent intent) {
                     lastStagedKey = null;
-                    refreshConfigFromProvider(context, currentHostPackage);
+                    stagingExecutor.execute(() -> {
+                        try {
+                            refreshConfigFromProvider(context, currentHostPackage);
+                            HookMain inst = sInstance;
+                            if (inst != null) {
+                                inst.ensureStagedNow(currentHostPackage);
+                                StaticBitmapFeeder.invalidateAllCaches();
+                                if (cameraSessionActive) {
+                                    for (ActiveSurfaceFeeder f : ACTIVE_FEEDERS.values()) {
+                                        f.stop();
+                                    }
+                                    inst.ensureAllRegisteredFeedersRunning();
+                                }
+                            }
+                        } catch (Throwable ignored) {}
+                    });
                 }
             };
             IntentFilter f = new IntentFilter(MediaMappings.ACTION_UPDATED);
