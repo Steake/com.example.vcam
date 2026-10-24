@@ -385,7 +385,10 @@ public final class ExifSynthesizer {
                                 param.setResult(CURRENT_PHOTOMETRY.computedIso);
                             } else if (CaptureResult.SENSOR_TIMESTAMP.getName().equals(name)) {
                                 if (isVirtual || param.getResult() == null) {
-                                    param.setResult(SystemClock.elapsedRealtimeNanos());
+                                    Object vts = param.thisObject != null
+                                            ? XposedHelpers.getAdditionalInstanceField(param.thisObject, "vcamTimestamp")
+                                            : null;
+                                    param.setResult(vts instanceof Long ? (Long) vts : CURRENT_PHOTOMETRY.frameTimestampNs);
                                 }
                             } else if (CaptureResult.CONTROL_AE_STATE.getName().equals(name)) {
                                 param.setResult(CameraMetadata.CONTROL_AE_STATE_CONVERGED);

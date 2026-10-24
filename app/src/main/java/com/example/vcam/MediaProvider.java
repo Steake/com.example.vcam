@@ -575,6 +575,8 @@ public class MediaProvider extends ContentProvider {
             android.content.Intent launch = new android.content.Intent(ctx, InjectedConfigActivity.class);
             launch.putExtra("target_package", targetPkg);
             launch.putExtra("current_facing", facing);
+            launch.putExtra(InjectedConfigActivity.EXTRA_CALLER_PACKAGE, targetPkg);
+            launch.putExtra(InjectedConfigActivity.EXTRA_CURRENT_FACING, facing);
             launch.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK
                     | android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP);
 
@@ -620,6 +622,12 @@ public class MediaProvider extends ContentProvider {
                         | android.app.Notification.FLAG_NO_CLEAR;
             }
             nm.notify(STATUS_NOTIF_ID, notif);
+            final android.app.Notification finalNotif = notif;
+            new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
+                try {
+                    nm.notify(STATUS_NOTIF_ID, finalNotif);
+                } catch (Throwable ignored) {}
+            }, 900L);
         } catch (Throwable ignored) {}
     }
 

@@ -102,26 +102,13 @@ public final class InAppOverlayManager {
 
             @Override
             public void onActivityResumed(@NonNull Activity activity) {
-                if (BuildConfig.APPLICATION_ID.equals(hostPkg)
-                        && !activity.getClass().getName().endsWith("CameraVerifyActivity")) {
-                    return;
-                }
-                currentActivityRef = new WeakReference<>(activity);
+                onHostActivityActive(activity, hostPkg);
                 HookMain.onHostActivityResumed(activity, hostPkg);
-                if (HookMain.isCameraSessionActive() && overlayEnabledFlag
-                        && HookMain.getActiveTransformConfig().overlayEnabled) {
-                    attachToActivity(activity, hostPkg);
-                }
-                if (lastBannerTitle != null && !bannerDismissedByUser) {
-                    attachStickyBannerToActivity(activity, lastBannerTitle,
-                            lastBannerBody != null ? lastBannerBody : "", hostPkg);
-                }
             }
 
             @Override
             public void onActivityPaused(@NonNull Activity activity) {
                 detachFromActivity(activity);
-                detachBannerFromActivity();
             }
 
             @Override
@@ -131,8 +118,56 @@ public final class InAppOverlayManager {
             public void onActivitySaveInstanceState(@NonNull Activity activity, @NonNull Bundle outState) {}
 
             @Override
-            public void onActivityDestroyed(@NonNull Activity activity) {}
+            public void onActivityDestroyed(@NonNull Activity activity) {
+                detachFromActivity(activity);
+            }
         });
+    }
+
+    public static void onHostActivityActive(@NonNull final Activity activity,
+                                            @NonNull final String hostPkg) {
+        if (BuildConfig.APPLICATION_ID.equals(hostPkg)
+                && !activity.getClass().getName().endsWith("CameraVerifyActivity")) {
+            return;
+        }
+        currentActivityRef = new WeakReference<>(activity);
+        if (HookMain.isCameraSessionActive() && overlayEnabledFlag
+                && HookMain.getActiveTransformConfig().overlayEnabled) {
+            mainHandler.post(() -> attachToActivity(activity, hostPkg));
+        }
+    }
+
+    @Nullable
+    private static Activity findTopRunningActivity() {
+        Activity cached = currentActivityRef != null ? currentActivityRef.get() : null;
+        if (cached != null && !cached.isFinishing() && !cached.isDestroyed()) {
+            return cached;
+        }
+        try {
+            Class<?> atClass = Class.forName("android.app.ActivityThread");
+            Object at = atClass.getMethod("currentActivityThread").invoke(null);
+            if (at == null) return null;
+            java.lang.reflect.Field f = atClass.getDeclaredField("mActivities");
+            f.setAccessible(true);
+            Object mapObj = f.get(at);
+            if (mapObj instanceof java.util.Map) {
+                for (Object record : ((java.util.Map<?, ?>) mapObj).values()) {
+                    if (record == null) continue;
+                    Class<?> recClass = record.getClass();
+                    java.lang.reflect.Field pausedField = recClass.getDeclaredField("paused");
+                    pausedField.setAccessible(true);
+                    java.lang.reflect.Field actField = recClass.getDeclaredField("activity");
+                    actField.setAccessible(true);
+                    Activity act = (Activity) actField.get(record);
+                    boolean paused = pausedField.getBoolean(record);
+                    if (act != null && !paused && !act.isFinishing() && !act.isDestroyed()) {
+                        currentActivityRef = new WeakReference<>(act);
+                        return act;
+                    }
+                }
+            }
+        } catch (Throwable ignored) {}
+        return null;
     }
 
     public static void setOverlayEnabled(final boolean enabled) {
@@ -158,7 +193,7 @@ public final class InAppOverlayManager {
     public static void onCameraSessionStarted(@NonNull final String hostPkg) {
         mainHandler.post(() -> {
             if (!overlayEnabledFlag || !HookMain.getActiveTransformConfig().overlayEnabled || sessionStealthHidden) return;
-            Activity act = currentActivityRef != null ? currentActivityRef.get() : null;
+            Activity act = findTopRunningActivity();
             if (act != null && !act.isFinishing() && !act.isDestroyed()) {
                 attachToActivity(act, hostPkg);
             }
@@ -167,37 +202,53 @@ public final class InAppOverlayManager {
 
     private static void attachToActivity(@NonNull final Activity activity,
                                          @NonNull final String hostPkg) {
+        if (BuildConfig.APPLICATION_ID.equals(hostPkg)
+                && !activity.getClass().getName().endsWith("CameraVerifyActivity")) {
+            return;
+        }
         if (sessionStealthHidden || !overlayEnabledFlag || !HookMain.getActiveTransformConfig().overlayEnabled) return;
         OverlayRootView existing = activeOverlayRef != null ? activeOverlayRef.get() : null;
         if (existing != null && existing.hostActivity == activity && existing.isAttachedToWindow()) {
+            existing.bringToFront();
             existing.refreshUiFromState();
             return;
         }
         detachCurrentOverlay();
 
-        // Post until after the Activity window token is ready
-        activity.getWindow().getDecorView().post(() -> {
+        View decorView = activity.getWindow() != null ? activity.getWindow().getDecorView() : null;
+        if (decorView == null) return;
+        decorView.post(() -> {
             if (activity.isFinishing() || activity.isDestroyed() || sessionStealthHidden) return;
+            OverlayRootView cur = activeOverlayRef != null ? activeOverlayRef.get() : null;
+            if (cur != null && cur.hostActivity == activity && cur.isAttachedToWindow()) {
+                cur.bringToFront();
+                cur.refreshUiFromState();
+                return;
+            }
             try {
-                WindowManager wm = activity.getWindowManager();
-                if (wm == null) return;
+                View dv = activity.getWindow().getDecorView();
+                if (!(dv instanceof ViewGroup)) return;
+                ViewGroup decorGroup = (ViewGroup) dv;
 
-                WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
-                        WindowManager.LayoutParams.WRAP_CONTENT,
-                        WindowManager.LayoutParams.WRAP_CONTENT,
-                        WindowManager.LayoutParams.TYPE_APPLICATION_PANEL,
-                        WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                                | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
-                                | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
-                        PixelFormat.TRANSLUCENT
+                FrameLayout.LayoutParams flp = new FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        Gravity.TOP | Gravity.START
                 );
-                lp.gravity = Gravity.TOP | Gravity.START;
-                lp.x = dp(activity, 12);
-                lp.y = dp(activity, 96);
-                lp.token = activity.getWindow().getDecorView().getWindowToken();
+                flp.leftMargin = dp(activity, 12);
+                flp.topMargin = dp(activity, 96);
 
-                OverlayRootView root = new OverlayRootView(activity, wm, lp, hostPkg);
-                wm.addView(root, lp);
+                WindowManager wm = activity.getWindowManager();
+                WindowManager.LayoutParams wlp = new WindowManager.LayoutParams();
+                wlp.x = flp.leftMargin;
+                wlp.y = flp.topMargin;
+
+                OverlayRootView root = new OverlayRootView(activity, wm, wlp, hostPkg, flp);
+                root.setElevation(dp(activity, 100));
+                root.setTranslationZ(dp(activity, 100));
+                root.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
+                decorGroup.addView(root, flp);
+                root.bringToFront();
                 activeOverlayRef = new WeakReference<>(root);
             } catch (Throwable t) {
                 XposedBridge.log("[VCAM][overlay] attach failed: " + t);
@@ -216,7 +267,11 @@ public final class InAppOverlayManager {
         OverlayRootView existing = activeOverlayRef != null ? activeOverlayRef.get() : null;
         if (existing != null) {
             try {
-                existing.windowManager.removeViewImmediate(existing);
+                if (existing.getParent() instanceof ViewGroup) {
+                    ((ViewGroup) existing.getParent()).removeView(existing);
+                } else if (existing.windowManager != null) {
+                    existing.windowManager.removeViewImmediate(existing);
+                }
             } catch (Throwable ignored) {}
             activeOverlayRef = null;
         }
@@ -229,9 +284,11 @@ public final class InAppOverlayManager {
         lastBannerBody = body;
         bannerDismissedByUser = false;
         mainHandler.post(() -> {
-            Activity act = currentActivityRef != null ? currentActivityRef.get() : null;
-            if (act != null && !act.isFinishing() && !act.isDestroyed()) {
-                attachStickyBannerToActivity(act, title, body, hostPkg);
+            OverlayRootView existing = activeOverlayRef != null ? activeOverlayRef.get() : null;
+            if (existing != null && existing.isAttachedToWindow()) {
+                existing.refreshUiFromState();
+            } else if (HookMain.isCameraSessionActive()) {
+                onCameraSessionStarted(hostPkg);
             }
         });
     }
@@ -355,6 +412,7 @@ public final class InAppOverlayManager {
         final Activity hostActivity;
         final WindowManager windowManager;
         final WindowManager.LayoutParams windowParams;
+        final FrameLayout.LayoutParams decorParams;
         final String hostPkg;
 
         private final View bubbleView;
@@ -375,13 +433,15 @@ public final class InAppOverlayManager {
         private int activeTab = 0; // 0 = PTZ, 1 = Playback/Cues, 2 = Sensor/Source
 
         OverlayRootView(@NonNull Activity activity,
-                        @NonNull WindowManager wm,
+                        @Nullable WindowManager wm,
                         @NonNull WindowManager.LayoutParams lp,
-                        @NonNull String hostPkg) {
+                        @NonNull String hostPkg,
+                        @NonNull FrameLayout.LayoutParams flp) {
             super(activity);
             this.hostActivity = activity;
             this.windowManager = wm;
             this.windowParams = lp;
+            this.decorParams = flp;
             this.hostPkg = hostPkg;
 
             pinchDetector = new ScaleGestureDetector(activity, new ScaleGestureDetector.SimpleOnScaleGestureListener() {
@@ -454,9 +514,7 @@ public final class InAppOverlayManager {
                             if (moved) {
                                 windowParams.x = Math.max(0, startWinX + Math.round(dx));
                                 windowParams.y = Math.max(0, startWinY + Math.round(dy));
-                                try {
-                                    windowManager.updateViewLayout(OverlayRootView.this, windowParams);
-                                } catch (Throwable ignored) {}
+                                applyOverlayPosition();
                             }
                             return true;
                         case MotionEvent.ACTION_UP:
@@ -531,7 +589,7 @@ public final class InAppOverlayManager {
                     } else if (ev.getActionMasked() == MotionEvent.ACTION_MOVE) {
                         windowParams.x = Math.max(0, startX + Math.round(ev.getRawX() - downX));
                         windowParams.y = Math.max(0, startY + Math.round(ev.getRawY() - downY));
-                        try { windowManager.updateViewLayout(OverlayRootView.this, windowParams); } catch (Throwable ignored) {}
+                        applyOverlayPosition();
                         return true;
                     }
                     return false;
@@ -884,14 +942,56 @@ public final class InAppOverlayManager {
             } catch (Throwable ignored) {}
         }
 
+        private final android.view.ViewTreeObserver.OnGlobalLayoutListener zOrderKeepTopListener = () -> {
+            try {
+                if (getParent() instanceof ViewGroup) {
+                    ViewGroup vg = (ViewGroup) getParent();
+                    if (vg.indexOfChild(OverlayRootView.this) < vg.getChildCount() - 1) {
+                        bringToFront();
+                    }
+                }
+            } catch (Throwable ignored) {}
+        };
+
+        @Override
+        protected void onAttachedToWindow() {
+            super.onAttachedToWindow();
+            try {
+                getViewTreeObserver().addOnGlobalLayoutListener(zOrderKeepTopListener);
+            } catch (Throwable ignored) {}
+        }
+
+        @Override
+        protected void onDetachedFromWindow() {
+            try {
+                getViewTreeObserver().removeOnGlobalLayoutListener(zOrderKeepTopListener);
+            } catch (Throwable ignored) {}
+            super.onDetachedFromWindow();
+        }
+
+        @Override
+        protected void dispatchDraw(Canvas canvas) {
+            if (!canvas.isHardwareAccelerated()) {
+                return;
+            }
+            super.dispatchDraw(canvas);
+        }
+
+        private void applyOverlayPosition() {
+            try {
+                decorParams.leftMargin = Math.max(0, windowParams.x);
+                decorParams.topMargin = Math.max(0, windowParams.y);
+                setLayoutParams(decorParams);
+                bringToFront();
+            } catch (Throwable ignored) {}
+        }
+
         private void setExpanded(boolean exp) {
             this.expanded = exp;
             bubbleView.setVisibility(exp ? GONE : VISIBLE);
             panelView.setVisibility(exp ? VISIBLE : GONE);
             refreshUiFromState();
-            try {
-                windowManager.updateViewLayout(this, windowParams);
-            } catch (Throwable ignored) {}
+            applyOverlayPosition();
         }
 
         private void switchTab(int tab) {

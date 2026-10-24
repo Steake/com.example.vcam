@@ -177,8 +177,17 @@ public class VideoToFrames implements Runnable {
                 extractor.setDataSource(videoFd);
             } else {
                 File videoFile = new File(videoFilePath);
-                if (!videoFile.exists()) return;
-                extractor.setDataSource(videoFilePath);
+                if (videoFile.length() <= 0 && !videoFile.exists()) return;
+                try {
+                    java.io.FileInputStream fis = new java.io.FileInputStream(videoFile);
+                    try {
+                        extractor.setDataSource(fis.getFD());
+                    } finally {
+                        try { fis.close(); } catch (Throwable ignored) {}
+                    }
+                } catch (Throwable t) {
+                    extractor.setDataSource(videoFilePath);
+                }
             }
             int trackIndex = selectTrack(extractor);
             if (trackIndex < 0) {
@@ -201,12 +210,7 @@ public class VideoToFrames implements Runnable {
                 XposedBridge.log("[VCAM][decoder] Unable to set decode color format, color format type " + decodeColorFormat + " not supported");
             }
             decodeFramesToImage(decoder, extractor, mediaFormat);
-            decoder.stop();
-            while (!stopDecode && HookMain.isLoopVideoActive()) {
-                extractor.seekTo(0, MediaExtractor.SEEK_TO_CLOSEST_SYNC);
-                decodeFramesToImage(decoder, extractor, mediaFormat);
-                decoder.stop();
-            }
+            try { decoder.stop(); } catch (Throwable ignored) {}
         } catch (Exception e) {
             XposedBridge.log("[VCAM][videofile] " + e.toString());
         } finally {
@@ -336,7 +340,15 @@ public class VideoToFrames implements Runnable {
                 int outputBufferId = decoder.dequeueOutputBuffer(info, DEFAULT_TIMEOUT_US);
                 if (outputBufferId >= 0) {
                     if ((info.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
-                        sawOutputEOS = true;
+                        if (!stopDecode && HookMain.isLoopVideoActive()) {
+                            extractor.seekTo(0, MediaExtractor.SEEK_TO_CLOSEST_SYNC);
+                            try { decoder.flush(); } catch (Throwable ignored) {}
+                            sawInputEOS = false;
+                            sawOutputEOS = false;
+                            is_first = false;
+                        } else {
+                            sawOutputEOS = true;
+                        }
                     }
                     boolean doRender = (info.size != 0);
                     if (doRender) {
@@ -374,10 +386,12 @@ public class VideoToFrames implements Runnable {
                                         int srcH = crop.height();
                                         updateLumaPhotometry(rawNv21, srcW, srcH);
 
+                                        HookMain.updateLatestRawVideoFrame(rawNv21, srcW, srcH);
                                         int dstW = targetWidth > 0 ? targetWidth : srcW;
                                         int dstH = targetHeight > 0 ? targetHeight : srcH;
                                         byte[] finalNv21;
                                         if (srcW == dstW && srcH == dstH
+                                                && (cfg.rotationMode <= 0)
                                                 && !cfg.mirrorH && !cfg.mirrorV
                                                 && cfg.zoom == 1.0f && cfg.panX == 0.0f && cfg.panY == 0.0f) {
                                             if (cfg.sensorGrainEnabled) {
@@ -436,6 +450,13 @@ public class VideoToFrames implements Runnable {
             outImg.setTimestamp(ExifSynthesizer.CURRENT_PHOTOMETRY.frameTimestampNs);
             Image.Plane[] planes = outImg.getPlanes();
             if (planes == null || planes.length < 3) return;
+            int imgW = outImg.getWidth() & ~1;
+            int imgH = outImg.getHeight() & ~1;
+            if (imgW > 0 && imgH > 0 && (imgW != w || imgH != h)) {
+                nv21 = scaleNv21Nearest(nv21, w, h, imgW, imgH, HookMain.getActiveTransformConfig());
+                w = imgW;
+                h = imgH;
+            }
             int ySize = w * h;
             // Convert NV21 (Y + interleaved VU) into Y, U, V planes via StaticBitmapFeeder.copyPlane
             StaticBitmapFeeder.copyPlane(planes[0], nv21, 0, w, h, 1);

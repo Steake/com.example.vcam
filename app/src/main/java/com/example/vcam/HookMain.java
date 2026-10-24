@@ -114,6 +114,9 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
     public static volatile byte[] latestVideoNv21 = null;
     public static volatile int latestVideoWidth = 0;
     public static volatile int latestVideoHeight = 0;
+    public static volatile byte[] latestRawVideoNv21 = null;
+    public static volatile int latestRawVideoWidth = 0;
+    public static volatile int latestRawVideoHeight = 0;
     public static byte[] input;
     public static int mhight;
     public static int mwidth;
@@ -559,6 +562,15 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
         return cfgPassthroughMode || activeTransformConfig.passthroughMode;
     }
 
+    public static void updateLatestRawVideoFrame(@Nullable byte[] nv21, int width, int height) {
+        if (nv21 == null || nv21.length <= 16 || width <= 0 || height <= 0) {
+            return;
+        }
+        latestRawVideoNv21 = nv21;
+        latestRawVideoWidth = width;
+        latestRawVideoHeight = height;
+    }
+
     public static void updateLatestVideoFrame(@Nullable byte[] nv21, int width, int height) {
         if (nv21 == null || nv21.length <= 16 || width <= 0 || height <= 0) {
             return;
@@ -569,11 +581,18 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
         latestVideoHeight = height;
     }
 
+    public static boolean hasActiveVideoFrame() {
+        byte[] raw = latestRawVideoNv21;
+        if (raw != null && latestRawVideoWidth > 0 && latestRawVideoHeight > 0) return true;
+        byte[] nv = latestVideoNv21;
+        return nv != null && latestVideoWidth > 0 && latestVideoHeight > 0;
+    }
+
     @Nullable
     public static Bitmap getLatestVideoFrameBitmap(int targetW, int targetH) {
-        byte[] nv21 = latestVideoNv21;
-        int w = latestVideoWidth;
-        int h = latestVideoHeight;
+        byte[] nv21 = latestRawVideoNv21 != null ? latestRawVideoNv21 : latestVideoNv21;
+        int w = latestRawVideoNv21 != null ? latestRawVideoWidth : latestVideoWidth;
+        int h = latestRawVideoNv21 != null ? latestRawVideoHeight : latestVideoHeight;
         if (nv21 != null && w > 0 && h > 0 && nv21.length >= w * h * 3 / 2) {
             Bitmap bmp = nv21ToBitmap(nv21, w, h);
             if (bmp != null) {
@@ -1246,6 +1265,15 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                 if (!isValidHostContext(ctx)) {
                     ctx = resolveHostContext();
                 }
+                if (!isSelfManager && ctx != null) {
+                    try {
+                        if (ctx instanceof Application) {
+                            InAppOverlayManager.registerLifecycle((Application) ctx, lpparam.packageName);
+                        } else if (ctx.getApplicationContext() instanceof Application) {
+                            InAppOverlayManager.registerLifecycle((Application) ctx.getApplicationContext(), lpparam.packageName);
+                        }
+                    } catch (Throwable ignored) {}
+                }
                 if (isValidHostContext(ctx) && (!isValidHostContext(toast_content) || is_first_hook_build)) {
                     boolean wasInvalid = !isValidHostContext(toast_content);
                     toast_content = ctx;
@@ -1254,9 +1282,6 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                         lastStagedKey = null;
                     }
                     try {
-                        if (!isSelfManager && ctx instanceof Application) {
-                            InAppOverlayManager.registerLifecycle((Application) ctx);
-                        }
                         registerMappingUpdatedReceiver(toast_content);
                         resolveWritableVideoPath(toast_content);
                         final Context asyncCtx = toast_content;
@@ -1313,6 +1338,9 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                     "onCreate", Bundle.class, new XC_MethodHook() {
                         @Override
                         protected void afterHookedMethod(MethodHookParam param) {
+                            if (param.thisObject instanceof Activity) {
+                                InAppOverlayManager.onHostActivityActive((Activity) param.thisObject, lpparam.packageName);
+                            }
                             if (!isValidHostContext(toast_content) && param.thisObject instanceof Context) {
                                 Context self = (Context) param.thisObject;
                                 Context actCtx = self.getApplicationContext();
@@ -1650,7 +1678,12 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                             imageReaderFormat = fmt;
                             if (param.getResult() instanceof ImageReader) {
                                 ImageReader ir = (ImageReader) param.getResult();
-                                IMAGE_READER_META.put(ir, new ReaderSurfaceMeta(w, h, fmt, ir, requestedFormat));
+                                ReaderSurfaceMeta meta = new ReaderSurfaceMeta(w, h, fmt, ir, requestedFormat);
+                                IMAGE_READER_META.put(ir, meta);
+                                try {
+                                    Surface s = ir.getSurface();
+                                    if (s != null) SURFACE_META_MAP.put(s, meta);
+                                } catch (Throwable ignored) {}
                             }
                         }
                     });
@@ -2966,11 +2999,17 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
 
     @Nullable
     private static TotalCaptureResult createVirtualTotalCaptureResult(@Nullable CaptureRequest request, long frameNum) {
+        return createVirtualTotalCaptureResult(request, frameNum, ExifSynthesizer.CURRENT_PHOTOMETRY.frameTimestampNs);
+    }
+
+    @Nullable
+    private static TotalCaptureResult createVirtualTotalCaptureResult(@Nullable CaptureRequest request, long frameNum, long timestampNs) {
         try {
             TotalCaptureResult res = (TotalCaptureResult) allocateUnsafeInstance(TotalCaptureResult.class);
             if (res != null) {
                 XposedHelpers.setAdditionalInstanceField(res, "vcamVirtualResult", Boolean.TRUE);
                 XposedHelpers.setAdditionalInstanceField(res, "vcamFrameNumber", frameNum);
+                XposedHelpers.setAdditionalInstanceField(res, "vcamTimestamp", timestampNs);
                 if (request != null) {
                     XposedHelpers.setAdditionalInstanceField(res, "vcamRequest", request);
                 }
@@ -3450,6 +3489,9 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                         if (param.args.length > 0 && param.args[0] instanceof Surface) {
                             Surface s = (Surface) param.args[0];
                             if (s != c2_virtual_surface) {
+                                if (param.thisObject != null) {
+                                    XposedHelpers.setAdditionalInstanceField(param.thisObject, "vcamOrigSurface", s);
+                                }
                                 registerTargetSurface(s);
                                 if (param.thisObject instanceof OutputConfiguration) {
                                     OutputConfiguration oc = (OutputConfiguration) param.thisObject;
@@ -4060,20 +4102,21 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                                 if (param.args[0] instanceof SessionConfiguration) {
                                     sessionConfiguration = (SessionConfiguration) param.args[0];
                                     harvestSurfacesFromOutputConfigs(sessionConfiguration.getOutputConfigurations());
-                                    outputConfiguration = new OutputConfiguration(getOrCreateVirtualSinkSurface());
-                                    fake_sessionConfiguration = new SessionConfiguration(
-                                            sessionConfiguration.getSessionType(),
-                                            Collections.singletonList(outputConfiguration),
-                                            sessionConfiguration.getExecutor(),
-                                            sessionConfiguration.getStateCallback());
-                                    param.args[0] = fake_sessionConfiguration;
                                     CameraCaptureSession.StateCallback cb = sessionConfiguration.getStateCallback();
                                     process_camera2_capture_session_callback(cb);
                                     if (isVirtualCameraDevice(param.thisObject)) {
                                         dispatchVirtualCaptureSession(
                                                 param.thisObject, cb, new Object[]{sessionConfiguration.getExecutor()});
                                         param.setResult(null);
+                                        return;
                                     }
+                                    outputConfiguration = new OutputConfiguration(getOrCreateVirtualSinkSurface());
+                                    fake_sessionConfiguration = new SessionConfiguration(
+                                            sessionConfiguration.getSessionType(),
+                                            Collections.singletonList(outputConfiguration),
+                                            sessionConfiguration.getExecutor(),
+                                             cb);
+                                    param.args[0] = fake_sessionConfiguration;
                                 }
                             }
                         });
@@ -4171,8 +4214,10 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                     return;
                 }
                 final long fn = sVirtualFrameNumber.incrementAndGet();
-                final long ts = android.os.SystemClock.elapsedRealtimeNanos();
-                final TotalCaptureResult result = createVirtualTotalCaptureResult(req, fn);
+                final long ts = ExifSynthesizer.CURRENT_PHOTOMETRY.frameTimestampNs > 0
+                        ? ExifSynthesizer.CURRENT_PHOTOMETRY.frameTimestampNs
+                        : android.os.SystemClock.elapsedRealtimeNanos();
+                final TotalCaptureResult result = createVirtualTotalCaptureResult(req, fn, ts);
                 if (result != null) {
                     dispatchOnCameraCallbackThread(cbArgs, () -> {
                         try {
@@ -4379,7 +4424,17 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
         hookMethodInHierarchy(cbClass, "onConfigureFailed", new XC_MethodHook() {
             @Override
             protected void beforeHookedMethod(MethodHookParam param) {
-                XposedBridge.log("[VCAM] Session onConfigureFailed");
+                XposedBridge.log("[VCAM] Session onConfigureFailed -> recovering as virtual session");
+                if (isInjectionActive() && param.args.length > 0 && param.args[0] instanceof CameraCaptureSession) {
+                    CameraCaptureSession sess = (CameraCaptureSession) param.args[0];
+                    XposedHelpers.setAdditionalInstanceField(sess, "vcamVirtualSession", Boolean.TRUE);
+                    hookCaptureSessionInstance(sess.getClass());
+                    ensureAllRegisteredFeedersRunning();
+                    if (param.thisObject instanceof CameraCaptureSession.StateCallback) {
+                        param.setResult(null);
+                        ((CameraCaptureSession.StateCallback) param.thisObject).onConfigured(sess);
+                    }
+                }
             }
         }, CameraCaptureSession.class);
     }
@@ -4600,6 +4655,10 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
             if (obj instanceof OutputConfiguration) {
                 OutputConfiguration oc = (OutputConfiguration) obj;
                 try {
+                    Object orig = XposedHelpers.getAdditionalInstanceField(oc, "vcamOrigSurface");
+                    if (orig instanceof Surface && orig != c2_virtual_surface) {
+                        registerTargetSurface((Surface) orig);
+                    }
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                         List<Surface> surfaces = oc.getSurfaces();
                         if (surfaces != null) {
@@ -4629,16 +4688,23 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
             return;
         }
         ReaderSurfaceMeta meta = SURFACE_META_MAP.get(s);
+        // Only classify as ImageReader when explicitly tracked in SURFACE_META_MAP!
+        // Preview surfaces (SurfaceView / SurfaceTexture) also have s.toString() containing
+        // "Surface(name=null)" and MUST remain isReader = false (FORMAT_PREVIEW)!
         boolean isReader = (meta != null);
-        if (!isReader) {
-            String str = s.toString();
-            if (str != null && str.contains("Surface(name=null)")) {
-                isReader = true;
-            }
-        }
         int w = meta != null ? meta.width : c2_ori_width;
         int h = meta != null ? meta.height : c2_ori_height;
-        int fmt = meta != null ? meta.format : (isReader ? ImageFormat.YUV_420_888 : StaticBitmapFeeder.FORMAT_PREVIEW);
+        if (!isReader) {
+            try {
+                Class<?> su = Class.forName("android.hardware.camera2.utils.SurfaceUtils");
+                android.util.Size sz = (android.util.Size) su.getMethod("getSurfaceSize", Surface.class).invoke(null, s);
+                if (sz != null && sz.getWidth() > 0 && sz.getHeight() > 0) {
+                    w = sz.getWidth();
+                    h = sz.getHeight();
+                }
+            } catch (Throwable ignored) {}
+        }
+        int fmt = meta != null ? meta.format : StaticBitmapFeeder.FORMAT_PREVIEW;
 
         if (isReader) {
             if (c2_reader_Surfcae == null) c2_reader_Surfcae = s;
@@ -4657,6 +4723,7 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
         boolean videoMode = !synthetic && (hasVideoStaged() || getActiveStreamUrl() != null);
         boolean imageMode = synthetic || hasImageStaged() || !videoMode;
 
+        boolean hasRunningVideoDecoder = false;
         for (Map.Entry<Surface, ActiveSurfaceFeeder> entry : ACTIVE_FEEDERS.entrySet()) {
             Surface s = entry.getKey();
             ActiveSurfaceFeeder feeder = entry.getValue();
@@ -4665,10 +4732,44 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                 ACTIVE_FEEDERS.remove(s);
                 continue;
             }
+            if (feeder.videoDecoder != null) {
+                hasRunningVideoDecoder = true;
+            }
             if (feeder.isRunning()) {
                 continue;
             }
             startFeederInstance(feeder, videoMode, imageMode);
+            if (feeder.videoDecoder != null) {
+                hasRunningVideoDecoder = true;
+            }
+        }
+
+        // Guarantee background VideoToFrames decoder is populating latestRawVideoNv21/latestVideoNv21
+        // whenever videoMode is active even if only Preview/JPEG surfaces are registered.
+        if (videoMode && !hasRunningVideoDecoder && c2_hw_decode_obj == null) {
+            try {
+                VideoToFrames bgVtf = new VideoToFrames();
+                bgVtf.setTargetDimensions(c2_ori_width > 0 ? c2_ori_width : 1280,
+                        c2_ori_height > 0 ? c2_ori_height : 720);
+                bgVtf.setSaveFrames("", OutputImageFormat.NV21);
+                String streamUrl = getActiveStreamUrl();
+                File localVid = resolveBestVideoFile();
+                if (streamUrl != null) {
+                    bgVtf.decodeStream(streamUrl);
+                    c2_hw_decode_obj = bgVtf;
+                } else if (localVid != null) {
+                    bgVtf.decode(localVid.getAbsolutePath());
+                    c2_hw_decode_obj = bgVtf;
+                } else {
+                    ParcelFileDescriptor pfd = openActiveVideoPfd();
+                    if (pfd != null) {
+                        bgVtf.decode(pfd.getFileDescriptor());
+                        c2_hw_decode_obj = bgVtf;
+                    }
+                }
+            } catch (Throwable t) {
+                XposedBridge.log("[VCAM] bg VideoToFrames start failed: " + t);
+            }
         }
     }
 
@@ -4723,49 +4824,14 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                 }
             }
         } else {
-            // Preview / Encoder / SurfaceView / TextureView surface:
-            if (videoMode) {
-                try {
-                    MediaPlayer mp = new MediaPlayer();
-                    mp.setSurface(s);
-                    if (cfgMute) {
-                        mp.setVolume(0f, 0f);
-                    }
-                    mp.setLooping(cfgLoopVideo);
-                    int scalingMode = TransformConfig.ASPECT_FILL.equals(activeTransformConfig.aspectMode)
-                            ? MediaPlayer.VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING
-                            : MediaPlayer.VIDEO_SCALING_MODE_SCALE_TO_FIT;
-                    try {
-                        mp.setVideoScalingMode(scalingMode);
-                    } catch (Throwable ignored) {
-                    }
-                    mp.setOnPreparedListener(MediaPlayer::start);
-                    String streamUrl = getActiveStreamUrl();
-                    File localVid = resolveBestVideoFile();
-                    if (streamUrl != null) {
-                        mp.setDataSource(streamUrl);
-                    } else if (localVid != null) {
-                        mp.setDataSource(localVid.getAbsolutePath());
-                    } else {
-                        ParcelFileDescriptor pfd = openActiveVideoPfd();
-                        if (pfd != null) {
-                            feeder.playerPfd = pfd;
-                            mp.setDataSource(pfd.getFileDescriptor());
-                        }
-                    }
-                    mp.prepare();
-                    feeder.mediaPlayer = mp;
-                } catch (Throwable t) {
-                    XposedBridge.log("[VCAM] Preview MediaPlayer failed, using StaticBitmapFeeder: " + t);
-                    StaticBitmapFeeder sbf = new StaticBitmapFeeder(s, bestImg, w, h,
-                            StaticBitmapFeeder.FORMAT_PREVIEW);
-                    feeder.bitmapFeeder = sbf;
-                }
-            } else if (imageMode) {
-                StaticBitmapFeeder sbf = new StaticBitmapFeeder(s, bestImg, w, h,
-                        StaticBitmapFeeder.FORMAT_PREVIEW);
-                feeder.bitmapFeeder = sbf;
-            }
+            // Preview / SurfaceView / TextureView surface:
+            // Use StaticBitmapFeeder with FORMAT_PREVIEW for BOTH imageMode and videoMode!
+            // In videoMode, StaticBitmapFeeder renders live decoded frames from getLatestVideoFrameBitmap()
+            // with full in-process PTZ (zoom, pan, rotate, mirror, brightness, WB, freeze-frame)
+            // directly onto the Preview Surface without external mediaserver EACCES failures.
+            StaticBitmapFeeder sbf = new StaticBitmapFeeder(s, bestImg, w, h,
+                    StaticBitmapFeeder.FORMAT_PREVIEW);
+            feeder.bitmapFeeder = sbf;
         }
     }
 
@@ -5090,6 +5156,8 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
     public static void onHostActivityResumed(@NonNull Activity activity, @NonNull String hostPkg) {
         HookMain inst = sInstance;
         if (inst == null) return;
+        final String pkg = (hostPkg != null && !hostPkg.isEmpty()) ? hostPkg : currentHostPackage;
+        InAppOverlayManager.onHostActivityActive(activity, pkg);
         Context appCtx = activity.getApplicationContext();
         if (!isValidHostContext(appCtx)) appCtx = activity;
         if (isValidHostContext(appCtx)) {
@@ -5097,20 +5165,7 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
             registerMappingUpdatedReceiver(appCtx);
             inst.resolveWritableVideoPath(appCtx);
         }
-        if (!notifPermRequestedOnHost && Build.VERSION.SDK_INT >= 33
-                && !BuildConfig.APPLICATION_ID.equals(hostPkg)) {
-            notifPermRequestedOnHost = true;
-            try {
-                NotificationManager nm = (NotificationManager)
-                        activity.getSystemService(Context.NOTIFICATION_SERVICE);
-                if (nm != null && !nm.areNotificationsEnabled()) {
-                    activity.requestPermissions(
-                            new String[]{"android.permission.POST_NOTIFICATIONS"}, 0x7CA5);
-                }
-            } catch (Throwable ignored) {}
-        }
         lastStagedKey = null;
-        final String pkg = (hostPkg != null && !hostPkg.isEmpty()) ? hostPkg : currentHostPackage;
         stagingExecutor.execute(() -> {
             try {
                 inst.ensureStagedNow(pkg);

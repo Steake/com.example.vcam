@@ -202,7 +202,21 @@ public class StaticBitmapFeeder {
             if (synth == null) return false;
             cachedTransformedBitmap = synth;
             rebuildEncodedBuffers(synth, cfg);
-            return true;
+            return surfaceFormat == FORMAT_PREVIEW ? (cachedTransformedBitmap != null)
+                    : ((surfaceFormat == ImageFormat.JPEG || surfaceFormat == 256) ? cachedJpeg != null : cachedI420 != null);
+        }
+
+        // Live video frame priority: when a video is actively decoded, render the live video frame
+        // with full PTZ transforms so preview surfaces and JPEG captures reflect live video + PTZ!
+        if (HookMain.hasActiveVideoFrame()) {
+            Bitmap videoBmp = HookMain.getLatestVideoFrameBitmap(width, height);
+            if (videoBmp != null) {
+                cachedTransformedBitmap = FrameTransformPipeline.renderToBitmap(
+                        videoBmp, 0, width, height, cfg, cachedTransformedBitmap);
+                rebuildEncodedBuffers(cachedTransformedBitmap, cfg);
+                return surfaceFormat == FORMAT_PREVIEW ? (cachedTransformedBitmap != null)
+                        : ((surfaceFormat == ImageFormat.JPEG || surfaceFormat == 256) ? cachedJpeg != null : cachedI420 != null);
+            }
         }
 
         File f = HookMain.resolveBestImageFile(bitmapPath);
@@ -213,15 +227,17 @@ public class StaticBitmapFeeder {
                 cachedTransformedBitmap = FrameTransformPipeline.renderToBitmap(
                         providerBmp, 0, width, height, cfg, cachedTransformedBitmap);
                 rebuildEncodedBuffers(cachedTransformedBitmap, cfg);
-                return cachedJpeg != null && cachedI420 != null;
+                return surfaceFormat == FORMAT_PREVIEW ? (cachedTransformedBitmap != null)
+                        : ((surfaceFormat == ImageFormat.JPEG || surfaceFormat == 256) ? cachedJpeg != null : cachedI420 != null);
             }
-            // Video-only fallback: if a video is actively decoded, synthesize from the latest video frame
+            // Video fallback via MediaMetadataRetriever if VideoToFrames hasn't emitted its first frame yet
             Bitmap videoBmp = HookMain.getLatestVideoFrameBitmap(width, height);
             if (videoBmp != null) {
                 cachedTransformedBitmap = FrameTransformPipeline.renderToBitmap(
                         videoBmp, 0, width, height, cfg, cachedTransformedBitmap);
                 rebuildEncodedBuffers(cachedTransformedBitmap, cfg);
-                return cachedJpeg != null && cachedI420 != null;
+                return surfaceFormat == FORMAT_PREVIEW ? (cachedTransformedBitmap != null)
+                        : ((surfaceFormat == ImageFormat.JPEG || surfaceFormat == 256) ? cachedJpeg != null : cachedI420 != null);
             }
             return false;
         }
@@ -230,12 +246,15 @@ public class StaticBitmapFeeder {
         long inv = cacheInvalidationCounter;
         String sig = buildTransformSignature(cfg);
 
+        boolean buffersReady = (surfaceFormat == FORMAT_PREVIEW)
+                || ((surfaceFormat == ImageFormat.JPEG || surfaceFormat == 256) ? cachedJpeg != null : cachedI420 != null);
+
         if (cachedTransformedBitmap != null && !cachedTransformedBitmap.isRecycled()
-                && cachedJpeg != null && cachedI420 != null
+                && buffersReady
                 && mtime == cachedMtime && size == cachedSize
                 && inv == observedInvalidationCounter
                 && sig.equals(cachedTransformSig)) {
-            if (cfg.sensorGrainEnabled) {
+            if (cfg.sensorGrainEnabled && cachedI420 != null && surfaceFormat != FORMAT_PREVIEW) {
                 FrameTransformPipeline.applyLumaGrainInPlace(cachedI420, width, height);
             }
             return true;
@@ -259,19 +278,27 @@ public class StaticBitmapFeeder {
         cachedSize = size;
         observedInvalidationCounter = inv;
         cachedTransformSig = sig;
-        return cachedJpeg != null && cachedI420 != null;
+        return surfaceFormat == FORMAT_PREVIEW ? (cachedTransformedBitmap != null)
+                : ((surfaceFormat == ImageFormat.JPEG || surfaceFormat == 256) ? cachedJpeg != null : cachedI420 != null);
     }
 
     private void rebuildEncodedBuffers(@NonNull Bitmap transformed, @NonNull TransformConfig cfg) {
         SensorProfiler.LensProfile profile = HookMain.getActiveLensProfile();
         ExifSynthesizer.updatePhotometryFromBitmap(transformed, profile, HookMain.getCurrentFacing());
 
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-        transformed.compress(Bitmap.CompressFormat.JPEG, 94, out);
-        byte[] rawJpeg = out.toByteArray();
-        cachedJpeg = cfg.exifSynthEnabled
-                ? ExifSynthesizer.injectExif(rawJpeg, width, height, profile)
-                : rawJpeg;
+        if (surfaceFormat == FORMAT_PREVIEW) {
+            return;
+        }
+
+        if (surfaceFormat == ImageFormat.JPEG || surfaceFormat == 256) {
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            transformed.compress(Bitmap.CompressFormat.JPEG, 94, out);
+            byte[] rawJpeg = out.toByteArray();
+            cachedJpeg = cfg.exifSynthEnabled
+                    ? ExifSynthesizer.injectExif(rawJpeg, width, height, profile)
+                    : rawJpeg;
+            return;
+        }
 
         int ySize = width * height;
         if (argbScratch == null || argbScratch.length < ySize) {
@@ -282,6 +309,7 @@ public class StaticBitmapFeeder {
         try {
             byte[] nv21 = FrameTransformPipeline.bitmapToNv21(transformed);
             if (nv21 != null && nv21.length > 0) {
+                HookMain.data_buffer = nv21;
                 NdkHookEngine.updateFrameBuffer(nv21, width, height);
             }
         } catch (Throwable ignored) {}
@@ -332,11 +360,24 @@ public class StaticBitmapFeeder {
             ExifSynthesizer.CURRENT_PHOTOMETRY.frameTimestampNs = android.os.SystemClock.elapsedRealtimeNanos();
             img.setTimestamp(ExifSynthesizer.CURRENT_PHOTOMETRY.frameTimestampNs);
             Image.Plane[] planes = img.getPlanes();
-            int ySize = width * height;
+            if (planes == null || planes.length < 3) return;
+            int imgW = img.getWidth() & ~1;
+            int imgH = img.getHeight() & ~1;
+            byte[] i420 = cachedI420;
+            int useW = width;
+            int useH = height;
+            if (imgW > 0 && imgH > 0 && (imgW != width || imgH != height) && cachedTransformedBitmap != null) {
+                Bitmap scaled = Bitmap.createScaledBitmap(cachedTransformedBitmap, imgW, imgH, true);
+                int[] scratch = new int[imgW * imgH];
+                i420 = FrameTransformPipeline.bitmapToI420(scaled, cfg.sensorGrainEnabled, scratch, null);
+                useW = imgW;
+                useH = imgH;
+            }
+            int ySize = useW * useH;
             int uvSize = ySize / 4;
-            copyPlane(planes[0], cachedI420, 0, width, height, 1);
-            copyPlane(planes[1], cachedI420, ySize, width / 2, height / 2, 1);
-            copyPlane(planes[2], cachedI420, ySize + uvSize, width / 2, height / 2, 1);
+            copyPlane(planes[0], i420, 0, useW, useH, 1);
+            copyPlane(planes[1], i420, ySize, useW / 2, useH / 2, 1);
+            copyPlane(planes[2], i420, ySize + uvSize, useW / 2, useH / 2, 1);
             w.queueInputImage(img);
             img = null;
         } finally {
@@ -400,16 +441,17 @@ public class StaticBitmapFeeder {
         if (s == null || !s.isValid() || bmp == null || bmp.isRecycled()) return;
         Canvas c = null;
         try {
-            c = s.lockCanvas(null);
-            if (c == null) return;
-            if (rawSourceBitmap != null && !rawSourceBitmap.isRecycled()
-                    && TransformConfig.SOURCE_MEDIA.equals(cfg.sourceMode)) {
-                FrameTransformPipeline.drawTransformedBitmap(
-                        c, rawSourceBitmap, rawSourceRotation, cfg, null);
-            } else {
-                FrameTransformPipeline.drawTransformedBitmap(
-                        c, bmp, 0, cfg, null);
+            try {
+                c = s.lockCanvas(null);
+            } catch (Throwable lockErr) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    c = s.lockHardwareCanvas();
+                }
             }
+            if (c == null) return;
+            c.drawColor(android.graphics.Color.BLACK);
+            android.graphics.Rect dstRect = new android.graphics.Rect(0, 0, c.getWidth(), c.getHeight());
+            c.drawBitmap(bmp, null, dstRect, null);
         } catch (Throwable t) {
             // Gracefully handle surfaces that have active hardware renderers (EGL/Vulkan) or are already locked
         } finally {
