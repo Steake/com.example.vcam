@@ -1052,6 +1052,31 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                     "checkPermission", String.class, String.class, grantIfStorage);
         } catch (Throwable ignored) {
         }
+        try {
+            final XC_MethodHook featureHook = new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    if (param.args == null || param.args.length == 0 || !(param.args[0] instanceof String)) return;
+                    String feat = (String) param.args[0];
+                    if ("android.hardware.camera".equals(feat)
+                            || "android.hardware.camera.front".equals(feat)
+                            || "android.hardware.camera.any".equals(feat)
+                            || "android.hardware.camera.autofocus".equals(feat)
+                            || "android.hardware.camera.flash".equals(feat)
+                            || "android.hardware.camera.level.full".equals(feat)
+                            || "android.hardware.camera.capability.manual_sensor".equals(feat)
+                            || "android.hardware.camera.capability.manual_post_processing".equals(feat)
+                            || "android.hardware.camera.capability.raw".equals(feat)) {
+                        param.setResult(Boolean.TRUE);
+                    }
+                }
+            };
+            XposedHelpers.findAndHookMethod("android.app.ApplicationPackageManager", lpparam.classLoader,
+                    "hasSystemFeature", String.class, featureHook);
+            XposedHelpers.findAndHookMethod("android.app.ApplicationPackageManager", lpparam.classLoader,
+                    "hasSystemFeature", String.class, int.class, featureHook);
+        } catch (Throwable ignored) {
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             try {
                 XposedHelpers.findAndHookMethod("android.os.Environment", lpparam.classLoader,
