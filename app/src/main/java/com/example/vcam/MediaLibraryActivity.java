@@ -137,9 +137,26 @@ public class MediaLibraryActivity extends AppCompatActivity {
             Toast.makeText(this, R.string.media_import_failed, Toast.LENGTH_SHORT).show();
             return;
         }
+        VCAMApp.ensureWorldReadableLibraryDirs(this);
+        MediaMappings.setOne(this, MediaMappings.PKG_GLOBAL, MediaMappings.FACING_ANY,
+                e.type, e.uri().toString());
+        try {
+            File srcFile = MediaLibrary.fileFor(this, e);
+            File dst = MediaLibrary.TYPE_IMAGE.equals(e.type)
+                    ? MediaPaths.getImageTarget(this)
+                    : MediaPaths.getVideoTarget(this);
+            MediaPaths.copyFile(srcFile, dst);
+        } catch (Throwable ignored) {}
         Toast.makeText(this,
                 getString(R.string.media_imported_format, MediaPaths.humanBytes(e.size)),
                 Toast.LENGTH_SHORT).show();
+        MediaProvider.postStickyStatusNotification(
+                this,
+                "VCAM Media Staged (" + type + ")",
+                e.name + " • " + MediaPaths.humanBytes(e.size) + " set as active replacement",
+                MediaMappings.PKG_GLOBAL,
+                MediaMappings.FACING_ANY,
+                true);
         refresh();
     }
 

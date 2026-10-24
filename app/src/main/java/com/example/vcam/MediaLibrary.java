@@ -71,11 +71,22 @@ public final class MediaLibrary {
     /** Root directory holding per-id files. Created lazily. */
     @NonNull
     public static File libraryDir(@NonNull Context ctx) {
-        File d = new File(ctx.getFilesDir(), DIR);
+        File files = ctx.getFilesDir();
+        if (files != null) {
+            //noinspection ResultOfMethodCallIgnored
+            files.setExecutable(true, false);
+            //noinspection ResultOfMethodCallIgnored
+            files.setReadable(true, false);
+        }
+        File d = new File(files, DIR);
         if (!d.exists()) {
             //noinspection ResultOfMethodCallIgnored
             d.mkdirs();
         }
+        //noinspection ResultOfMethodCallIgnored
+        d.setExecutable(true, false);
+        //noinspection ResultOfMethodCallIgnored
+        d.setReadable(true, false);
         return d;
     }
 
@@ -192,6 +203,8 @@ public final class MediaLibrary {
             dst.delete();
             return null;
         }
+        //noinspection ResultOfMethodCallIgnored
+        dst.setReadable(true, false);
         Entry e = new Entry(id, type,
                 TextUtils.isEmpty(displayName) ? (type + "-" + id) : displayName,
                 bytes, System.currentTimeMillis());
@@ -222,6 +235,8 @@ public final class MediaLibrary {
             dst.delete();
             return null;
         }
+        //noinspection ResultOfMethodCallIgnored
+        dst.setReadable(true, false);
         Entry e = new Entry(id, type,
                 TextUtils.isEmpty(displayName) ? src.getName() : displayName,
                 dst.length(), System.currentTimeMillis());

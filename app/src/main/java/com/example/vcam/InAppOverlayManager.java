@@ -74,6 +74,10 @@ public final class InAppOverlayManager {
     private static volatile boolean overlayEnabledFlag = true;
     private static WeakReference<Activity> currentActivityRef;
     private static WeakReference<OverlayRootView> activeOverlayRef;
+    private static WeakReference<View> activeBannerRef;
+    private static volatile String lastBannerTitle = null;
+    private static volatile String lastBannerBody = null;
+    private static volatile boolean bannerDismissedByUser = false;
     private static boolean sessionStealthHidden = false;
     private static final Handler mainHandler = new Handler(Looper.getMainLooper());
 
@@ -103,15 +107,21 @@ public final class InAppOverlayManager {
                     return;
                 }
                 currentActivityRef = new WeakReference<>(activity);
+                HookMain.onHostActivityResumed(activity, hostPkg);
                 if (HookMain.isCameraSessionActive() && overlayEnabledFlag
                         && HookMain.getActiveTransformConfig().overlayEnabled) {
                     attachToActivity(activity, hostPkg);
+                }
+                if (lastBannerTitle != null && !bannerDismissedByUser) {
+                    attachStickyBannerToActivity(activity, lastBannerTitle,
+                            lastBannerBody != null ? lastBannerBody : "", hostPkg);
                 }
             }
 
             @Override
             public void onActivityPaused(@NonNull Activity activity) {
                 detachFromActivity(activity);
+                detachBannerFromActivity();
             }
 
             @Override
@@ -210,6 +220,126 @@ public final class InAppOverlayManager {
             } catch (Throwable ignored) {}
             activeOverlayRef = null;
         }
+    }
+
+    public static void showStickyStatusBanner(@NonNull final String title,
+                                              @NonNull final String body,
+                                              @NonNull final String hostPkg) {
+        lastBannerTitle = title;
+        lastBannerBody = body;
+        bannerDismissedByUser = false;
+        mainHandler.post(() -> {
+            Activity act = currentActivityRef != null ? currentActivityRef.get() : null;
+            if (act != null && !act.isFinishing() && !act.isDestroyed()) {
+                attachStickyBannerToActivity(act, title, body, hostPkg);
+            }
+        });
+    }
+
+    private static void detachBannerFromActivity() {
+        View existing = activeBannerRef != null ? activeBannerRef.get() : null;
+        if (existing != null) {
+            try {
+                Context ctx = existing.getContext();
+                if (ctx instanceof Activity) {
+                    WindowManager wm = ((Activity) ctx).getWindowManager();
+                    if (wm != null) wm.removeViewImmediate(existing);
+                }
+            } catch (Throwable ignored) {}
+            activeBannerRef = null;
+        }
+    }
+
+    private static void attachStickyBannerToActivity(@NonNull final Activity activity,
+                                                     @NonNull final String title,
+                                                     @NonNull final String body,
+                                                     @NonNull final String hostPkg) {
+        if (BuildConfig.APPLICATION_ID.equals(hostPkg)
+                && !activity.getClass().getName().endsWith("CameraVerifyActivity")) {
+            return;
+        }
+        activity.getWindow().getDecorView().post(() -> {
+            if (activity.isFinishing() || activity.isDestroyed() || bannerDismissedByUser) return;
+            try {
+                detachBannerFromActivity();
+                final WindowManager wm = activity.getWindowManager();
+                if (wm == null) return;
+
+                WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
+                        WindowManager.LayoutParams.WRAP_CONTENT,
+                        WindowManager.LayoutParams.WRAP_CONTENT,
+                        WindowManager.LayoutParams.TYPE_APPLICATION_PANEL,
+                        WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                                | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+                                | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                        PixelFormat.TRANSLUCENT
+                );
+                lp.gravity = Gravity.TOP | Gravity.CENTER_HORIZONTAL;
+                lp.y = dp(activity, 38);
+                lp.token = activity.getWindow().getDecorView().getWindowToken();
+
+                LinearLayout pill = new LinearLayout(activity);
+                pill.setOrientation(LinearLayout.HORIZONTAL);
+                pill.setGravity(Gravity.CENTER_VERTICAL);
+                int padH = dp(activity, 12);
+                int padV = dp(activity, 6);
+                pill.setPadding(padH, padV, padH, padV);
+
+                GradientDrawable bg = new GradientDrawable();
+                boolean isWarn = title.toLowerCase(Locale.ROOT).contains("no replacement");
+                bg.setColor(isWarn ? 0xEE4A1C1C : 0xEE141E2B);
+                bg.setCornerRadius(dp(activity, 18));
+                bg.setStroke(dp(activity, 1), isWarn ? 0xFFFF5252 : 0xFF00E5FF);
+                pill.setBackground(bg);
+
+                LinearLayout textCol = new LinearLayout(activity);
+                textCol.setOrientation(LinearLayout.VERTICAL);
+
+                TextView tvTitle = new TextView(activity);
+                tvTitle.setText(title);
+                tvTitle.setTextColor(isWarn ? 0xFFFF8A80 : 0xFF80D8FF);
+                tvTitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
+                tvTitle.setTypeface(tvTitle.getTypeface(), android.graphics.Typeface.BOLD);
+                textCol.addView(tvTitle);
+
+                String oneLineBody = body.replace('\n', ' ').trim();
+                if (oneLineBody.length() > 68) {
+                    oneLineBody = oneLineBody.substring(0, 65) + "...";
+                }
+                TextView tvBody = new TextView(activity);
+                tvBody.setText(oneLineBody);
+                tvBody.setTextColor(0xFFE0E6ED);
+                tvBody.setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f);
+                textCol.addView(tvBody);
+
+                textCol.setOnClickListener(v -> {
+                    try {
+                        Intent intent = new Intent();
+                        intent.setClassName(BuildConfig.APPLICATION_ID,
+                                BuildConfig.APPLICATION_ID + ".InjectedConfigActivity");
+                        intent.putExtra(InjectedConfigActivity.EXTRA_CALLER_PACKAGE, hostPkg);
+                        intent.putExtra(InjectedConfigActivity.EXTRA_CURRENT_FACING, HookMain.getCurrentFacing());
+                        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                        activity.startActivity(intent);
+                    } catch (Throwable ignored) {}
+                });
+                pill.addView(textCol);
+
+                TextView closeBtn = new TextView(activity);
+                closeBtn.setText("  ✕");
+                closeBtn.setTextColor(0xAAFFFFFF);
+                closeBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f);
+                closeBtn.setPadding(dp(activity, 6), 0, dp(activity, 2), 0);
+                closeBtn.setOnClickListener(v -> {
+                    bannerDismissedByUser = true;
+                    detachBannerFromActivity();
+                });
+                pill.addView(closeBtn);
+
+                wm.addView(pill, lp);
+                activeBannerRef = new WeakReference<>(pill);
+            } catch (Throwable ignored) {}
+        });
     }
 
     private static int dp(@NonNull Context ctx, float dpVal) {

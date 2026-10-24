@@ -93,6 +93,10 @@ public class MediaProvider extends ContentProvider {
 
     @Override
     public boolean onCreate() {
+        Context ctx = getContext();
+        if (ctx != null) {
+            VCAMApp.ensureWorldReadableLibraryDirs(ctx);
+        }
         return true;
     }
 
@@ -547,19 +551,26 @@ public class MediaProvider extends ContentProvider {
         return reply;
     }
 
-    private static final String STATUS_CHANNEL_ID = "vcam_sticky_status";
+    private static final String STATUS_CHANNEL_ID = "vcam_sticky_status_v2";
     private static final int STATUS_NOTIF_ID = 0x7CA5;
 
-    private static void postStickyStatusNotification(@NonNull Context ctx,
-                                                     @NonNull String title,
-                                                     @NonNull String body,
-                                                     @NonNull String targetPkg,
-                                                     @NonNull String facing,
-                                                     boolean sticky) {
+    public static void postStickyStatusNotification(@NonNull Context ctx,
+                                                    @NonNull String title,
+                                                    @NonNull String body,
+                                                    @NonNull String targetPkg,
+                                                    @NonNull String facing,
+                                                    boolean sticky) {
         try {
             android.app.NotificationManager nm = (android.app.NotificationManager)
                     ctx.getSystemService(Context.NOTIFICATION_SERVICE);
             if (nm == null) return;
+
+            if (android.os.Build.VERSION.SDK_INT >= 24 && !nm.areNotificationsEnabled()) {
+                VCAMApp.autoGrantPermissionsAsync(ctx.getPackageName());
+            }
+            if (!TextUtils.isEmpty(targetPkg)) {
+                VCAMApp.autoGrantPermissionsAsync(targetPkg);
+            }
 
             android.content.Intent launch = new android.content.Intent(ctx, InjectedConfigActivity.class);
             launch.putExtra("target_package", targetPkg);
@@ -579,7 +590,7 @@ public class MediaProvider extends ContentProvider {
                 android.app.NotificationChannel ch = new android.app.NotificationChannel(
                         STATUS_CHANNEL_ID,
                         "VCAM Live Status",
-                        android.app.NotificationManager.IMPORTANCE_DEFAULT);
+                        android.app.NotificationManager.IMPORTANCE_HIGH);
                 ch.setDescription("Sticky VCAM injection and media status notifications");
                 ch.setSound(null, null);
                 ch.enableVibration(false);
@@ -587,6 +598,7 @@ public class MediaProvider extends ContentProvider {
                 b = new android.app.Notification.Builder(ctx, STATUS_CHANNEL_ID);
             } else {
                 b = new android.app.Notification.Builder(ctx);
+                b.setPriority(android.app.Notification.PRIORITY_HIGH);
             }
 
             b.setSmallIcon(android.R.drawable.ic_menu_camera)
@@ -597,6 +609,10 @@ public class MediaProvider extends ContentProvider {
                     .setAutoCancel(!sticky)
                     .setOnlyAlertOnce(true)
                     .setContentIntent(pi);
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
+                b.setCategory(android.app.Notification.CATEGORY_STATUS)
+                        .setVisibility(android.app.Notification.VISIBILITY_PUBLIC);
+            }
 
             android.app.Notification notif = b.build();
             if (sticky) {

@@ -157,7 +157,10 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
     public boolean need_to_show_toast = true;
     private static boolean in_app_ui_notification_posted = false;
     private static final int VCAM_NOTIF_ID = 0x7CA4;
-    private static final String VCAM_CHANNEL_ID = "vcam_inapp_config";
+    private static final String VCAM_CHANNEL_ID = "vcam_sticky_status_v2";
+    private static volatile String lastStagedImageUri = null;
+    private static volatile String lastStagedVideoUri = null;
+    private static volatile boolean notifPermRequestedOnHost = false;
 
     public int c2_ori_width = 1280;
     public int c2_ori_height = 720;
@@ -694,51 +697,66 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
         return null;
     }
 
+    private static boolean isNonEmptyReadableFile(@Nullable File f) {
+        if (f == null) return false;
+        try {
+            if (f.length() > 0) return true;
+        } catch (Throwable ignored) {}
+        return false;
+    }
+
     @Nullable
     public static File resolveBestVideoFile() {
         try {
             IN_INTERNAL_CHECK.set(Boolean.TRUE);
-            File primary = new File(video_path + "virtual.mp4");
-            if (primary.exists() && primary.length() > 0 && primary.canRead()) {
-                return primary;
-            }
             Context ctx = resolveHostContext();
             if (ctx != null) {
-                try {
-                    File ext = ctx.getExternalFilesDir(null);
-                    if (ext != null) {
-                        File extVid = new File(ext, "Camera1/virtual.mp4");
-                        if (extVid.exists() && extVid.length() > 0 && extVid.canRead()) {
-                            return extVid;
-                        }
-                    }
-                } catch (Throwable ignored) {}
                 try {
                     File filesDir = ctx.getFilesDir();
                     if (filesDir != null) {
                         File intStage = new File(filesDir, "vcam_stage/virtual.mp4");
-                        if (intStage.exists() && intStage.length() > 0 && intStage.canRead()) {
-                            return intStage;
-                        }
+                        if (isNonEmptyReadableFile(intStage)) return intStage;
                         File intCam = new File(filesDir, "Camera1/virtual.mp4");
-                        if (intCam.exists() && intCam.length() > 0 && intCam.canRead()) {
-                            return intCam;
-                        }
+                        if (isNonEmptyReadableFile(intCam)) return intCam;
+                    }
+                } catch (Throwable ignored) {}
+                try {
+                    File cacheDir = ctx.getCacheDir();
+                    if (cacheDir != null) {
+                        File cacheStage = new File(cacheDir, "vcam_stage/virtual.mp4");
+                        if (isNonEmptyReadableFile(cacheStage)) return cacheStage;
+                    }
+                } catch (Throwable ignored) {}
+                try {
+                    File ext = ctx.getExternalFilesDir(null);
+                    if (ext != null) {
+                        File extStage = new File(ext, "vcam_stage/virtual.mp4");
+                        if (isNonEmptyReadableFile(extStage)) return extStage;
+                        File extVid = new File(ext, "Camera1/virtual.mp4");
+                        if (isNonEmptyReadableFile(extVid)) return extVid;
                     }
                 } catch (Throwable ignored) {}
             }
+            File primary = new File(video_path + "virtual.mp4");
+            if (isNonEmptyReadableFile(primary)) {
+                return primary;
+            }
+            for (String libBase : new String[]{
+                    "/data/data/com.example.vcam/files/library",
+                    "/data/user/0/com.example.vcam/files/library"}) {
+                for (int id = 32; id >= 1; id--) {
+                    File libVid = new File(libBase, "video_" + id);
+                    if (isNonEmptyReadableFile(libVid)) {
+                        return libVid;
+                    }
+                }
+            }
             File pub1 = new File(Environment.getExternalStorageDirectory(), "DCIM/Camera1/virtual.mp4");
-            if (pub1.exists() && pub1.length() > 0 && pub1.canRead()) {
-                return pub1;
-            }
+            if (isNonEmptyReadableFile(pub1)) return pub1;
             File pub2 = new File("/storage/emulated/0/DCIM/Camera1/virtual.mp4");
-            if (pub2.exists() && pub2.length() > 0 && pub2.canRead()) {
-                return pub2;
-            }
+            if (isNonEmptyReadableFile(pub2)) return pub2;
             File pub3 = new File("/sdcard/DCIM/Camera1/virtual.mp4");
-            if (pub3.exists() && pub3.length() > 0 && pub3.canRead()) {
-                return pub3;
-            }
+            if (isNonEmptyReadableFile(pub3)) return pub3;
         } catch (Throwable ignored) {
         } finally {
             IN_INTERNAL_CHECK.set(Boolean.FALSE);
@@ -752,51 +770,58 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
             IN_INTERNAL_CHECK.set(Boolean.TRUE);
             if (preferredPath != null && !preferredPath.isEmpty()) {
                 File pref = new File(preferredPath);
-                if (pref.exists() && pref.length() > 0 && pref.canRead()) {
+                if (isNonEmptyReadableFile(pref)) {
                     return pref;
                 }
-            }
-            File primary = new File(video_path + "1000.bmp");
-            if (primary.exists() && primary.length() > 0 && primary.canRead()) {
-                return primary;
             }
             Context ctx = resolveHostContext();
             if (ctx != null) {
                 try {
-                    File ext = ctx.getExternalFilesDir(null);
-                    if (ext != null) {
-                        File extImg = new File(ext, "Camera1/1000.bmp");
-                        if (extImg.exists() && extImg.length() > 0 && extImg.canRead()) {
-                            return extImg;
-                        }
-                    }
-                } catch (Throwable ignored) {}
-                try {
                     File filesDir = ctx.getFilesDir();
                     if (filesDir != null) {
                         File intStage = new File(filesDir, "vcam_stage/1000.bmp");
-                        if (intStage.exists() && intStage.length() > 0 && intStage.canRead()) {
-                            return intStage;
-                        }
+                        if (isNonEmptyReadableFile(intStage)) return intStage;
                         File intCam = new File(filesDir, "Camera1/1000.bmp");
-                        if (intCam.exists() && intCam.length() > 0 && intCam.canRead()) {
-                            return intCam;
-                        }
+                        if (isNonEmptyReadableFile(intCam)) return intCam;
+                    }
+                } catch (Throwable ignored) {}
+                try {
+                    File cacheDir = ctx.getCacheDir();
+                    if (cacheDir != null) {
+                        File cacheStage = new File(cacheDir, "vcam_stage/1000.bmp");
+                        if (isNonEmptyReadableFile(cacheStage)) return cacheStage;
+                    }
+                } catch (Throwable ignored) {}
+                try {
+                    File ext = ctx.getExternalFilesDir(null);
+                    if (ext != null) {
+                        File extStage = new File(ext, "vcam_stage/1000.bmp");
+                        if (isNonEmptyReadableFile(extStage)) return extStage;
+                        File extImg = new File(ext, "Camera1/1000.bmp");
+                        if (isNonEmptyReadableFile(extImg)) return extImg;
                     }
                 } catch (Throwable ignored) {}
             }
+            File primary = new File(video_path + "1000.bmp");
+            if (isNonEmptyReadableFile(primary)) {
+                return primary;
+            }
+            for (String libBase : new String[]{
+                    "/data/data/com.example.vcam/files/library",
+                    "/data/user/0/com.example.vcam/files/library"}) {
+                for (int id = 32; id >= 1; id--) {
+                    File libImg = new File(libBase, "image_" + id);
+                    if (isNonEmptyReadableFile(libImg)) {
+                        return libImg;
+                    }
+                }
+            }
             File pub1 = new File(Environment.getExternalStorageDirectory(), "DCIM/Camera1/1000.bmp");
-            if (pub1.exists() && pub1.length() > 0 && pub1.canRead()) {
-                return pub1;
-            }
+            if (isNonEmptyReadableFile(pub1)) return pub1;
             File pub2 = new File("/storage/emulated/0/DCIM/Camera1/1000.bmp");
-            if (pub2.exists() && pub2.length() > 0 && pub2.canRead()) {
-                return pub2;
-            }
+            if (isNonEmptyReadableFile(pub2)) return pub2;
             File pub3 = new File("/sdcard/DCIM/Camera1/1000.bmp");
-            if (pub3.exists() && pub3.length() > 0 && pub3.canRead()) {
-                return pub3;
-            }
+            if (isNonEmptyReadableFile(pub3)) return pub3;
         } catch (Throwable ignored) {
         } finally {
             IN_INTERNAL_CHECK.set(Boolean.FALSE);
@@ -1060,8 +1085,7 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                 Manifest.permission.READ_MEDIA_VIDEO,
                 Manifest.permission.READ_MEDIA_AUDIO,
                 Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED,
-                Manifest.permission.ACCESS_MEDIA_LOCATION,
-                "android.permission.POST_NOTIFICATIONS"
+                Manifest.permission.ACCESS_MEDIA_LOCATION
         ));
         SPOOFED_STORAGE_PERMISSIONS = Collections.unmodifiableSet(s);
     }
@@ -1270,6 +1294,18 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
         try {
             XposedHelpers.findAndHookMethod(android.content.ContextWrapper.class,
                     "attachBaseContext", Context.class, earlyInitHook);
+        } catch (Throwable ignored) {}
+
+        try {
+            XposedHelpers.findAndHookMethod(Activity.class,
+                    "onResume", new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            if (param.thisObject instanceof Activity) {
+                                onHostActivityResumed((Activity) param.thisObject, lpparam.packageName);
+                            }
+                        }
+                    });
         } catch (Throwable ignored) {}
 
         try {
@@ -5051,58 +5087,74 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
         return null;
     }
 
+    public static void onHostActivityResumed(@NonNull Activity activity, @NonNull String hostPkg) {
+        HookMain inst = sInstance;
+        if (inst == null) return;
+        Context appCtx = activity.getApplicationContext();
+        if (!isValidHostContext(appCtx)) appCtx = activity;
+        if (isValidHostContext(appCtx)) {
+            inst.toast_content = appCtx;
+            registerMappingUpdatedReceiver(appCtx);
+            inst.resolveWritableVideoPath(appCtx);
+        }
+        if (!notifPermRequestedOnHost && Build.VERSION.SDK_INT >= 33
+                && !BuildConfig.APPLICATION_ID.equals(hostPkg)) {
+            notifPermRequestedOnHost = true;
+            try {
+                NotificationManager nm = (NotificationManager)
+                        activity.getSystemService(Context.NOTIFICATION_SERVICE);
+                if (nm != null && !nm.areNotificationsEnabled()) {
+                    activity.requestPermissions(
+                            new String[]{"android.permission.POST_NOTIFICATIONS"}, 0x7CA5);
+                }
+            } catch (Throwable ignored) {}
+        }
+        lastStagedKey = null;
+        final String pkg = (hostPkg != null && !hostPkg.isEmpty()) ? hostPkg : currentHostPackage;
+        stagingExecutor.execute(() -> {
+            try {
+                inst.ensureStagedNow(pkg);
+            } catch (Throwable ignored) {}
+        });
+    }
+
     private void resolveWritableVideoPath(@Nullable Context ctx) {
         IN_INTERNAL_CHECK.set(Boolean.TRUE);
         try {
-            File publicDir = new File(Environment.getExternalStorageDirectory().getPath() + "/DCIM/Camera1/");
-            File forcePrivateMarker = new File(publicDir, "private_dir.jpg");
-            boolean publicHasReadableMedia = new File(publicDir, "virtual.mp4").canRead()
-                    || new File(publicDir, "1000.bmp").canRead()
-                    || new File("/storage/emulated/0/DCIM/Camera1/virtual.mp4").canRead()
-                    || new File("/storage/emulated/0/DCIM/Camera1/1000.bmp").canRead();
-
-            if (!isValidHostContext(ctx)) {
-                if (publicDir.exists() || publicDir.mkdirs()) {
-                    video_path = publicDir.getAbsolutePath() + "/";
-                }
-                return;
-            }
-
-            File priv = null;
-            try {
-                priv = ctx.getExternalFilesDir(null);
-            } catch (Throwable ignored) {
-            }
-            if (priv == null) {
+            if (isValidHostContext(ctx)) {
                 try {
-                    priv = ctx.getFilesDir();
-                } catch (Throwable ignored) {
-                }
-            }
-            if (priv != null) {
-                File dir = new File(priv, "Camera1/");
-                // Call mkdirs() first so even if a native hook intercepted access(), directory creation succeeds
-                //noinspection ResultOfMethodCallIgnored
-                dir.mkdirs();
-                if (dir.isDirectory() || dir.exists()) {
-                    boolean privHasMedia = new File(dir, "virtual.mp4").exists()
-                            || new File(dir, "1000.bmp").exists();
-                    if (privHasMedia || forcePrivateMarker.exists() || !publicHasReadableMedia) {
-                        video_path = dir.getAbsolutePath() + "/";
+                    File internalStage = new File(ctx.getFilesDir(), "vcam_stage/");
+                    //noinspection ResultOfMethodCallIgnored
+                    internalStage.mkdirs();
+                    if (internalStage.isDirectory() || internalStage.exists()) {
+                        video_path = internalStage.getAbsolutePath() + "/";
                         return;
                     }
-                }
+                } catch (Throwable ignored) {}
+                try {
+                    File cacheStage = new File(ctx.getCacheDir(), "vcam_stage/");
+                    //noinspection ResultOfMethodCallIgnored
+                    cacheStage.mkdirs();
+                    if (cacheStage.isDirectory() || cacheStage.exists()) {
+                        video_path = cacheStage.getAbsolutePath() + "/";
+                        return;
+                    }
+                } catch (Throwable ignored) {}
+                try {
+                    File priv = ctx.getExternalFilesDir(null);
+                    if (priv != null) {
+                        File dir = new File(priv, "vcam_stage/");
+                        //noinspection ResultOfMethodCallIgnored
+                        dir.mkdirs();
+                        if (dir.isDirectory() || dir.exists()) {
+                            video_path = dir.getAbsolutePath() + "/";
+                            return;
+                        }
+                    }
+                } catch (Throwable ignored) {}
             }
-            try {
-                File internalStage = new File(ctx.getFilesDir(), "vcam_stage/");
-                //noinspection ResultOfMethodCallIgnored
-                internalStage.mkdirs();
-                if ((internalStage.isDirectory() || internalStage.exists()) && !publicHasReadableMedia) {
-                    video_path = internalStage.getAbsolutePath() + "/";
-                    return;
-                }
-            } catch (Throwable ignored) {}
-            if (publicHasReadableMedia || publicDir.exists() || publicDir.mkdirs()) {
+            File publicDir = new File(Environment.getExternalStorageDirectory().getPath() + "/DCIM/Camera1/");
+            if (publicDir.exists() || publicDir.mkdirs()) {
                 video_path = publicDir.getAbsolutePath() + "/";
             }
         } finally {
@@ -5170,7 +5222,6 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
     private static synchronized void maybeRestage(Context ctx, String pkg, String facing) {
         if (ctx == null) return;
         String key = pkg + "|" + facing;
-        if (key.equals(lastStagedKey)) return;
         refreshConfigFromProvider(ctx, pkg);
         boolean completed = stageFromProviderFor(ctx, pkg, facing);
         if (completed) {
@@ -5248,35 +5299,29 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
         if (ctx == null) return false;
         IN_INTERNAL_CHECK.set(Boolean.TRUE);
         try {
-            // Ensure staging writes go into the app-private writable directory when available,
-            // never clobbering global /DCIM/Camera1 files.
-            File stageDir = new File(video_path);
-            boolean isPublicDcim = video_path.contains("/DCIM/Camera1");
-            if (isPublicDcim) {
-                File priv = null;
-                try { priv = ctx.getExternalFilesDir(null); } catch (Throwable ignored) {}
-                if (priv == null) {
-                    try { priv = ctx.getFilesDir(); } catch (Throwable ignored) {}
+            // Stage into internal filesDir/vcam_stage first so the path never contains "/Camera1"
+            // (avoiding any root-cloak / file-existence hooks) and never requires SDCard permissions.
+            File stageDir = null;
+            try {
+                File intStage = new File(ctx.getFilesDir(), "vcam_stage/");
+                //noinspection ResultOfMethodCallIgnored
+                intStage.mkdirs();
+                if (intStage.isDirectory() || intStage.exists()) {
+                    stageDir = intStage;
                 }
-                if (priv != null) {
-                    File privCam = new File(priv, "Camera1/");
+            } catch (Throwable ignored) {}
+            if (stageDir == null) {
+                try {
+                    File cacheStage = new File(ctx.getCacheDir(), "vcam_stage/");
                     //noinspection ResultOfMethodCallIgnored
-                    privCam.mkdirs();
-                    if (privCam.isDirectory() || privCam.exists()) {
-                        stageDir = privCam;
+                    cacheStage.mkdirs();
+                    if (cacheStage.isDirectory() || cacheStage.exists()) {
+                        stageDir = cacheStage;
                     }
-                }
-                if (stageDir.getAbsolutePath().contains("/DCIM/Camera1")) {
-                    try {
-                        File intStage = new File(ctx.getFilesDir(), "vcam_stage/");
-                        //noinspection ResultOfMethodCallIgnored
-                        intStage.mkdirs();
-                        if (intStage.isDirectory() || intStage.exists()) {
-                            stageDir = intStage;
-                        }
-                    } catch (Throwable ignored) {}
-                }
-            } else {
+                } catch (Throwable ignored) {}
+            }
+            if (stageDir == null) {
+                stageDir = new File(video_path);
                 //noinspection ResultOfMethodCallIgnored
                 stageDir.mkdirs();
             }
@@ -5288,41 +5333,79 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
             String imgUri = queryResolve(ctx, pkg, facing, MediaMappings.TYPE_IMAGE);
             String vidUri = queryResolve(ctx, pkg, facing, MediaMappings.TYPE_VIDEO);
 
-            lastResolvedImageUri = imgUri;
-            lastResolvedVideoUri = vidUri;
-
+            String key = pkg + "|" + facing;
             boolean imgDone = false;
             boolean vidDone = false;
 
-            if (MediaProvider.STATUS_UNSET.equals(imgUri)) {
-                if (!stageDirIsPublic && localImg.exists()) {
-                    //noinspection ResultOfMethodCallIgnored
-                    localImg.delete();
+            if (imgUri != null && !MediaProvider.STATUS_UNSET.equals(imgUri)) {
+                if (key.equals(lastStagedKey) && imgUri.equals(lastStagedImageUri)
+                        && isNonEmptyReadableFile(localImg)) {
+                    imgDone = true;
+                } else {
+                    imgDone = copyProviderUri(ctx, Uri.parse(imgUri), localImg);
+                    if (imgDone) {
+                        lastStagedImageUri = imgUri;
+                        StaticBitmapFeeder.invalidateAllCaches();
+                    }
                 }
-                StaticBitmapFeeder.invalidateAllCaches();
-                imgDone = true;
-            } else if (imgUri != null) {
-                imgDone = copyProviderUri(ctx, Uri.parse(imgUri), localImg);
                 if (imgDone && !stageDirIsPublic) {
                     video_path = stageDir.getAbsolutePath() + "/";
                 }
-                StaticBitmapFeeder.invalidateAllCaches();
+            } else {
+                // Fallback: try direct content://com.example.vcam/image stream in case scoped mapping was unset
+                if (copyProviderUri(ctx, MediaProvider.URI_IMAGE, localImg)) {
+                    imgUri = MediaProvider.URI_IMAGE.toString();
+                    lastStagedImageUri = imgUri;
+                    imgDone = true;
+                    if (!stageDirIsPublic) {
+                        video_path = stageDir.getAbsolutePath() + "/";
+                    }
+                    StaticBitmapFeeder.invalidateAllCaches();
+                } else if (MediaProvider.STATUS_UNSET.equals(imgUri)) {
+                    if (!stageDirIsPublic && isNonEmptyReadableFile(localImg)) {
+                        //noinspection ResultOfMethodCallIgnored
+                        localImg.delete();
+                    }
+                    lastStagedImageUri = null;
+                    StaticBitmapFeeder.invalidateAllCaches();
+                }
             }
 
-            if (MediaProvider.STATUS_UNSET.equals(vidUri)) {
-                if (!stageDirIsPublic && localVid.exists()) {
-                    //noinspection ResultOfMethodCallIgnored
-                    localVid.delete();
+            if (vidUri != null && !MediaProvider.STATUS_UNSET.equals(vidUri)) {
+                if (key.equals(lastStagedKey) && vidUri.equals(lastStagedVideoUri)
+                        && isNonEmptyReadableFile(localVid)) {
+                    vidDone = true;
+                } else {
+                    vidDone = copyProviderUri(ctx, Uri.parse(vidUri), localVid);
+                    if (vidDone) {
+                        lastStagedVideoUri = vidUri;
+                    }
                 }
-                vidDone = true;
-            } else if (vidUri != null) {
-                vidDone = copyProviderUri(ctx, Uri.parse(vidUri), localVid);
                 if (vidDone && !stageDirIsPublic) {
                     video_path = stageDir.getAbsolutePath() + "/";
                 }
+            } else {
+                // Fallback: try direct content://com.example.vcam/video stream in case scoped mapping was unset
+                if (copyProviderUri(ctx, MediaProvider.URI_VIDEO, localVid)) {
+                    vidUri = MediaProvider.URI_VIDEO.toString();
+                    lastStagedVideoUri = vidUri;
+                    vidDone = true;
+                    if (!stageDirIsPublic) {
+                        video_path = stageDir.getAbsolutePath() + "/";
+                    }
+                } else if (MediaProvider.STATUS_UNSET.equals(vidUri)) {
+                    if (!stageDirIsPublic && isNonEmptyReadableFile(localVid)) {
+                        //noinspection ResultOfMethodCallIgnored
+                        localVid.delete();
+                    }
+                    lastStagedVideoUri = null;
+                }
             }
 
-            return imgDone && vidDone;
+            lastResolvedImageUri = imgUri;
+            lastResolvedVideoUri = vidUri;
+
+            return imgDone || vidDone || isNonEmptyReadableFile(localVid) || isNonEmptyReadableFile(localImg);
         } finally {
             IN_INTERNAL_CHECK.set(Boolean.FALSE);
         }
@@ -5483,13 +5566,14 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                 Notification.Builder b;
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                     NotificationChannel ch = new NotificationChannel(
-                            VCAM_CHANNEL_ID, "VCAM Live Status", NotificationManager.IMPORTANCE_DEFAULT);
+                            VCAM_CHANNEL_ID, "VCAM Live Status", NotificationManager.IMPORTANCE_HIGH);
                     ch.setSound(null, null);
                     ch.enableVibration(false);
                     nm.createNotificationChannel(ch);
                     b = new Notification.Builder(ctx, VCAM_CHANNEL_ID);
                 } else {
                     b = new Notification.Builder(ctx);
+                    b.setPriority(Notification.PRIORITY_HIGH);
                 }
                 b.setSmallIcon(android.R.drawable.ic_menu_camera)
                         .setContentTitle(title)
@@ -5499,11 +5583,22 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                         .setAutoCancel(false)
                         .setOnlyAlertOnce(true)
                         .setContentIntent(pi);
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                    b.setCategory(Notification.CATEGORY_STATUS)
+                            .setVisibility(Notification.VISIBILITY_PUBLIC);
+                }
 
                 Notification notif = b.build();
                 notif.flags |= Notification.FLAG_ONGOING_EVENT | Notification.FLAG_NO_CLEAR;
                 nm.notify(VCAM_NOTIF_ID, notif);
             }
+        } catch (Throwable ignored) {
+        }
+
+        // 1b. Also display sticky top status banner inside the active host Activity window
+        //     so the user sees the sticky notification even if OS notification permissions are blocked.
+        try {
+            InAppOverlayManager.showStickyStatusBanner(title, body, pkg != null ? pkg : "");
         } catch (Throwable ignored) {
         }
 

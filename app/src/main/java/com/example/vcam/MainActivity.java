@@ -239,6 +239,14 @@ public class MainActivity extends AppCompatActivity {
         if (!prefs.getBoolean(VCAMApp.KEY_ONBOARDING_DONE, false)) {
             startActivity(new Intent(this, OnboardingActivity.class));
         }
+        if (Build.VERSION.SDK_INT >= 33) {
+            try {
+                if (checkSelfPermission("android.permission.POST_NOTIFICATIONS")
+                        != PackageManager.PERMISSION_GRANTED) {
+                    requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, 1009);
+                }
+            } catch (Throwable ignored) {}
+        }
     }
 
     @Override
@@ -1006,10 +1014,17 @@ public class MainActivity extends AppCompatActivity {
                         .putString(isImage ? VCAMApp.KEY_LAST_IMAGE_URI : VCAMApp.KEY_LAST_VIDEO_URI,
                                 uri.toString())
                         .apply();
+                VCAMApp.ensureWorldReadableLibraryDirs(this);
                 runOnUiThread(() -> {
-                    Toast.makeText(this,
-                            getString(R.string.media_imported_format, MediaPaths.humanBytes(finalBytes)),
-                            Toast.LENGTH_SHORT).show();
+                    String msg = getString(R.string.media_imported_format, MediaPaths.humanBytes(finalBytes));
+                    Toast.makeText(this, msg, Toast.LENGTH_SHORT).show();
+                    MediaProvider.postStickyStatusNotification(
+                            this,
+                            "VCAM Media Staged (" + (isImage ? "image" : "video") + ")",
+                            msg + " • Ready for camera injection",
+                            MediaMappings.PKG_GLOBAL,
+                            MediaMappings.FACING_ANY,
+                            true);
                     syncStateWithFiles();
                     startDemoPlayback();
                 });
@@ -1131,6 +1146,17 @@ public class MainActivity extends AppCompatActivity {
         boolean hasVideo = vid.exists() && vid.length() > 0;
         chipImage.setText(hasImage ? R.string.chip_image_loaded : R.string.chip_image_none);
         chipVideo.setText(hasVideo ? R.string.chip_video_loaded : R.string.chip_video_none);
+        if (hasVideo || hasImage) {
+            String activeDesc = (hasVideo ? ("Video: " + vid.getName() + " (" + MediaPaths.humanBytes(vid.length()) + ") ") : "")
+                    + (hasImage ? ("Image: " + img.getName() + " (" + MediaPaths.humanBytes(img.length()) + ")") : "");
+            MediaProvider.postStickyStatusNotification(
+                    this,
+                    "VCAM Armed & Ready",
+                    activeDesc.trim() + " • Tap to configure",
+                    MediaMappings.PKG_GLOBAL,
+                    MediaMappings.FACING_ANY,
+                    true);
+        }
         preview.setImageResource(android.R.drawable.ic_menu_gallery);
 
         final int requestId = ++syncRequestId;

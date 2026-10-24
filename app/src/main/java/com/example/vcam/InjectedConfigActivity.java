@@ -112,6 +112,14 @@ public class InjectedConfigActivity extends AppCompatActivity {
         findViewById(R.id.injected_return).setOnClickListener(v -> returnToCaller());
         findViewById(R.id.injected_clear_scoped).setOnClickListener(v -> clearScoped());
 
+        if (android.os.Build.VERSION.SDK_INT >= 33) {
+            try {
+                if (checkSelfPermission("android.permission.POST_NOTIFICATIONS")
+                        != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                    requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, 1009);
+                }
+            } catch (Throwable ignored) {}
+        }
         refresh();
     }
 
@@ -189,6 +197,9 @@ public class InjectedConfigActivity extends AppCompatActivity {
         }
         String[] scope = selectedScope();
         MediaMappings.setOne(this, scope[0], scope[1], type, e.uri().toString());
+        // Always ensure global fallback is also populated so any unmapped facing/package resolves immediately
+        MediaMappings.setOne(this, MediaMappings.PKG_GLOBAL, MediaMappings.FACING_ANY, type, e.uri().toString());
+        VCAMApp.ensureWorldReadableLibraryDirs(this);
 
         // Also mirror into the legacy staged file so non-provider-aware hooks
         // and users who rely on the DCIM workflow keep seeing the most
@@ -198,9 +209,15 @@ public class InjectedConfigActivity extends AppCompatActivity {
             MediaPaths.copyUriToFile(this, uri, dst);
         } catch (Throwable ignored) {}
 
-        Toast.makeText(this,
-                getString(R.string.media_imported_format, MediaPaths.humanBytes(e.size)),
-                Toast.LENGTH_SHORT).show();
+        String importedMsg = getString(R.string.media_imported_format, MediaPaths.humanBytes(e.size));
+        Toast.makeText(this, importedMsg, Toast.LENGTH_SHORT).show();
+        MediaProvider.postStickyStatusNotification(
+                this,
+                "VCAM Media Ready (" + type + ")",
+                e.name + " • " + MediaPaths.humanBytes(e.size) + " staged for " + scope[0],
+                safePkg(),
+                scope[1],
+                true);
         refresh();
     }
 
