@@ -144,6 +144,19 @@ public final class MediaMappings {
                 if (!TextUtils.isEmpty(uri)) return uri;
             }
         }
+        // Fallback: if the user mapped media only to "back" (or "front") and the SDK
+        // opened the opposite camera without a specific mapping, fall back to any
+        // mapped facing for this package first, then any global mapping.
+        for (Mapping m : all) {
+            if (!m.pkg.equals(pkg)) continue;
+            String uri = TYPE_IMAGE.equals(type) ? m.imageUri : m.videoUri;
+            if (!TextUtils.isEmpty(uri)) return uri;
+        }
+        for (Mapping m : all) {
+            if (!m.pkg.equals(PKG_GLOBAL)) continue;
+            String uri = TYPE_IMAGE.equals(type) ? m.imageUri : m.videoUri;
+            if (!TextUtils.isEmpty(uri)) return uri;
+        }
         return null;
     }
 

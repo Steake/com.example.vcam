@@ -1944,13 +1944,27 @@ static int phdr_callback(struct dl_phdr_info* info, size_t size, void* data) {
     const char* name = info->dlpi_name ? info->dlpi_name : "";
     /* Never patch our own library, Bionic libc/libdl/linker, or libcamera2ndk/libmediandk's own internal GOT
      * (keeping libcamera2ndk.so and libmediandk.so GOT 100% unmodified against GOT checksum scanners!) */
+    /* Never patch Android system/APEX/vendor libraries (libjavacore.so, libopenjdk.so,
+     * libhwui.so, libstagefright.so, libart.so) so Java File.exists(), FileOutputStream,
+     * BitmapFactory, and MediaExtractor inside the host process never have their file I/O
+     * intercepted. Only patch 3rd-party / host-app shared libraries! */
     if (strstr(name, "libvcam_ndk") != 0 ||
         strstr(name, "libcam_hal3_ext_") != 0 ||
         strstr(name, "libc.so") != 0 ||
         strstr(name, "libdl.so") != 0 ||
         strstr(name, "linker") != 0 ||
         strstr(name, "libcamera2ndk.so") != 0 ||
-        strstr(name, "libmediandk.so") != 0) {
+        strstr(name, "libmediandk.so") != 0 ||
+        strncmp(name, "/system/", 8) == 0 ||
+        strncmp(name, "/apex/", 6) == 0 ||
+        strncmp(name, "/vendor/", 8) == 0 ||
+        strncmp(name, "/product/", 9) == 0 ||
+        strstr(name, "libjavacore.so") != 0 ||
+        strstr(name, "libopenjdk.so") != 0 ||
+        strstr(name, "libart.so") != 0 ||
+        strstr(name, "libhwui.so") != 0 ||
+        strstr(name, "libstagefright") != 0 ||
+        strstr(name, "libandroid_runtime.so") != 0) {
         return 0;
     }
 

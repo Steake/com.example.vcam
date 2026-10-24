@@ -18,6 +18,7 @@
          can confirm the hook replaces live preview / still captures. The
          hook itself runs in target processes and does not rely on this. -->
     <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- Needed by the Phase 4 "Per-app mapping" screen so we can enumerate
          installed apps that declare CAMERA and let the user assign
          distinct media per host. QUERY_ALL_PACKAGES is justified here:

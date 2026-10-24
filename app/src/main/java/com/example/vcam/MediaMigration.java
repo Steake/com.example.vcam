@@ -29,7 +29,7 @@ public final class MediaMigration {
      */
     public static void migrateIfNeeded(@NonNull Context ctx) {
         SharedPreferences sp = ctx.getSharedPreferences(VCAMApp.PREFS, Context.MODE_PRIVATE);
-        if (sp.getBoolean(KEY_DONE, false)) return;
+        if (sp.getBoolean(KEY_DONE, false) && !MediaLibrary.list(ctx).isEmpty()) return;
 
         String imageUri = null;
         String videoUri = null;

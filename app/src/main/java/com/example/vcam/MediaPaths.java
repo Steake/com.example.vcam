@@ -100,6 +100,8 @@ public final class MediaPaths {
                 }
             }
         } catch (Throwable ignored) {}
+        File scannedImg = scanCamera1DirectoryForMedia(ctx, true);
+        if (scannedImg != null) return scannedImg;
         return legacy;
     }
 
@@ -137,7 +139,48 @@ public final class MediaPaths {
                 }
             }
         } catch (Throwable ignored) {}
+        File scannedVid = scanCamera1DirectoryForMedia(ctx, false);
+        if (scannedVid != null) return scannedVid;
         return legacy;
+    }
+
+    @Nullable
+    private static File scanCamera1DirectoryForMedia(@NonNull Context ctx, boolean image) {
+        try {
+            java.util.List<File> dirs = new java.util.ArrayList<>();
+            dirs.add(defaultDir());
+            dirs.add(new File("/storage/emulated/0/DCIM/Camera1"));
+            dirs.add(new File("/sdcard/DCIM/Camera1"));
+            File ext = ctx.getExternalFilesDir(null);
+            if (ext != null) dirs.add(new File(ext, "Camera1"));
+            java.util.Set<String> markerNames = new java.util.HashSet<>(java.util.Arrays.asList(
+                    "disable.jpg", "force_show.jpg", "no-silent.jpg", "private_dir.jpg", "no_toast.jpg"
+            ));
+            for (File d : dirs) {
+                if (d == null || !d.isDirectory()) continue;
+                File[] children = d.listFiles();
+                if (children == null) continue;
+                for (File f : children) {
+                    if (f == null || !f.isFile() || f.length() <= 0) continue;
+                    String lower = f.getName().toLowerCase(java.util.Locale.US);
+                    if (markerNames.contains(lower)) continue;
+                    if (image) {
+                        if (lower.endsWith(".bmp") || lower.endsWith(".jpg")
+                                || lower.endsWith(".jpeg") || lower.endsWith(".png")
+                                || lower.endsWith(".webp")) {
+                            return f;
+                        }
+                    } else {
+                        if (lower.endsWith(".mp4") || lower.endsWith(".mov")
+                                || lower.endsWith(".mkv") || lower.endsWith(".webm")
+                                || lower.endsWith(".3gp")) {
+                            return f;
+                        }
+                    }
+                }
+            }
+        } catch (Throwable ignored) {}
+        return null;
     }
 
     /**

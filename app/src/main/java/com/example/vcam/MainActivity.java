@@ -937,6 +937,14 @@ public class MainActivity extends AppCompatActivity {
                 if (muteSwitch.isChecked() == checked) {
                     muteSwitch.setChecked(!checked);
                 }
+            } else if ("force_show.jpg".equals(fileName)) {
+                prefs.edit().putBoolean("pref_force_show", checked).apply();
+            } else if ("disable.jpg".equals(fileName)) {
+                prefs.edit().putBoolean("pref_disable_module", checked).apply();
+            } else if ("no_toast.jpg".equals(fileName)) {
+                prefs.edit().putBoolean("pref_disable_toast", checked).apply();
+            } else if ("private_dir.jpg".equals(fileName)) {
+                prefs.edit().putBoolean("pref_private_dir", checked).apply();
             }
             if (!hasStoragePermission()) {
                 requestStoragePermission();

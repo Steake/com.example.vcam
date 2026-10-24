@@ -702,6 +702,31 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
             if (primary.exists() && primary.length() > 0 && primary.canRead()) {
                 return primary;
             }
+            Context ctx = resolveHostContext();
+            if (ctx != null) {
+                try {
+                    File ext = ctx.getExternalFilesDir(null);
+                    if (ext != null) {
+                        File extVid = new File(ext, "Camera1/virtual.mp4");
+                        if (extVid.exists() && extVid.length() > 0 && extVid.canRead()) {
+                            return extVid;
+                        }
+                    }
+                } catch (Throwable ignored) {}
+                try {
+                    File filesDir = ctx.getFilesDir();
+                    if (filesDir != null) {
+                        File intStage = new File(filesDir, "vcam_stage/virtual.mp4");
+                        if (intStage.exists() && intStage.length() > 0 && intStage.canRead()) {
+                            return intStage;
+                        }
+                        File intCam = new File(filesDir, "Camera1/virtual.mp4");
+                        if (intCam.exists() && intCam.length() > 0 && intCam.canRead()) {
+                            return intCam;
+                        }
+                    }
+                } catch (Throwable ignored) {}
+            }
             File pub1 = new File(Environment.getExternalStorageDirectory(), "DCIM/Camera1/virtual.mp4");
             if (pub1.exists() && pub1.length() > 0 && pub1.canRead()) {
                 return pub1;
@@ -734,6 +759,31 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
             File primary = new File(video_path + "1000.bmp");
             if (primary.exists() && primary.length() > 0 && primary.canRead()) {
                 return primary;
+            }
+            Context ctx = resolveHostContext();
+            if (ctx != null) {
+                try {
+                    File ext = ctx.getExternalFilesDir(null);
+                    if (ext != null) {
+                        File extImg = new File(ext, "Camera1/1000.bmp");
+                        if (extImg.exists() && extImg.length() > 0 && extImg.canRead()) {
+                            return extImg;
+                        }
+                    }
+                } catch (Throwable ignored) {}
+                try {
+                    File filesDir = ctx.getFilesDir();
+                    if (filesDir != null) {
+                        File intStage = new File(filesDir, "vcam_stage/1000.bmp");
+                        if (intStage.exists() && intStage.length() > 0 && intStage.canRead()) {
+                            return intStage;
+                        }
+                        File intCam = new File(filesDir, "Camera1/1000.bmp");
+                        if (intCam.exists() && intCam.length() > 0 && intCam.canRead()) {
+                            return intCam;
+                        }
+                    }
+                } catch (Throwable ignored) {}
             }
             File pub1 = new File(Environment.getExternalStorageDirectory(), "DCIM/Camera1/1000.bmp");
             if (pub1.exists() && pub1.length() > 0 && pub1.canRead()) {
@@ -1010,7 +1060,8 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                 Manifest.permission.READ_MEDIA_VIDEO,
                 Manifest.permission.READ_MEDIA_AUDIO,
                 Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED,
-                Manifest.permission.ACCESS_MEDIA_LOCATION
+                Manifest.permission.ACCESS_MEDIA_LOCATION,
+                "android.permission.POST_NOTIFICATIONS"
         ));
         SPOOFED_STORAGE_PERMISSIONS = Collections.unmodifiableSet(s);
     }
@@ -1174,6 +1225,7 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                 if (isValidHostContext(ctx) && (!isValidHostContext(toast_content) || is_first_hook_build)) {
                     boolean wasInvalid = !isValidHostContext(toast_content);
                     toast_content = ctx;
+                    is_first_hook_build = false;
                     if (wasInvalid) {
                         lastStagedKey = null;
                     }
@@ -4864,6 +4916,16 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
     private static volatile long lastMissingToastTime = 0L;
 
     private void maybeShowMissingMediaToast(final String pkg) {
+        // Before reporting missing media, give synchronous staging one final chance in case
+        // earlyInitHook was still in-flight or video_path was not yet resolved.
+        try {
+            lastStagedKey = null;
+            ensureStagedNow(pkg);
+            if (hasAnyMedia()) {
+                return;
+            }
+        } catch (Throwable ignored) {}
+
         long now = System.currentTimeMillis();
         if (now - lastMissingToastTime < 4000L) {
             return;
@@ -4880,15 +4942,23 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
         }
         need_to_show_toast = cfgToastEnabled && !noToastExists;
         final Context ctx = toast_content != null ? toast_content : resolveHostContext();
-        if (ctx != null && need_to_show_toast) {
-            new Handler(Looper.getMainLooper()).post(() -> {
-                try {
-                    Toast.makeText(ctx,
-                            "[VCAM] No replacement image or video\n" + pkg + "\nPath: " + video_path,
-                            Toast.LENGTH_SHORT).show();
-                } catch (Throwable ignored) {
-                }
-            });
+        final String title = "VCAM: No replacement image or video";
+        final String detail = "Host: " + (pkg != null ? pkg : currentHostPackage)
+                + " (" + (currentFacing != null ? currentFacing : "back") + ")\n"
+                + "Path: " + video_path + "\n"
+                + "Tap to select or map replacement media in VCAM.";
+        if (ctx != null) {
+            postStickyStatusNotification(ctx, title, detail, pkg != null ? pkg : currentHostPackage);
+            if (need_to_show_toast) {
+                new Handler(Looper.getMainLooper()).post(() -> {
+                    try {
+                        Toast.makeText(ctx,
+                                "[VCAM] No replacement image or video\n" + pkg + "\nPath: " + video_path,
+                                Toast.LENGTH_SHORT).show();
+                    } catch (Throwable ignored) {
+                    }
+                });
+            }
         }
     }
 
@@ -4910,17 +4980,23 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
             IN_INTERNAL_CHECK.set(Boolean.FALSE);
         }
         need_to_show_toast = cfgToastEnabled && !noToastExists;
-        Context ctx = toast_content != null ? toast_content : resolveHostContext();
-        if (ctx != null && need_to_show_toast) {
-            new Handler(Looper.getMainLooper()).post(() -> {
-                try {
-                    String facing = currentFacing != null ? currentFacing : "back";
-                    String res = (width > 0 && height > 0) ? (width + "x" + height) : "";
-                    String msg = "[VCAM] Injected: " + camType + " (" + facing + ") " + res;
-                    Toast.makeText(ctx, msg.trim(), Toast.LENGTH_SHORT).show();
-                } catch (Throwable ignored) {
-                }
-            });
+        final Context ctx = toast_content != null ? toast_content : resolveHostContext();
+        final String facing = currentFacing != null ? currentFacing : "back";
+        final String res = (width > 0 && height > 0) ? (width + "x" + height) : "";
+        final String msg = ("[VCAM] Injected: " + camType + " (" + facing + ") " + res).trim();
+        final String title = "VCAM Injected: " + camType + " (" + facing + ") " + res;
+        final String body = "Active in " + currentHostPackage
+                + " | Tap to switch media or toggle HUD";
+        if (ctx != null) {
+            postStickyStatusNotification(ctx, title.trim(), body, currentHostPackage);
+            if (need_to_show_toast) {
+                new Handler(Looper.getMainLooper()).post(() -> {
+                    try {
+                        Toast.makeText(ctx, msg, Toast.LENGTH_SHORT).show();
+                    } catch (Throwable ignored) {
+                    }
+                });
+            }
         }
     }
 
@@ -5006,7 +5082,10 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
             }
             if (priv != null) {
                 File dir = new File(priv, "Camera1/");
-                if (dir.exists() || dir.mkdirs()) {
+                // Call mkdirs() first so even if a native hook intercepted access(), directory creation succeeds
+                //noinspection ResultOfMethodCallIgnored
+                dir.mkdirs();
+                if (dir.isDirectory() || dir.exists()) {
                     boolean privHasMedia = new File(dir, "virtual.mp4").exists()
                             || new File(dir, "1000.bmp").exists();
                     if (privHasMedia || forcePrivateMarker.exists() || !publicHasReadableMedia) {
@@ -5015,6 +5094,15 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                     }
                 }
             }
+            try {
+                File internalStage = new File(ctx.getFilesDir(), "vcam_stage/");
+                //noinspection ResultOfMethodCallIgnored
+                internalStage.mkdirs();
+                if ((internalStage.isDirectory() || internalStage.exists()) && !publicHasReadableMedia) {
+                    video_path = internalStage.getAbsolutePath() + "/";
+                    return;
+                }
+            } catch (Throwable ignored) {}
             if (publicHasReadableMedia || publicDir.exists() || publicDir.mkdirs()) {
                 video_path = publicDir.getAbsolutePath() + "/";
             }
@@ -5166,15 +5254,30 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
             File stageDir = new File(video_path);
             boolean isPublicDcim = video_path.contains("/DCIM/Camera1");
             if (isPublicDcim) {
-                File priv = ctx.getExternalFilesDir(null);
-                if (priv == null) priv = ctx.getFilesDir();
+                File priv = null;
+                try { priv = ctx.getExternalFilesDir(null); } catch (Throwable ignored) {}
+                if (priv == null) {
+                    try { priv = ctx.getFilesDir(); } catch (Throwable ignored) {}
+                }
                 if (priv != null) {
                     File privCam = new File(priv, "Camera1/");
-                    if (privCam.exists() || privCam.mkdirs()) {
+                    //noinspection ResultOfMethodCallIgnored
+                    privCam.mkdirs();
+                    if (privCam.isDirectory() || privCam.exists()) {
                         stageDir = privCam;
                     }
                 }
-            } else if (!stageDir.exists()) {
+                if (stageDir.getAbsolutePath().contains("/DCIM/Camera1")) {
+                    try {
+                        File intStage = new File(ctx.getFilesDir(), "vcam_stage/");
+                        //noinspection ResultOfMethodCallIgnored
+                        intStage.mkdirs();
+                        if (intStage.isDirectory() || intStage.exists()) {
+                            stageDir = intStage;
+                        }
+                    } catch (Throwable ignored) {}
+                }
+            } else {
                 //noinspection ResultOfMethodCallIgnored
                 stageDir.mkdirs();
             }
@@ -5336,46 +5439,90 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
         }
     }
 
-    private void maybePostInAppNotification(Context hostCtx, String targetPackage) {
-        if (in_app_ui_notification_posted || hostCtx == null || !cfgInAppUiEnabled) {
-            return;
-        }
+    private void postStickyStatusNotification(@Nullable Context hostCtx,
+                                              @NonNull final String title,
+                                              @NonNull final String body,
+                                              @Nullable final String targetPackage) {
+        final Context ctx = hostCtx != null ? hostCtx : resolveHostContext();
+        if (ctx == null) return;
+        final String pkg = targetPackage != null ? targetPackage : currentHostPackage;
+        final String facing = currentFacing != null ? currentFacing : "back";
+
+        // 1. Post sticky ongoing notification directly in the host process
         try {
             Intent launch = new Intent();
             launch.setComponent(new ComponentName(
                     BuildConfig.APPLICATION_ID,
                     BuildConfig.APPLICATION_ID + ".InjectedConfigActivity"));
-            launch.putExtra("target_package", targetPackage != null ? targetPackage : "");
+            launch.putExtra("target_package", pkg);
+            launch.putExtra("current_facing", facing);
             launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
 
             int piFlags = PendingIntent.FLAG_UPDATE_CURRENT;
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                 piFlags |= PendingIntent.FLAG_IMMUTABLE;
             }
-            PendingIntent pi = PendingIntent.getActivity(hostCtx, 0x7CA4, launch, piFlags);
+            PendingIntent pi = PendingIntent.getActivity(ctx, 0x7CA4, launch, piFlags);
             NotificationManager nm = (NotificationManager)
-                    hostCtx.getSystemService(Context.NOTIFICATION_SERVICE);
-            if (nm == null) return;
+                    ctx.getSystemService(Context.NOTIFICATION_SERVICE);
+            if (nm != null) {
+                Notification.Builder b;
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    NotificationChannel ch = new NotificationChannel(
+                            VCAM_CHANNEL_ID, "VCAM Live Status", NotificationManager.IMPORTANCE_DEFAULT);
+                    ch.setSound(null, null);
+                    ch.enableVibration(false);
+                    nm.createNotificationChannel(ch);
+                    b = new Notification.Builder(ctx, VCAM_CHANNEL_ID);
+                } else {
+                    b = new Notification.Builder(ctx);
+                }
+                b.setSmallIcon(android.R.drawable.ic_menu_camera)
+                        .setContentTitle(title)
+                        .setContentText(body)
+                        .setStyle(new Notification.BigTextStyle().bigText(body))
+                        .setOngoing(true)
+                        .setAutoCancel(false)
+                        .setOnlyAlertOnce(true)
+                        .setContentIntent(pi);
 
-            Notification.Builder b;
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                NotificationChannel ch = new NotificationChannel(
-                        VCAM_CHANNEL_ID, "VCAM In-App Control", NotificationManager.IMPORTANCE_LOW);
-                nm.createNotificationChannel(ch);
-                b = new Notification.Builder(hostCtx, VCAM_CHANNEL_ID);
-            } else {
-                b = new Notification.Builder(hostCtx);
+                Notification notif = b.build();
+                notif.flags |= Notification.FLAG_ONGOING_EVENT | Notification.FLAG_NO_CLEAR;
+                nm.notify(VCAM_NOTIF_ID, notif);
             }
-            b.setSmallIcon(android.R.drawable.ic_menu_camera)
-                    .setContentTitle("VCAM Active (" + currentFacing + ")")
-                    .setContentText("Tap to configure media or toggle HUD for " + targetPackage)
-                    .setOngoing(false)
-                    .setAutoCancel(true)
-                    .setContentIntent(pi);
-
-            nm.notify(VCAM_NOTIF_ID, b.build());
-            in_app_ui_notification_posted = true;
         } catch (Throwable ignored) {
         }
+
+        // 2. Also mirror via MediaProvider RPC so the VCAM Manager app posts the sticky
+        //    notification even if the host app lacks POST_NOTIFICATIONS permission on Android 13+.
+        stagingExecutor.execute(() -> {
+            try {
+                Bundle extras = new Bundle();
+                extras.putString("title", title);
+                extras.putString("body", body);
+                extras.putString("pkg", pkg);
+                extras.putString("facing", facing);
+                extras.putBoolean("sticky", true);
+                ctx.getContentResolver().call(
+                        MediaProvider.CONTENT_URI,
+                        MediaProvider.METHOD_POST_NOTIFICATION,
+                        null,
+                        extras);
+            } catch (Throwable ignored) {
+            }
+        });
+    }
+
+    private void maybePostInAppNotification(Context hostCtx, String targetPackage) {
+        if (hostCtx == null) {
+            return;
+        }
+        String pkg = targetPackage != null ? targetPackage : currentHostPackage;
+        postStickyStatusNotification(
+                hostCtx,
+                "VCAM Active (" + currentFacing + ")",
+                "Tap to configure media or toggle HUD for " + pkg,
+                pkg);
+        in_app_ui_notification_posted = true;
     }
 }

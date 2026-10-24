@@ -69,6 +69,7 @@ public class MediaProvider extends ContentProvider {
     public static final String METHOD_REPORT_TELEMETRY = "report_telemetry";
     public static final String METHOD_UPDATE_TRANSFORM = "update_transform";
     public static final String METHOD_SAVE_CUES = "save_cues";
+    public static final String METHOD_POST_NOTIFICATION = "post_notification";
 
     public static final String STATUS_OK = "OK";
     public static final String STATUS_UNSET = "UNSET";
@@ -101,20 +102,10 @@ public class MediaProvider extends ContentProvider {
         if (ctx == null) return null;
         switch (MATCHER.match(uri)) {
             case MATCH_IMAGE: {
-                String mapped = MediaMappings.resolve(ctx,
-                        MediaMappings.PKG_GLOBAL, MediaMappings.FACING_ANY,
-                        MediaMappings.TYPE_IMAGE);
-                File lib = libraryFileForUri(ctx, mapped, MediaLibrary.TYPE_IMAGE);
-                if (lib != null && lib.exists() && lib.length() > 0) return lib;
-                return MediaPaths.getImageTarget(ctx);
+                return MediaPaths.resolveEffectiveImageFile(ctx);
             }
             case MATCH_VIDEO: {
-                String mapped = MediaMappings.resolve(ctx,
-                        MediaMappings.PKG_GLOBAL, MediaMappings.FACING_ANY,
-                        MediaMappings.TYPE_VIDEO);
-                File lib = libraryFileForUri(ctx, mapped, MediaLibrary.TYPE_VIDEO);
-                if (lib != null && lib.exists() && lib.length() > 0) return lib;
-                return MediaPaths.getVideoTarget(ctx);
+                return MediaPaths.resolveEffectiveVideoFile(ctx);
             }
             case MATCH_IMAGE_ID: {
                 int id = parseIdOrZero(uri);
@@ -291,29 +282,38 @@ public class MediaProvider extends ContentProvider {
         String pkg = uri.getQueryParameter("pkg");
         String facing = uri.getQueryParameter("facing");
         String type = uri.getQueryParameter("type");
-        if (TextUtils.isEmpty(pkg) || TextUtils.isEmpty(type)) {
+        if (TextUtils.isEmpty(type)) {
             c.addRow(new Object[]{null, STATUS_UNSET});
             return c;
         }
+        if (TextUtils.isEmpty(pkg)) pkg = MediaMappings.PKG_GLOBAL;
         if (TextUtils.isEmpty(facing)) facing = MediaMappings.FACING_ANY;
         if (!MediaMappings.TYPE_IMAGE.equals(type) && !MediaMappings.TYPE_VIDEO.equals(type)) {
             c.addRow(new Object[]{null, STATUS_UNSET});
             return c;
         }
+        MediaMigration.migrateIfNeeded(ctx);
         String resolved = MediaMappings.resolve(ctx, pkg, facing, type);
         if (!TextUtils.isEmpty(resolved)) {
-            // Verify the backing library file actually exists and is non-empty
-            File libFile = libraryFileForUri(ctx, resolved, type);
-            if (libFile == null || !libFile.exists() || libFile.length() == 0) {
+            // Verify the backing file actually exists and is non-empty (supports both library item URIs and direct URI_IMAGE/URI_VIDEO)
+            File backing = null;
+            if (URI_IMAGE.toString().equals(resolved)) {
+                backing = MediaPaths.resolveEffectiveImageFile(ctx);
+            } else if (URI_VIDEO.toString().equals(resolved)) {
+                backing = MediaPaths.resolveEffectiveVideoFile(ctx);
+            } else {
+                backing = libraryFileForUri(ctx, resolved, type);
+            }
+            if (backing == null || !backing.exists() || backing.length() == 0) {
                 resolved = null;
             }
         }
         if (TextUtils.isEmpty(resolved)) {
-            // Fall back to legacy staged file if present
-            File legacy = MediaMappings.TYPE_IMAGE.equals(type)
-                    ? MediaPaths.getImageTarget(ctx)
-                    : MediaPaths.getVideoTarget(ctx);
-            if (legacy.exists() && legacy.length() > 0) {
+            // Fall back to effective staged/imported file (MediaLibrary or /DCIM/Camera1) if present
+            File effective = MediaMappings.TYPE_IMAGE.equals(type)
+                    ? MediaPaths.resolveEffectiveImageFile(ctx)
+                    : MediaPaths.resolveEffectiveVideoFile(ctx);
+            if (effective.exists() && effective.length() > 0) {
                 resolved = (MediaMappings.TYPE_IMAGE.equals(type) ? URI_IMAGE : URI_VIDEO).toString();
             }
         }
@@ -514,6 +514,9 @@ public class MediaProvider extends ContentProvider {
 
         if ("save_cues".equals(method) && extras != null) {
             String mediaKey = extras.getString("media_key");
+            if (TextUtils.isEmpty(mediaKey)) {
+                mediaKey = extras.getString("media_id", "global");
+            }
             String cuesJson = extras.getString("cues_json");
             if (!TextUtils.isEmpty(cuesJson)) {
                 try {
@@ -530,7 +533,78 @@ public class MediaProvider extends ContentProvider {
             return reply;
         }
 
+        if (METHOD_POST_NOTIFICATION.equals(method) && extras != null) {
+            String title = extras.getString("title", "VCAM Status");
+            String body = extras.getString("body", "");
+            String targetPkg = extras.getString("pkg", "");
+            String facing = extras.getString("facing", MediaMappings.FACING_BACK);
+            boolean sticky = extras.getBoolean("sticky", true);
+            postStickyStatusNotification(ctx, title, body, targetPkg, facing, sticky);
+            reply.putBoolean("ok", true);
+            return reply;
+        }
+
         return reply;
+    }
+
+    private static final String STATUS_CHANNEL_ID = "vcam_sticky_status";
+    private static final int STATUS_NOTIF_ID = 0x7CA5;
+
+    private static void postStickyStatusNotification(@NonNull Context ctx,
+                                                     @NonNull String title,
+                                                     @NonNull String body,
+                                                     @NonNull String targetPkg,
+                                                     @NonNull String facing,
+                                                     boolean sticky) {
+        try {
+            android.app.NotificationManager nm = (android.app.NotificationManager)
+                    ctx.getSystemService(Context.NOTIFICATION_SERVICE);
+            if (nm == null) return;
+
+            android.content.Intent launch = new android.content.Intent(ctx, InjectedConfigActivity.class);
+            launch.putExtra("target_package", targetPkg);
+            launch.putExtra("current_facing", facing);
+            launch.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK
+                    | android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP);
+
+            int piFlags = android.app.PendingIntent.FLAG_UPDATE_CURRENT;
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
+                piFlags |= android.app.PendingIntent.FLAG_IMMUTABLE;
+            }
+            android.app.PendingIntent pi = android.app.PendingIntent.getActivity(
+                    ctx, STATUS_NOTIF_ID, launch, piFlags);
+
+            android.app.Notification.Builder b;
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                android.app.NotificationChannel ch = new android.app.NotificationChannel(
+                        STATUS_CHANNEL_ID,
+                        "VCAM Live Status",
+                        android.app.NotificationManager.IMPORTANCE_DEFAULT);
+                ch.setDescription("Sticky VCAM injection and media status notifications");
+                ch.setSound(null, null);
+                ch.enableVibration(false);
+                nm.createNotificationChannel(ch);
+                b = new android.app.Notification.Builder(ctx, STATUS_CHANNEL_ID);
+            } else {
+                b = new android.app.Notification.Builder(ctx);
+            }
+
+            b.setSmallIcon(android.R.drawable.ic_menu_camera)
+                    .setContentTitle(title)
+                    .setContentText(body)
+                    .setStyle(new android.app.Notification.BigTextStyle().bigText(body))
+                    .setOngoing(sticky)
+                    .setAutoCancel(!sticky)
+                    .setOnlyAlertOnce(true)
+                    .setContentIntent(pi);
+
+            android.app.Notification notif = b.build();
+            if (sticky) {
+                notif.flags |= android.app.Notification.FLAG_ONGOING_EVENT
+                        | android.app.Notification.FLAG_NO_CLEAR;
+            }
+            nm.notify(STATUS_NOTIF_ID, notif);
+        } catch (Throwable ignored) {}
     }
 
     @Nullable
