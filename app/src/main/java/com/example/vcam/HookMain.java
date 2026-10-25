@@ -407,6 +407,20 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
             Collections.synchronizedMap(new WeakHashMap<>());
     private static final Map<Surface, ReaderSurfaceMeta> SURFACE_META_MAP =
             Collections.synchronizedMap(new WeakHashMap<>());
+    private static final Map<Surface, SurfaceTexture> SURFACE_TO_TEXTURE_MAP =
+            Collections.synchronizedMap(new WeakHashMap<>());
+    private static final Map<Surface, android.util.Size> SURFACE_CONFIGURED_SIZE_MAP =
+            Collections.synchronizedMap(new WeakHashMap<>());
+
+    public static void ensurePreviewSurfaceBufferSize(@Nullable Surface s, int w, int h) {
+        if (s == null || w <= 1 || h <= 1) return;
+        SurfaceTexture st = SURFACE_TO_TEXTURE_MAP.get(s);
+        if (st != null && !ATTACHED_SINK_TEXTURES.contains(st)) {
+            try {
+                st.setDefaultBufferSize(w, h);
+            } catch (Throwable ignored) {}
+        }
+    }
 
     private static final class ActiveSurfaceFeeder {
         final Surface surface;
@@ -581,7 +595,21 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
         latestVideoHeight = height;
     }
 
+    public static boolean isVideoModeActive() {
+        HookMain inst = sInstance;
+        if (inst == null) return false;
+        if (inst.isSyntheticSourceMode()) return false;
+        TransformConfig cfg = activeTransformConfig;
+        boolean hasVid = inst.hasVideoStaged() || getActiveStreamUrl() != null;
+        boolean hasImg = inst.hasImageStaged();
+        if (TransformConfig.MEDIA_IMAGE.equals(cfg.preferredMediaType) && hasImg) {
+            return false;
+        }
+        return hasVid;
+    }
+
     public static boolean hasActiveVideoFrame() {
+        if (!isVideoModeActive()) return false;
         byte[] raw = latestRawVideoNv21;
         if (raw != null && latestRawVideoWidth > 0 && latestRawVideoHeight > 0) return true;
         byte[] nv = latestVideoNv21;
@@ -1073,7 +1101,16 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
     }
 
     public static void updateActiveTransformInProcess(@NonNull TransformConfig cfg) {
+        TransformConfig prev = activeTransformConfig;
+        boolean modeOrIdentityChanged = prev == null
+                || !String.valueOf(prev.sourceMode).equals(String.valueOf(cfg.sourceMode))
+                || !String.valueOf(prev.preferredMediaType).equals(String.valueOf(cfg.preferredMediaType))
+                || (prev.isIdentityTransform() && !prev.paused) != (cfg.isIdentityTransform() && !cfg.paused);
         activeTransformConfig = cfg;
+        if (!isVideoModeActive()) {
+            latestRawVideoNv21 = null;
+            latestVideoNv21 = null;
+        }
         StaticBitmapFeeder.invalidateAllCaches();
         if (hw_decode_obj == null && latestVideoNv21 == null) {
             data_buffer = new byte[]{0};
@@ -1089,6 +1126,29 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                 }
             }
         }
+        if (modeOrIdentityChanged && cameraSessionActive && sInstance != null) {
+            try {
+                sInstance.restartActiveFeedersOnModeChange();
+            } catch (Throwable ignored) {}
+        }
+    }
+
+    private void restartActiveFeedersOnModeChange() {
+        List<Surface> trackedSurfaces = new ArrayList<>(ACTIVE_FEEDERS.keySet());
+        for (ActiveSurfaceFeeder feeder : ACTIVE_FEEDERS.values()) {
+            feeder.stop();
+        }
+        ACTIVE_FEEDERS.clear();
+        if (!isVideoModeActive() && c2_hw_decode_obj != null) {
+            try { c2_hw_decode_obj.stopDecode(); } catch (Throwable ignored) {}
+            c2_hw_decode_obj = null;
+        }
+        for (Surface s : trackedSurfaces) {
+            if (s != null && s.isValid()) {
+                registerTargetSurface(s);
+            }
+        }
+        ensureAllRegisteredFeedersRunning();
     }
 
     // ---------------------------------------------------------------------
@@ -1716,13 +1776,30 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                                 imageReaderFormat = fmt;
                                 if (param.getResult() instanceof ImageReader) {
                                     ImageReader ir = (ImageReader) param.getResult();
-                                    IMAGE_READER_META.put(ir, new ReaderSurfaceMeta(w, h, fmt, ir, requestedFormat));
+                                    ReaderSurfaceMeta meta = new ReaderSurfaceMeta(w, h, fmt, ir, requestedFormat);
+                                    IMAGE_READER_META.put(ir, meta);
+                                    try {
+                                        Surface s = ir.getSurface();
+                                        if (s != null) SURFACE_META_MAP.put(s, meta);
+                                    } catch (Throwable ignored) {}
                                 }
                             }
                         });
             } catch (Throwable ignored) {
             }
         }
+
+        // Track new Surface(SurfaceTexture) so we can configure default buffer size on preview surfaces!
+        try {
+            XposedHelpers.findAndHookConstructor(Surface.class, SurfaceTexture.class, new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    if (param.thisObject instanceof Surface && param.args.length > 0 && param.args[0] instanceof SurfaceTexture) {
+                        SURFACE_TO_TEXTURE_MAP.put((Surface) param.thisObject, (SurfaceTexture) param.args[0]);
+                    }
+                }
+            });
+        } catch (Throwable ignored) {}
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             try {
@@ -1753,7 +1830,12 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                             imageReaderFormat = fmt;
                             Object req = XposedHelpers.getAdditionalInstanceField(param.thisObject, "requestedFormat");
                             int requestedFormat = req instanceof Integer ? (Integer) req : fmt;
-                            IMAGE_READER_META.put(ir, new ReaderSurfaceMeta(w, h, fmt, ir, requestedFormat));
+                            ReaderSurfaceMeta meta = new ReaderSurfaceMeta(w, h, fmt, ir, requestedFormat);
+                            IMAGE_READER_META.put(ir, meta);
+                            try {
+                                Surface s = ir.getSurface();
+                                if (s != null) SURFACE_META_MAP.put(s, meta);
+                            } catch (Throwable ignored) {}
                         }
                     }
                 });
@@ -3479,8 +3561,60 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
             }
         } catch (Throwable ignored) {}
 
-        // Hook OutputConfiguration addSurface & setPhysicalCameraId
+        // Hook OutputConfiguration constructors, getSurface, getSurfaces, addSurface & setPhysicalCameraId
+        // In CameraX / Persona, Preview uses a deferred OutputConfiguration(Size, Class) (SurfaceTexture.class
+        // or SurfaceHolder.class). Replacing param.args[0] with c2_virtual_surface (640x480) inside addSurface()
+        // caused OutputConfiguration.addSurface() to throw IllegalArgumentException (Surface size 640x480 does
+        // not match configured size) and aborted CameraX Preview finalization!
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            try {
+                XposedBridge.hookAllConstructors(OutputConfiguration.class, new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) {
+                        if (param.thisObject == null || param.args == null) return;
+                        for (Object arg : param.args) {
+                            if (arg instanceof Surface) {
+                                Surface s = (Surface) arg;
+                                if (s != c2_virtual_surface) {
+                                    XposedHelpers.setAdditionalInstanceField(param.thisObject, "vcamOrigSurface", s);
+                                    if (isInjectionActive()) {
+                                        registerTargetSurface(s);
+                                    }
+                                }
+                            } else if (arg instanceof android.util.Size) {
+                                XposedHelpers.setAdditionalInstanceField(param.thisObject, "vcamConfiguredSize", arg);
+                            }
+                        }
+                    }
+                });
+                XposedBridge.hookAllMethods(OutputConfiguration.class, "getSurface", new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) {
+                        if (param.thisObject != null) {
+                            Object orig = XposedHelpers.getAdditionalInstanceField(param.thisObject, "vcamOrigSurface");
+                            if (orig instanceof Surface && ((Surface) orig).isValid()) {
+                                param.setResult(orig);
+                            }
+                        }
+                    }
+                });
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    XposedBridge.hookAllMethods(OutputConfiguration.class, "getSurfaces", new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            if (param.thisObject != null) {
+                                Object orig = XposedHelpers.getAdditionalInstanceField(param.thisObject, "vcamOrigSurface");
+                                if (orig instanceof Surface && ((Surface) orig).isValid()) {
+                                    List<Surface> list = new ArrayList<>();
+                                    list.add((Surface) orig);
+                                    param.setResult(list);
+                                }
+                            }
+                        }
+                    });
+                }
+            } catch (Throwable ignored) {}
+
             try {
                 XposedBridge.hookAllMethods(OutputConfiguration.class, "addSurface", new XC_MethodHook() {
                     @Override
@@ -3491,18 +3625,17 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                             if (s != c2_virtual_surface) {
                                 if (param.thisObject != null) {
                                     XposedHelpers.setAdditionalInstanceField(param.thisObject, "vcamOrigSurface", s);
-                                }
-                                registerTargetSurface(s);
-                                if (param.thisObject instanceof OutputConfiguration) {
-                                    OutputConfiguration oc = (OutputConfiguration) param.thisObject;
-                                    if (oc.getSurface() == null) {
-                                        // Deferred OutputConfiguration(Size, Class): bind our virtual sink as the primary surface
-                                        param.args[0] = getOrCreateVirtualSinkSurface();
-                                        return;
+                                    Object cfgSz = XposedHelpers.getAdditionalInstanceField(param.thisObject, "vcamConfiguredSize");
+                                    if (cfgSz instanceof android.util.Size) {
+                                        SURFACE_CONFIGURED_SIZE_MAP.put(s, (android.util.Size) cfgSz);
                                     }
                                 }
-                                // Surface-sharing OutputConfiguration that already has c2_virtual_surface:
-                                // suppress duplicate addSurface so framework doesn't throw IllegalArgumentException
+                                registerTargetSurface(s);
+                                ensureAllRegisteredFeedersRunning();
+                                // Always suppress the underlying framework addSurface() when injection is active:
+                                // the real CameraDevice session is bound to our single c2_virtual_surface, while
+                                // vcamOrigSurface is returned by our getSurface()/getSurfaces() hooks and fed
+                                // directly by ACTIVE_FEEDERS!
                                 param.setResult(null);
                             }
                         }
@@ -4695,14 +4828,21 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
         int w = meta != null ? meta.width : c2_ori_width;
         int h = meta != null ? meta.height : c2_ori_height;
         if (!isReader) {
-            try {
-                Class<?> su = Class.forName("android.hardware.camera2.utils.SurfaceUtils");
-                android.util.Size sz = (android.util.Size) su.getMethod("getSurfaceSize", Surface.class).invoke(null, s);
-                if (sz != null && sz.getWidth() > 0 && sz.getHeight() > 0) {
-                    w = sz.getWidth();
-                    h = sz.getHeight();
-                }
-            } catch (Throwable ignored) {}
+            android.util.Size cfgSz = SURFACE_CONFIGURED_SIZE_MAP.get(s);
+            if (cfgSz != null && cfgSz.getWidth() > 1 && cfgSz.getHeight() > 1) {
+                w = cfgSz.getWidth();
+                h = cfgSz.getHeight();
+            } else {
+                try {
+                    Class<?> su = Class.forName("android.hardware.camera2.utils.SurfaceUtils");
+                    android.util.Size sz = (android.util.Size) su.getMethod("getSurfaceSize", Surface.class).invoke(null, s);
+                    if (sz != null && sz.getWidth() > 1 && sz.getHeight() > 1) {
+                        w = sz.getWidth();
+                        h = sz.getHeight();
+                    }
+                } catch (Throwable ignored) {}
+            }
+            ensurePreviewSurfaceBufferSize(s, w, h);
         }
         int fmt = meta != null ? meta.format : StaticBitmapFeeder.FORMAT_PREVIEW;
 
@@ -4720,7 +4860,7 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
 
     private void ensureAllRegisteredFeedersRunning() {
         boolean synthetic = isSyntheticSourceMode();
-        boolean videoMode = !synthetic && (hasVideoStaged() || getActiveStreamUrl() != null);
+        boolean videoMode = isVideoModeActive();
         boolean imageMode = synthetic || hasImageStaged() || !videoMode;
 
         boolean hasRunningVideoDecoder = false;
@@ -4824,11 +4964,70 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                 }
             }
         } else {
-            // Preview / SurfaceView / TextureView surface:
-            // Use StaticBitmapFeeder with FORMAT_PREVIEW for BOTH imageMode and videoMode!
-            // In videoMode, StaticBitmapFeeder renders live decoded frames from getLatestVideoFrameBitmap()
-            // with full in-process PTZ (zoom, pan, rotate, mirror, brightness, WB, freeze-frame)
-            // directly onto the Preview Surface without external mediaserver EACCES failures.
+            // Preview / SurfaceView / TextureView / PreviewView surface:
+            ensurePreviewSurfaceBufferSize(s, w, h);
+            TransformConfig cfg = activeTransformConfig;
+            // In videoMode when spatial/photometric transform is default (no custom zoom/pan/freeze),
+            // also support direct FD-backed MediaPlayer onto the preview Surface so ANativeWindow
+            // connects via NATIVE_WINDOW_API_MEDIA (configuring hardware GraphicBuffers for CameraX
+            // PreviewView / OpenGlRenderer without mediaserver EACCES because we pass a FileDescriptor!).
+            if (videoMode && !cfg.paused
+                    && Math.abs(cfg.zoom - 1.0f) < 0.01f
+                    && Math.abs(cfg.panX) < 0.01f
+                    && Math.abs(cfg.panY) < 0.01f
+                    && !cfg.mirrorH && !cfg.mirrorV
+                    && cfg.rotationMode == TransformConfig.ROT_AUTO
+                    && Math.abs(cfg.wbKelvinShift) < 0.01f
+                    && Math.abs(cfg.brightnessShift) < 0.01f) {
+                ParcelFileDescriptor pfd = null;
+                try {
+                    File localVid = resolveBestVideoFile();
+                    if (localVid != null && localVid.exists() && localVid.length() > 0) {
+                        pfd = ParcelFileDescriptor.open(localVid, ParcelFileDescriptor.MODE_READ_ONLY);
+                    } else {
+                        pfd = openActiveVideoPfd();
+                    }
+                    String streamUrl = getActiveStreamUrl();
+                    if (pfd != null || streamUrl != null) {
+                        MediaPlayer mp = new MediaPlayer();
+                        mp.setSurface(s);
+                        if (cfgMute) {
+                            mp.setVolume(0f, 0f);
+                        }
+                        mp.setLooping(cfgLoopVideo);
+                        int scalingMode = TransformConfig.ASPECT_FILL.equals(cfg.aspectMode)
+                                ? MediaPlayer.VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING
+                                : MediaPlayer.VIDEO_SCALING_MODE_SCALE_TO_FIT;
+                        try { mp.setVideoScalingMode(scalingMode); } catch (Throwable ignored) {}
+                        if (streamUrl != null) {
+                            mp.setDataSource(streamUrl);
+                        } else {
+                            mp.setDataSource(pfd.getFileDescriptor());
+                            feeder.playerPfd = pfd;
+                        }
+                        mp.setOnPreparedListener(MediaPlayer::start);
+                        mp.setOnErrorListener((player, what, extra) -> {
+                            XposedBridge.log("[VCAM] Preview MediaPlayer error (" + what + "," + extra + ") -> StaticBitmapFeeder fallback");
+                            try { player.release(); } catch (Throwable ignored) {}
+                            feeder.mediaPlayer = null;
+                            if (feeder.bitmapFeeder == null) {
+                                File fbImg = resolveBestImageFile(video_path + "1000.bmp");
+                                if (fbImg == null) fbImg = new File(video_path + "1000.bmp");
+                                feeder.bitmapFeeder = new StaticBitmapFeeder(s, fbImg, w, h, StaticBitmapFeeder.FORMAT_PREVIEW);
+                            }
+                            return true;
+                        });
+                        mp.prepareAsync();
+                        feeder.mediaPlayer = mp;
+                        return;
+                    }
+                } catch (Throwable mpErr) {
+                    if (pfd != null) {
+                        try { pfd.close(); } catch (Throwable ignored) {}
+                    }
+                    XposedBridge.log("[VCAM] FD MediaPlayer setup failed, using StaticBitmapFeeder: " + mpErr);
+                }
+            }
             StaticBitmapFeeder sbf = new StaticBitmapFeeder(s, bestImg, w, h,
                     StaticBitmapFeeder.FORMAT_PREVIEW);
             feeder.bitmapFeeder = sbf;
@@ -4901,6 +5100,19 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
             Bitmap out = FrameTransformPipeline.renderTransformedBitmap(raw, w, h, cfg, 0, hostSensorRot);
             ExifSynthesizer.updatePhotometryFromBitmap(out, activeLensProfile, currentFacing);
             return out;
+        }
+
+        // If video mode is active, prioritize live decoded video frame for still captures & preview
+        if (isVideoModeActive()) {
+            Bitmap vidFrame = getLatestVideoFrameBitmap(w, h);
+            if (vidFrame != null) {
+                Bitmap out = FrameTransformPipeline.renderTransformedBitmap(vidFrame, w, h, cfg, 0, hostSensorRot);
+                if (cfg.sensorGrainEnabled) {
+                    FrameTransformPipeline.applyTemporalGrainBitmap(out, cfg.grainStrength);
+                }
+                ExifSynthesizer.updatePhotometryFromBitmap(out, activeLensProfile, currentFacing);
+                return out;
+            }
         }
 
         File imgFile = resolveBestImageFile(video_path + "1000.bmp");

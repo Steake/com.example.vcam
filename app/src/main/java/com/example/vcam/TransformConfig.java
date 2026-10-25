@@ -51,6 +51,11 @@ public final class TransformConfig {
     public static final String SOURCE_QR_CODE = "qr_code";           // Live projected QR code
     public static final String SOURCE_QR = SOURCE_QR_CODE;
 
+    // Preferred media type when SOURCE_MEDIA is active and both image + video are staged
+    public static final String MEDIA_AUTO = "auto";
+    public static final String MEDIA_IMAGE = "image";
+    public static final String MEDIA_VIDEO = "video";
+
     // Simul-Cam / PIP modes
     public static final String PIP_OFF = "off";
     public static final String PIP_REAL_IN_CORNER = "real_in_corner";
@@ -80,6 +85,7 @@ public final class TransformConfig {
     public boolean passthroughMode = false;
     @NonNull public String pipMode = PIP_OFF;
     @NonNull public String sourceMode = SOURCE_MEDIA;
+    @NonNull public String preferredMediaType = MEDIA_AUTO;
     @NonNull public String streamUrl = "";
     @NonNull public String qrPayload = "https://github.com/Steake/com.example.vcam";
     public int activeCueId = -1;
@@ -168,6 +174,11 @@ public final class TransformConfig {
         }
     }
 
+    public void setRotation(int rot) {
+        this.rotationMode = rot;
+        this.rotationDegrees = rot;
+    }
+
     public TransformConfig copy() {
         return fromJson(toJson());
     }
@@ -211,7 +222,7 @@ public final class TransformConfig {
     public JSONObject toJson() {
         JSONObject o = new JSONObject();
         try {
-            int effRot = rotationDegrees != ROT_AUTO ? rotationDegrees : rotationMode;
+            int effRot = rotationMode != ROT_AUTO ? rotationMode : rotationDegrees;
             boolean effPass = passthroughMode || passthroughRealCamera;
             o.put("aspectMode", aspectMode);
             o.put("rotationMode", effRot);
@@ -233,6 +244,7 @@ public final class TransformConfig {
             o.put("passthroughMode", effPass);
             o.put("pipMode", pipMode);
             o.put("sourceMode", sourceMode);
+            o.put("preferredMediaType", preferredMediaType);
             o.put("streamUrl", streamUrl);
             o.put("qrPayload", qrPayload);
             o.put("activeCueId", activeCueId);
@@ -274,6 +286,7 @@ public final class TransformConfig {
         c.passthroughMode = pass;
         c.pipMode = o.optString("pipMode", PIP_OFF);
         c.sourceMode = o.optString("sourceMode", SOURCE_MEDIA);
+        c.preferredMediaType = o.optString("preferredMediaType", MEDIA_AUTO);
         c.streamUrl = o.optString("streamUrl", "");
         c.qrPayload = o.optString("qrPayload", "https://github.com/Steake/com.example.vcam");
         c.activeCueId = o.optInt("activeCueId", -1);

@@ -210,6 +210,28 @@ public class MainActivity extends AppCompatActivity {
             if (hasStoragePermission()) MediaPaths.defaultDir();
             pickVideoLauncher.launch("video/*");
         });
+        if (chipImage != null) {
+            chipImage.setOnClickListener(v -> {
+                TransformConfig cfg = TransformConfig.loadGlobal(this);
+                cfg.sourceMode = TransformConfig.SOURCE_MEDIA;
+                cfg.preferredMediaType = TransformConfig.MEDIA_IMAGE;
+                saveGlobalTransformAndRefresh(cfg);
+                syncStateWithFiles();
+                startDemoPlayback();
+                Toast.makeText(this, "Active feed: Still Image", Toast.LENGTH_SHORT).show();
+            });
+        }
+        if (chipVideo != null) {
+            chipVideo.setOnClickListener(v -> {
+                TransformConfig cfg = TransformConfig.loadGlobal(this);
+                cfg.sourceMode = TransformConfig.SOURCE_MEDIA;
+                cfg.preferredMediaType = TransformConfig.MEDIA_VIDEO;
+                saveGlobalTransformAndRefresh(cfg);
+                syncStateWithFiles();
+                startDemoPlayback();
+                Toast.makeText(this, "Active feed: Video Loop", Toast.LENGTH_SHORT).show();
+            });
+        }
 
         findViewById(R.id.btn_clear).setOnClickListener(v -> clearMedia());
         findViewById(R.id.btn_test).setOnClickListener(v -> launchVerifier());
@@ -393,13 +415,13 @@ public class MainActivity extends AppCompatActivity {
         });
         findViewById(R.id.btn_rotate_auto).setOnClickListener(v -> {
             TransformConfig cfg = TransformConfig.loadGlobal(this);
-            cfg.rotationDegrees = TransformConfig.ROTATION_AUTO;
+            cfg.setRotation(TransformConfig.ROTATION_AUTO);
             saveGlobalTransformAndRefresh(cfg);
         });
         findViewById(R.id.btn_rotate_90).setOnClickListener(v -> {
             TransformConfig cfg = TransformConfig.loadGlobal(this);
-            int cur = cfg.rotationDegrees == TransformConfig.ROTATION_AUTO ? 0 : cfg.rotationDegrees;
-            cfg.rotationDegrees = (cur + 90) % 360;
+            int cur = cfg.rotationMode == TransformConfig.ROTATION_AUTO ? 0 : cfg.rotationMode;
+            cfg.setRotation((cur + 90) % 360);
             saveGlobalTransformAndRefresh(cfg);
         });
         findViewById(R.id.btn_mirror_h).setOnClickListener(v -> {
@@ -418,12 +440,14 @@ public class MainActivity extends AppCompatActivity {
             TransformConfig cfg = TransformConfig.loadGlobal(this);
             cfg.sourceMode = TransformConfig.SOURCE_MEDIA;
             saveGlobalTransformAndRefresh(cfg);
+            syncStateWithFiles();
             startDemoPlayback();
         });
         findViewById(R.id.btn_src_pattern).setOnClickListener(v -> {
             TransformConfig cfg = TransformConfig.loadGlobal(this);
             cfg.sourceMode = TransformConfig.SOURCE_TEST_PATTERN;
             saveGlobalTransformAndRefresh(cfg);
+            syncStateWithFiles();
             startDemoPlayback();
         });
         findViewById(R.id.btn_src_qr).setOnClickListener(v -> promptQrPayloadDialog());
@@ -527,13 +551,16 @@ public class MainActivity extends AppCompatActivity {
         if (transformStatusLine == null) return;
         String rotStr = cfg.rotationDegrees == TransformConfig.ROTATION_AUTO
                 ? "Auto" : (cfg.rotationDegrees + "°");
+        String srcStr = TransformConfig.SOURCE_MEDIA.equals(cfg.sourceMode)
+                ? ("MEDIA(" + cfg.preferredMediaType.toUpperCase(Locale.US) + ")")
+                : cfg.sourceMode.toUpperCase(Locale.US);
         transformStatusLine.setText(String.format(Locale.US,
                 "Active: Aspect=%s • Rot=%s • Zoom=%.2fx • MirrorH=%s • Source=%s",
                 cfg.aspectMode.toUpperCase(Locale.US),
                 rotStr,
                 cfg.zoom,
                 cfg.mirrorH ? "ON" : "OFF",
-                cfg.sourceMode.toUpperCase(Locale.US)));
+                srcStr));
     }
 
     // ---------------------------------------------------------------------
@@ -685,8 +712,11 @@ public class MainActivity extends AppCompatActivity {
         final File img = MediaPaths.resolveEffectiveImageFile(this);
         final boolean isStream = TransformConfig.SOURCE_STREAM.equals(cfg.sourceMode)
                 && !cfg.streamUrl.isEmpty();
+        final boolean hasVid = vid.exists() && vid.length() > 0;
+        final boolean hasImg = img.exists() && img.length() > 0;
+        final boolean preferVideo = hasVid && (!TransformConfig.MEDIA_IMAGE.equals(cfg.preferredMediaType) || !hasImg);
 
-        if (isStream || (vid.exists() && vid.length() > 0)) {
+        if (isStream || preferVideo) {
             if (!isStream) {
                 int[] vRes = MediaPaths.videoResolution(vid);
                 if (vRes != null) {
@@ -1007,6 +1037,10 @@ public class MainActivity extends AppCompatActivity {
                 if (bytes <= 0 && libEntry == null) {
                     throw new IOException("Unable to stage media into MediaLibrary or " + dst);
                 }
+                TransformConfig cfg = TransformConfig.loadGlobal(this);
+                cfg.sourceMode = TransformConfig.SOURCE_MEDIA;
+                cfg.preferredMediaType = isImage ? TransformConfig.MEDIA_IMAGE : TransformConfig.MEDIA_VIDEO;
+                TransformConfig.saveGlobal(this, cfg);
                 MediaMappings.notifyUpdated(this);
 
                 final long finalBytes = bytes;
@@ -1142,10 +1176,22 @@ public class MainActivity extends AppCompatActivity {
         // image & video chips/preview (resolves MediaLibrary + legacy /DCIM/Camera1/)
         File img = MediaPaths.resolveEffectiveImageFile(this);
         File vid = MediaPaths.resolveEffectiveVideoFile(this);
+        TransformConfig cfg = TransformConfig.loadGlobal(this);
         boolean hasImage = img.exists() && img.length() > 0;
         boolean hasVideo = vid.exists() && vid.length() > 0;
-        chipImage.setText(hasImage ? R.string.chip_image_loaded : R.string.chip_image_none);
-        chipVideo.setText(hasVideo ? R.string.chip_video_loaded : R.string.chip_video_none);
+        boolean mediaMode = TransformConfig.SOURCE_MEDIA.equals(cfg.sourceMode);
+        boolean activeVid = mediaMode && hasVideo && (!TransformConfig.MEDIA_IMAGE.equals(cfg.preferredMediaType) || !hasImage);
+        boolean activeImg = mediaMode && hasImage && !activeVid;
+        if (hasImage) {
+            chipImage.setText(activeImg ? "★ Image: ACTIVE" : getString(R.string.chip_image_loaded));
+        } else {
+            chipImage.setText(R.string.chip_image_none);
+        }
+        if (hasVideo) {
+            chipVideo.setText(activeVid ? "★ Video: ACTIVE" : getString(R.string.chip_video_loaded));
+        } else {
+            chipVideo.setText(R.string.chip_video_none);
+        }
         if (hasVideo || hasImage) {
             String activeDesc = (hasVideo ? ("Video: " + vid.getName() + " (" + MediaPaths.humanBytes(vid.length()) + ") ") : "")
                     + (hasImage ? ("Image: " + img.getName() + " (" + MediaPaths.humanBytes(img.length()) + ")") : "");
@@ -1171,12 +1217,21 @@ public class MainActivity extends AppCompatActivity {
 
     private MediaPreviewState loadMediaPreviewState(File img, File vid) {
         MediaPreviewState state = new MediaPreviewState();
-        if (img.exists() && img.length() > 0) {
+        TransformConfig cfg = TransformConfig.loadGlobal(this);
+        boolean hasImg = img.exists() && img.length() > 0;
+        boolean hasVid = vid.exists() && vid.length() > 0;
+        boolean preferVid = hasVid && (!TransformConfig.MEDIA_IMAGE.equals(cfg.preferredMediaType) || !hasImg);
+        if (preferVid) {
+            state.thumb = MediaPaths.decodeVideoFrame(vid);
+            state.resolution = MediaPaths.videoResolution(vid);
+            state.sizeLabel = MediaPaths.humanBytes(vid.length());
+        }
+        if (state.thumb == null && hasImg) {
             state.thumb = MediaPaths.decodeImageThumb(img, 800);
             state.resolution = MediaPaths.imageResolution(img);
             state.sizeLabel = MediaPaths.humanBytes(img.length());
         }
-        if ((state.thumb == null) && vid.exists() && vid.length() > 0) {
+        if (state.thumb == null && hasVid) {
             state.thumb = MediaPaths.decodeVideoFrame(vid);
             state.resolution = MediaPaths.videoResolution(vid);
             state.sizeLabel = MediaPaths.humanBytes(vid.length());

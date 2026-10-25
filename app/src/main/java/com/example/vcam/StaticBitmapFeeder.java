@@ -202,6 +202,10 @@ public class StaticBitmapFeeder {
             if (synth == null) return false;
             cachedTransformedBitmap = synth;
             rebuildEncodedBuffers(synth, cfg);
+            // Reset file-based cache keys so switching back to SOURCE_MEDIA always re-renders!
+            cachedMtime = -1L;
+            cachedSize = -1L;
+            cachedTransformSig = "SYNTH|" + cfg.sourceMode + "|" + buildTransformSignature(cfg);
             return surfaceFormat == FORMAT_PREVIEW ? (cachedTransformedBitmap != null)
                     : ((surfaceFormat == ImageFormat.JPEG || surfaceFormat == 256) ? cachedJpeg != null : cachedI420 != null);
         }
@@ -214,6 +218,9 @@ public class StaticBitmapFeeder {
                 cachedTransformedBitmap = FrameTransformPipeline.renderToBitmap(
                         videoBmp, 0, width, height, cfg, cachedTransformedBitmap);
                 rebuildEncodedBuffers(cachedTransformedBitmap, cfg);
+                cachedMtime = -1L;
+                cachedSize = -1L;
+                cachedTransformSig = "VIDEO|" + buildTransformSignature(cfg);
                 return surfaceFormat == FORMAT_PREVIEW ? (cachedTransformedBitmap != null)
                         : ((surfaceFormat == ImageFormat.JPEG || surfaceFormat == 256) ? cachedJpeg != null : cachedI420 != null);
             }
@@ -435,17 +442,33 @@ public class StaticBitmapFeeder {
         buf.rewind();
     }
 
+    private volatile boolean preferSoftwareCanvas = false;
+
     private void drawOnCanvas(@NonNull TransformConfig cfg) {
         Surface s = surface;
         Bitmap bmp = cachedTransformedBitmap;
         if (s == null || !s.isValid() || bmp == null || bmp.isRecycled()) return;
+        HookMain.ensurePreviewSurfaceBufferSize(s, width, height);
         Canvas c = null;
         try {
-            try {
-                c = s.lockCanvas(null);
-            } catch (Throwable lockErr) {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            // Try lockHardwareCanvas() FIRST on Android M+ so GPU-backed PreviewView
+            // SurfaceTexture / SurfaceView consumers (like Persona / CameraX OpenGlRenderer)
+            // receive hardware GraphicBuffers with proper geometry instead of 1x1 CPU-locked buffers.
+            if (!preferSoftwareCanvas && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                try {
                     c = s.lockHardwareCanvas();
+                } catch (Throwable hwErr) {
+                    preferSoftwareCanvas = true;
+                    c = s.lockCanvas(null);
+                }
+            } else {
+                try {
+                    c = s.lockCanvas(null);
+                } catch (Throwable swErr) {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                        preferSoftwareCanvas = false;
+                        c = s.lockHardwareCanvas();
+                    }
                 }
             }
             if (c == null) return;

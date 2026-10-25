@@ -428,6 +428,22 @@ public final class InAppOverlayManager {
         private TextView timeReadout;
         private JoystickView joystickView;
         private ScaleGestureDetector pinchDetector;
+        private Button tabBtnPtz;
+        private Button tabBtnPlay;
+        private Button tabBtnSensor;
+        private Button btnPassthrough;
+        private Button btnFit;
+        private Button btnFill;
+        private Button btnStr;
+        private Button btnRotAuto;
+        private Button btnRot90;
+        private Button btnMirH;
+        private Button btnMirV;
+        private Button btnFreeze;
+        private Button btnSrcMedia;
+        private Button btnSrcGrid;
+        private Button btnSrcQr;
+        private Button btnGrain;
 
         private boolean expanded = false;
         private int activeTab = 0; // 0 = PTZ, 1 = Playback/Cues, 2 = Sensor/Source
@@ -474,12 +490,12 @@ public final class InAppOverlayManager {
 
         private View buildBubbleView(@NonNull final Context ctx) {
             final TextView b = new TextView(ctx);
-            int size = dp(ctx, 44);
+            int size = dp(ctx, 54);
             b.setLayoutParams(new LayoutParams(size, size));
             b.setGravity(Gravity.CENTER);
             b.setText("VC");
             b.setTextColor(Color.WHITE);
-            b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+            b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
             b.getPaint().setFakeBoldText(true);
 
             GradientDrawable bg = new GradientDrawable();
@@ -540,15 +556,16 @@ public final class InAppOverlayManager {
         private LinearLayout buildExpandedPanel(@NonNull final Context ctx) {
             LinearLayout root = new LinearLayout(ctx);
             root.setOrientation(LinearLayout.VERTICAL);
-            int width = dp(ctx, 290);
+            int screenW = ctx.getResources().getDisplayMetrics().widthPixels;
+            int width = Math.min(dp(ctx, 356), Math.max(dp(ctx, 304), screenW - dp(ctx, 20)));
             root.setLayoutParams(new LayoutParams(width, ViewGroup.LayoutParams.WRAP_CONTENT));
-            int pad = dp(ctx, 10);
+            int pad = dp(ctx, 14);
             root.setPadding(pad, pad, pad, pad);
 
             GradientDrawable bg = new GradientDrawable();
-            bg.setColor(0xEE181C24);
-            bg.setCornerRadius(dp(ctx, 16));
-            bg.setStroke(dp(ctx, 1), 0x55FFFFFF);
+            bg.setColor(0xF4141923);
+            bg.setCornerRadius(dp(ctx, 18));
+            bg.setStroke(dp(ctx, 2), 0xAA00B4D8);
             root.setBackground(bg);
 
             // Header bar (Draggable + Status + Minimize/Hide)
@@ -559,20 +576,21 @@ public final class InAppOverlayManager {
             statusLabel = new TextView(ctx);
             statusLabel.setText("VCAM HUD");
             statusLabel.setTextColor(0xFF80D8FF);
-            statusLabel.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+            statusLabel.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
             statusLabel.getPaint().setFakeBoldText(true);
             LinearLayout.LayoutParams titleLp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
             header.addView(statusLabel, titleLp);
 
-            Button btnPassthrough = makeSmallButton(ctx, "LIVE/VIRT", v -> {
+            btnPassthrough = makeSmallButton(ctx, "LIVE/VIRT", v -> {
                 TransformConfig cfg = HookMain.getActiveTransformConfig();
                 cfg.passthroughRealCamera = !cfg.passthroughRealCamera;
+                cfg.passthroughMode = cfg.passthroughRealCamera;
                 applyAndPersistTransform(cfg);
                 refreshUiFromState();
             });
             header.addView(btnPassthrough);
 
-            Button btnMin = makeSmallButton(ctx, "—", v -> setExpanded(false));
+            Button btnMin = makeSmallButton(ctx, "MIN", v -> setExpanded(false));
             header.addView(btnMin);
 
             header.setOnTouchListener(new OnTouchListener() {
@@ -600,10 +618,13 @@ public final class InAppOverlayManager {
             // Tab Strip (PTZ | Cues/Play | Sensor/Source)
             LinearLayout tabs = new LinearLayout(ctx);
             tabs.setOrientation(LinearLayout.HORIZONTAL);
-            tabs.setPadding(0, dp(ctx, 4), 0, dp(ctx, 6));
-            tabs.addView(makeTabButton(ctx, "PTZ & Aspect", 0));
-            tabs.addView(makeTabButton(ctx, "Play & Cues", 1));
-            tabs.addView(makeTabButton(ctx, "Sensor & Src", 2));
+            tabs.setPadding(0, dp(ctx, 6), 0, dp(ctx, 8));
+            tabBtnPtz = makeTabButton(ctx, "PTZ & Aspect", 0);
+            tabBtnPlay = makeTabButton(ctx, "Play & Cues", 1);
+            tabBtnSensor = makeTabButton(ctx, "Sensor & Src", 2);
+            tabs.addView(tabBtnPtz);
+            tabs.addView(tabBtnPlay);
+            tabs.addView(tabBtnSensor);
             root.addView(tabs);
 
             return root;
@@ -624,7 +645,7 @@ public final class InAppOverlayManager {
                 cfg.panY = normY;
                 applyAndPersistTransform(cfg);
             });
-            LinearLayout.LayoutParams joyLp = new LinearLayout.LayoutParams(dp(ctx, 96), dp(ctx, 96));
+            LinearLayout.LayoutParams joyLp = new LinearLayout.LayoutParams(dp(ctx, 114), dp(ctx, 114));
             joyRow.addView(joystickView, joyLp);
 
             // Right column: D-Pad fine nudge + Aspect Ratio & Rotate buttons
@@ -650,35 +671,42 @@ public final class InAppOverlayManager {
             LinearLayout aspectRow = new LinearLayout(ctx);
             aspectRow.setOrientation(LinearLayout.HORIZONTAL);
             aspectRow.setPadding(0, dp(ctx, 4), 0, 0);
-            aspectRow.addView(makeSmallButton(ctx, "FIT", v -> setAspect(TransformConfig.ASPECT_FIT)));
-            aspectRow.addView(makeSmallButton(ctx, "FILL", v -> setAspect(TransformConfig.ASPECT_FILL)));
-            aspectRow.addView(makeSmallButton(ctx, "STR", v -> setAspect(TransformConfig.ASPECT_STRETCH)));
+            btnFit = makeSmallButton(ctx, "FIT", v -> setAspect(TransformConfig.ASPECT_FIT));
+            btnFill = makeSmallButton(ctx, "FILL", v -> setAspect(TransformConfig.ASPECT_FILL));
+            btnStr = makeSmallButton(ctx, "STR", v -> setAspect(TransformConfig.ASPECT_STRETCH));
+            aspectRow.addView(btnFit);
+            aspectRow.addView(btnFill);
+            aspectRow.addView(btnStr);
             rightCol.addView(aspectRow);
 
             // Rotation & Mirror row
             LinearLayout rotRow = new LinearLayout(ctx);
             rotRow.setOrientation(LinearLayout.HORIZONTAL);
             rotRow.setPadding(0, dp(ctx, 4), 0, 0);
-            rotRow.addView(makeSmallButton(ctx, "AUTO°", v -> setRot(TransformConfig.ROT_AUTO)));
-            rotRow.addView(makeSmallButton(ctx, "+90°", v -> {
+            btnRotAuto = makeSmallButton(ctx, "AUTO°", v -> setRot(TransformConfig.ROT_AUTO));
+            btnRot90 = makeSmallButton(ctx, "+90°", v -> {
                 TransformConfig cfg = HookMain.getActiveTransformConfig();
                 int cur = cfg.rotationMode < 0 ? 0 : cfg.rotationMode;
-                cfg.rotationMode = (cur + 90) % 360;
+                cfg.setRotation((cur + 90) % 360);
                 applyAndPersistTransform(cfg);
                 refreshUiFromState();
-            }));
-            rotRow.addView(makeSmallButton(ctx, "⇔H", v -> {
+            });
+            btnMirH = makeSmallButton(ctx, "⇔H", v -> {
                 TransformConfig cfg = HookMain.getActiveTransformConfig();
                 cfg.mirrorH = !cfg.mirrorH;
                 applyAndPersistTransform(cfg);
                 refreshUiFromState();
-            }));
-            rotRow.addView(makeSmallButton(ctx, "⇕V", v -> {
+            });
+            btnMirV = makeSmallButton(ctx, "⇕V", v -> {
                 TransformConfig cfg = HookMain.getActiveTransformConfig();
                 cfg.mirrorV = !cfg.mirrorV;
                 applyAndPersistTransform(cfg);
                 refreshUiFromState();
-            }));
+            });
+            rotRow.addView(btnRotAuto);
+            rotRow.addView(btnRot90);
+            rotRow.addView(btnMirH);
+            rotRow.addView(btnMirV);
             rightCol.addView(rotRow);
 
             joyRow.addView(rightCol, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
@@ -697,6 +725,11 @@ public final class InAppOverlayManager {
             zoomRow.addView(zoomReadout);
 
             zoomSlider = new SeekBar(ctx);
+            zoomSlider.setPadding(dp(ctx, 8), dp(ctx, 6), dp(ctx, 8), dp(ctx, 6));
+            zoomSlider.setOnTouchListener((v, ev) -> {
+                if (v.getParent() != null) v.getParent().requestDisallowInterceptTouchEvent(true);
+                return false;
+            });
             zoomSlider.setMax(475); // 0.25x .. 5.00x
             zoomSlider.setProgress(75);
             zoomSlider.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
@@ -764,13 +797,14 @@ public final class InAppOverlayManager {
             ctrlRow.setOrientation(LinearLayout.HORIZONTAL);
             ctrlRow.setGravity(Gravity.CENTER_VERTICAL);
 
-            ctrlRow.addView(makeSmallButton(ctx, "⏯ Freeze/Play", v -> {
+            btnFreeze = makeSmallButton(ctx, "⏯ Freeze/Play", v -> {
                 TransformConfig cfg = HookMain.getActiveTransformConfig();
                 cfg.paused = !cfg.paused;
                 HookMain.setPlaybackPaused(cfg.paused);
                 applyAndPersistTransform(cfg);
                 refreshUiFromState();
-            }));
+            });
+            ctrlRow.addView(btnFreeze);
 
             ctrlRow.addView(makeSmallButton(ctx, "⏮ 0:00", v -> {
                 HookMain.seekActiveVideo(0L);
@@ -786,6 +820,11 @@ public final class InAppOverlayManager {
 
             // Scrub Bar
             scrubSlider = new SeekBar(ctx);
+            scrubSlider.setPadding(dp(ctx, 8), dp(ctx, 6), dp(ctx, 8), dp(ctx, 6));
+            scrubSlider.setOnTouchListener((v, ev) -> {
+                if (v.getParent() != null) v.getParent().requestDisallowInterceptTouchEvent(true);
+                return false;
+            });
             scrubSlider.setMax(1000);
             scrubSlider.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
                 @Override
@@ -837,9 +876,12 @@ public final class InAppOverlayManager {
             // Source mode selector: Media | Test Pattern | Live QR | Picker Dialog
             LinearLayout srcRow = new LinearLayout(ctx);
             srcRow.setOrientation(LinearLayout.HORIZONTAL);
-            srcRow.addView(makeSmallButton(ctx, "Media", v -> setSourceMode(TransformConfig.SOURCE_MEDIA)));
-            srcRow.addView(makeSmallButton(ctx, "Test Grid", v -> setSourceMode(TransformConfig.SOURCE_TEST_PATTERN)));
-            srcRow.addView(makeSmallButton(ctx, "QR Code", v -> promptQrInput(ctx)));
+            btnSrcMedia = makeSmallButton(ctx, "Media", v -> setSourceMode(TransformConfig.SOURCE_MEDIA));
+            btnSrcGrid = makeSmallButton(ctx, "Test Grid", v -> setSourceMode(TransformConfig.SOURCE_TEST_PATTERN));
+            btnSrcQr = makeSmallButton(ctx, "QR Code", v -> promptQrInput(ctx));
+            srcRow.addView(btnSrcMedia);
+            srcRow.addView(btnSrcGrid);
+            srcRow.addView(btnSrcQr);
             srcRow.addView(makeSmallButton(ctx, "Swap...", v -> launchInjectedConfig(ctx)));
             box.addView(srcRow);
 
@@ -854,6 +896,11 @@ public final class InAppOverlayManager {
             wbRow.addView(wbLbl);
 
             SeekBar wbBar = new SeekBar(ctx);
+            wbBar.setPadding(dp(ctx, 8), dp(ctx, 6), dp(ctx, 8), dp(ctx, 6));
+            wbBar.setOnTouchListener((v, ev) -> {
+                if (v.getParent() != null) v.getParent().requestDisallowInterceptTouchEvent(true);
+                return false;
+            });
             wbBar.setMax(200);
             wbBar.setProgress(100);
             wbBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
@@ -881,6 +928,11 @@ public final class InAppOverlayManager {
             expRow.addView(expLbl);
 
             SeekBar expBar = new SeekBar(ctx);
+            expBar.setPadding(dp(ctx, 8), dp(ctx, 6), dp(ctx, 8), dp(ctx, 6));
+            expBar.setOnTouchListener((v, ev) -> {
+                if (v.getParent() != null) v.getParent().requestDisallowInterceptTouchEvent(true);
+                return false;
+            });
             expBar.setMax(100);
             expBar.setProgress(50);
             expBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
@@ -896,13 +948,15 @@ public final class InAppOverlayManager {
             });
             expRow.addView(expBar, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
-            expRow.addView(makeSmallButton(ctx, "Grain", v -> {
+            btnGrain = makeSmallButton(ctx, "Grain", v -> {
                 TransformConfig cfg = HookMain.getActiveTransformConfig();
                 cfg.sensorGrainEnabled = !cfg.sensorGrainEnabled;
                 applyAndPersistTransform(cfg);
+                refreshUiFromState();
                 Toast.makeText(ctx, "Sensor grain: " + (cfg.sensorGrainEnabled ? "ON" : "OFF"),
                         Toast.LENGTH_SHORT).show();
-            }));
+            });
+            expRow.addView(btnGrain);
             box.addView(expRow);
 
             return box;
@@ -999,6 +1053,27 @@ public final class InAppOverlayManager {
             tabPtz.setVisibility(tab == 0 ? VISIBLE : GONE);
             tabPlayback.setVisibility(tab == 1 ? VISIBLE : GONE);
             tabSensor.setVisibility(tab == 2 ? VISIBLE : GONE);
+            refreshUiFromState();
+        }
+
+        private void styleHudButton(@Nullable Button b, boolean active) {
+            if (b == null) return;
+            Context ctx = b.getContext();
+            GradientDrawable bg = new GradientDrawable();
+            if (active) {
+                bg.setColor(0xFF0077B6);
+                bg.setStroke(dp(ctx, 1), 0xFF90E0EF);
+                b.setTextColor(Color.WHITE);
+            } else {
+                bg.setColor(0xFF252D3D);
+                bg.setStroke(dp(ctx, 1), 0x6680D8FF);
+                b.setTextColor(0xFFE2E8F0);
+            }
+            bg.setCornerRadius(dp(ctx, 8));
+            b.setBackground(bg);
+            int ph = dp(ctx, 9);
+            int pv = dp(ctx, 5);
+            b.setPadding(ph, pv, ph, pv);
         }
 
         void refreshUiFromState() {
@@ -1012,6 +1087,28 @@ public final class InAppOverlayManager {
             if (joystickView != null) {
                 joystickView.setThumbNormalized(cfg.panX, cfg.panY);
             }
+            styleHudButton(tabBtnPtz, activeTab == 0);
+            styleHudButton(tabBtnPlay, activeTab == 1);
+            styleHudButton(tabBtnSensor, activeTab == 2);
+            styleHudButton(btnPassthrough, cfg.passthroughRealCamera);
+            styleHudButton(btnFit, TransformConfig.ASPECT_FIT.equals(cfg.aspectMode));
+            styleHudButton(btnFill, TransformConfig.ASPECT_FILL.equals(cfg.aspectMode));
+            styleHudButton(btnStr, TransformConfig.ASPECT_STRETCH.equals(cfg.aspectMode));
+            styleHudButton(btnRotAuto, cfg.rotationMode == TransformConfig.ROT_AUTO);
+            if (btnRot90 != null) {
+                btnRot90.setText(cfg.rotationMode == TransformConfig.ROT_AUTO ? "+90°" : (cfg.rotationMode + "°"));
+                styleHudButton(btnRot90, cfg.rotationMode != TransformConfig.ROT_AUTO);
+            }
+            styleHudButton(btnMirH, cfg.mirrorH);
+            styleHudButton(btnMirV, cfg.mirrorV);
+            if (btnFreeze != null) {
+                btnFreeze.setText(cfg.paused ? "▶ Resume" : "⏸ Freeze");
+                styleHudButton(btnFreeze, cfg.paused);
+            }
+            styleHudButton(btnSrcMedia, TransformConfig.SOURCE_MEDIA.equals(cfg.sourceMode));
+            styleHudButton(btnSrcGrid, TransformConfig.SOURCE_TEST_PATTERN.equals(cfg.sourceMode));
+            styleHudButton(btnSrcQr, TransformConfig.SOURCE_QR_CODE.equals(cfg.sourceMode));
+            styleHudButton(btnGrain, cfg.sensorGrainEnabled);
         }
 
         private void nudgePan(float dx, float dy) {
@@ -1031,7 +1128,7 @@ public final class InAppOverlayManager {
 
         private void setRot(int rot) {
             TransformConfig cfg = HookMain.getActiveTransformConfig();
-            cfg.rotationMode = rot;
+            cfg.setRotation(rot);
             applyAndPersistTransform(cfg);
             refreshUiFromState();
         }
@@ -1065,25 +1162,26 @@ public final class InAppOverlayManager {
             Button b = new Button(ctx);
             b.setText(label);
             b.setAllCaps(false);
-            b.setTextColor(Color.WHITE);
-            b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 10);
-            int ph = dp(ctx, 6);
-            int pv = dp(ctx, 2);
+            b.getPaint().setFakeBoldText(true);
+            b.setTextColor(0xFFE2E8F0);
+            b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+            int ph = dp(ctx, 9);
+            int pv = dp(ctx, 5);
             b.setPadding(ph, pv, ph, pv);
             b.setMinWidth(0);
             b.setMinHeight(0);
-            b.setMinimumWidth(dp(ctx, 30));
-            b.setMinimumHeight(dp(ctx, 26));
+            b.setMinimumWidth(dp(ctx, 44));
+            b.setMinimumHeight(dp(ctx, 36));
 
             GradientDrawable bg = new GradientDrawable();
-            bg.setColor(0xFF2C3444);
-            bg.setCornerRadius(dp(ctx, 6));
-            bg.setStroke(1, 0x44FFFFFF);
+            bg.setColor(0xFF252D3D);
+            bg.setCornerRadius(dp(ctx, 8));
+            bg.setStroke(dp(ctx, 1), 0x6680D8FF);
             b.setBackground(bg);
 
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            lp.setMargins(dp(ctx, 2), dp(ctx, 1), dp(ctx, 2), dp(ctx, 1));
+            lp.setMargins(dp(ctx, 3), dp(ctx, 2), dp(ctx, 3), dp(ctx, 2));
             b.setLayoutParams(lp);
             b.setOnClickListener(listener);
             return b;
@@ -1092,7 +1190,7 @@ public final class InAppOverlayManager {
         private Button makeTabButton(@NonNull Context ctx, @NonNull String label, final int tabIdx) {
             Button b = makeSmallButton(ctx, label, v -> switchTab(tabIdx));
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
-            lp.setMargins(dp(ctx, 2), 0, dp(ctx, 2), 0);
+            lp.setMargins(dp(ctx, 3), 0, dp(ctx, 3), 0);
             b.setLayoutParams(lp);
             return b;
         }
@@ -1157,6 +1255,9 @@ public final class InAppOverlayManager {
 
         @Override
         public boolean onTouchEvent(MotionEvent event) {
+            if (getParent() != null) {
+                getParent().requestDisallowInterceptTouchEvent(true);
+            }
             float cx = getWidth() / 2f;
             float cy = getHeight() / 2f;
             float maxR = Math.min(getWidth(), getHeight()) * 0.36f;
