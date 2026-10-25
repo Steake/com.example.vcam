@@ -275,11 +275,13 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
             Collections.synchronizedSet(new HashSet<>());
     private static final Set<Class<?>> HOOKED_BUILDERS =
             Collections.synchronizedSet(new HashSet<>());
+    private static final Set<Class<?>> HOOKED_CAPTURE_CALLBACKS =
+            Collections.synchronizedSet(new HashSet<>());
     private static final Map<CameraDevice, Boolean> INITIALIZED_CAMERA_DEVICES =
             Collections.synchronizedMap(new WeakHashMap<>());
     private static final Set<String> HOOKED_HIERARCHY_METHODS =
             Collections.synchronizedSet(new HashSet<>());
-    private static final ThreadLocal<Boolean> IN_INTERNAL_CHECK = new ThreadLocal<Boolean>() {
+    static final ThreadLocal<Boolean> IN_INTERNAL_CHECK = new ThreadLocal<Boolean>() {
         @Override
         protected Boolean initialValue() {
             return Boolean.FALSE;
@@ -746,10 +748,20 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
 
     private static boolean isNonEmptyReadableFile(@Nullable File f) {
         if (f == null) return false;
+        boolean prev = Boolean.TRUE.equals(IN_INTERNAL_CHECK.get());
+        IN_INTERNAL_CHECK.set(Boolean.TRUE);
         try {
-            if (f.length() > 0) return true;
-        } catch (Throwable ignored) {}
-        return false;
+            if (!f.exists() || !f.canRead() || f.length() <= 0) {
+                return false;
+            }
+            try (java.io.FileInputStream fis = new java.io.FileInputStream(f)) {
+                return fis.getFD() != null && fis.getFD().valid();
+            }
+        } catch (Throwable ignored) {
+            return false;
+        } finally {
+            IN_INTERNAL_CHECK.set(prev);
+        }
     }
 
     @Nullable
@@ -3397,21 +3409,38 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                 // Suppress CameraAccessException / RuntimeException when cameraserver is stopped
                 // and synthesize a virtual CameraDeviceImpl so Camera2 / CameraX opens seamlessly.
                 Throwable origErr = param.getThrowable();
-                param.setThrowable(null);
-                param.setResult(null);
-
+                String camId = (param.args != null && param.args.length > 0 && param.args[0] instanceof String)
+                        ? (String) param.args[0] : "0";
                 CameraDevice.StateCallback rootCb = (stateCb instanceof VcamStateCallbackProxy)
                         ? ((VcamStateCallbackProxy) stateCb).originalCb : stateCb;
                 synchronized (VIRTUAL_OPENED_DEVICES) {
-                    if (VIRTUAL_OPENED_DEVICES.containsKey(rootCb)) {
+                    CameraDevice existing = VIRTUAL_OPENED_DEVICES.get(rootCb);
+                    if (existing != null) {
+                        param.setThrowable(null);
+                        if (param.method instanceof java.lang.reflect.Method
+                                && CameraDevice.class.isAssignableFrom(((java.lang.reflect.Method) param.method).getReturnType())) {
+                            param.setResult(existing);
+                        } else {
+                            param.setResult(null);
+                        }
                         return;
                     }
-                    String camId = (param.args != null && param.args.length > 0 && param.args[0] instanceof String)
-                            ? (String) param.args[0] : "0";
-                    CameraDevice virtualDevice = createVirtualCameraDevice(camId);
+                    CameraDevice remoteFailedDev = LAST_REMOTE_FAILED_DEVICE.get();
+                    LAST_REMOTE_FAILED_DEVICE.remove();
+                    CameraDevice virtualDevice = remoteFailedDev != null
+                            ? remoteFailedDev : createVirtualCameraDevice(camId);
                     if (virtualDevice == null) {
-                        param.setThrowable(origErr);
                         return;
+                    }
+                    XposedHelpers.setAdditionalInstanceField(virtualDevice, "vcamVirtualDevice", Boolean.TRUE);
+                    XposedHelpers.setAdditionalInstanceField(virtualDevice, "vcamCameraId", camId);
+                    hookCameraDeviceInstance(virtualDevice.getClass());
+                    param.setThrowable(null);
+                    if (param.method instanceof java.lang.reflect.Method
+                            && CameraDevice.class.isAssignableFrom(((java.lang.reflect.Method) param.method).getReturnType())) {
+                        param.setResult(virtualDevice);
+                    } else {
+                        param.setResult(null);
                     }
                     VIRTUAL_OPENED_DEVICES.put(rootCb, virtualDevice);
                     XposedBridge.log("[VCAM] Synthesized virtual CameraDevice (id=" + camId + ") after openCamera error: " + origErr);
@@ -3460,6 +3489,18 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
         }
         try {
             hookCaptureRequestInstance(CaptureRequest.class);
+        } catch (Throwable ignored) {
+        }
+        try {
+            hookCaptureCallbackInstance(CameraCaptureSession.CaptureCallback.class);
+        } catch (Throwable ignored) {
+        }
+        try {
+            Class<?> pipeSeqClass = XposedHelpers.findClassIfExists(
+                    "androidx.camera.camera2.pipe.compat.Camera2CaptureSequence", lpparam.classLoader);
+            if (pipeSeqClass != null) {
+                hookCaptureCallbackInstance(pipeSeqClass);
+            }
         } catch (Throwable ignored) {
         }
         try {
@@ -3527,7 +3568,7 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
         } catch (Throwable ignored) {
         }
         try {
-            XposedBridge.hookAllMethods(CameraCharacteristics.class, "getKeys", new XC_MethodHook() {
+            XC_MethodHook emptyListSyntheticHook = new XC_MethodHook() {
                 @Override
                 protected void beforeHookedMethod(MethodHookParam param) {
                     if (param.thisObject != null
@@ -3536,8 +3577,13 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                         param.setResult(Collections.emptyList());
                     }
                 }
-            });
+            };
+            XposedBridge.hookAllMethods(CameraCharacteristics.class, "getKeys", emptyListSyntheticHook);
+            XposedBridge.hookAllMethods(CameraCharacteristics.class, "getAvailableCaptureRequestKeys", emptyListSyntheticHook);
+            XposedBridge.hookAllMethods(CameraCharacteristics.class, "getAvailableCaptureResultKeys", emptyListSyntheticHook);
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                XposedBridge.hookAllMethods(CameraCharacteristics.class, "getAvailableSessionKeys", emptyListSyntheticHook);
+                XposedBridge.hookAllMethods(CameraCharacteristics.class, "getAvailablePhysicalCameraRequestKeys", emptyListSyntheticHook);
                 XposedBridge.hookAllMethods(CameraCharacteristics.class, "getPhysicalCameraIds", new XC_MethodHook() {
                     @Override
                     protected void beforeHookedMethod(MethodHookParam param) {
@@ -3545,16 +3591,6 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                                 && Boolean.TRUE.equals(XposedHelpers.getAdditionalInstanceField(
                                         param.thisObject, "vcamSynthetic"))) {
                             param.setResult(Collections.emptySet());
-                        }
-                    }
-                });
-                XposedBridge.hookAllMethods(CameraCharacteristics.class, "getAvailableSessionKeys", new XC_MethodHook() {
-                    @Override
-                    protected void beforeHookedMethod(MethodHookParam param) {
-                        if (param.thisObject != null
-                                && Boolean.TRUE.equals(XposedHelpers.getAdditionalInstanceField(
-                                        param.thisObject, "vcamSynthetic"))) {
-                            param.setResult(Collections.emptyList());
                         }
                     }
                 });
@@ -3723,8 +3759,12 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
         stopAllCamera2Feeders();
     }
 
+    private static final ThreadLocal<CameraDevice> LAST_REMOTE_FAILED_DEVICE = new ThreadLocal<>();
+
     private final class VcamStateCallbackProxy extends CameraDevice.StateCallback {
         private final CameraDevice.StateCallback originalCb;
+        private final java.util.concurrent.atomic.AtomicBoolean openedDispatched =
+                new java.util.concurrent.atomic.AtomicBoolean(false);
 
         VcamStateCallbackProxy(@NonNull CameraDevice.StateCallback originalCb) {
             this.originalCb = originalCb;
@@ -3739,23 +3779,48 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
             } catch (Throwable t) {
                 XposedBridge.log("[VCAM][proxy-onOpened] " + t);
             }
-            originalCb.onOpened(camera);
+            if (openedDispatched.compareAndSet(false, true)) {
+                originalCb.onOpened(camera);
+            }
         }
 
         @Override
         public void onDisconnected(@NonNull CameraDevice camera) {
+            if (isInjectionActive() && hasAnyMedia()) {
+                XposedHelpers.setAdditionalInstanceField(camera, "vcamVirtualDevice", Boolean.TRUE);
+                try {
+                    onCameraDeviceOpened(camera);
+                } catch (Throwable ignored) {}
+                if (openedDispatched.compareAndSet(false, true)) {
+                    originalCb.onOpened(camera);
+                }
+                return;
+            }
             onCameraDeviceClosed(camera);
             originalCb.onDisconnected(camera);
         }
 
         @Override
         public void onError(@NonNull CameraDevice camera, int error) {
+            if (isInjectionActive() && hasAnyMedia()) {
+                XposedHelpers.setAdditionalInstanceField(camera, "vcamVirtualDevice", Boolean.TRUE);
+                try {
+                    onCameraDeviceOpened(camera);
+                } catch (Throwable ignored) {}
+                if (openedDispatched.compareAndSet(false, true)) {
+                    originalCb.onOpened(camera);
+                }
+                return;
+            }
             onCameraDeviceClosed(camera);
             originalCb.onError(camera, error);
         }
 
         @Override
         public void onClosed(@NonNull CameraDevice camera) {
+            synchronized (VIRTUAL_OPENED_DEVICES) {
+                VIRTUAL_OPENED_DEVICES.remove(originalCb);
+            }
             onCameraDeviceClosed(camera);
             originalCb.onClosed(camera);
         }
@@ -3937,7 +4002,22 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
             }
         }, CameraDevice.class);
 
-        XC_MethodHook cleanupHook = new XC_MethodHook() {
+        XC_MethodHook disconnectOrErrorHook = new XC_MethodHook() {
+            @Override
+            protected void beforeHookedMethod(MethodHookParam param) {
+                CameraDevice cam = (param.args != null && param.args.length > 0 && param.args[0] instanceof CameraDevice)
+                        ? (CameraDevice) param.args[0] : null;
+                if (isInjectionActive() && hasAnyMedia() && cam != null) {
+                    XposedHelpers.setAdditionalInstanceField(cam, "vcamVirtualDevice", Boolean.TRUE);
+                    onCameraDeviceOpened(cam);
+                    param.setResult(null);
+                    return;
+                }
+                onCameraDeviceClosed(cam);
+            }
+        };
+
+        XC_MethodHook closedHook = new XC_MethodHook() {
             @Override
             protected void beforeHookedMethod(MethodHookParam param) {
                 CameraDevice cam = (param.args != null && param.args.length > 0 && param.args[0] instanceof CameraDevice)
@@ -3946,9 +4026,9 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
             }
         };
 
-        hookMethodInHierarchy(hooked_class, "onDisconnected", cleanupHook, CameraDevice.class);
-        hookMethodInHierarchy(hooked_class, "onClosed", cleanupHook, CameraDevice.class);
-        hookMethodInHierarchy(hooked_class, "onError", cleanupHook, CameraDevice.class, int.class);
+        hookMethodInHierarchy(hooked_class, "onDisconnected", disconnectOrErrorHook, CameraDevice.class);
+        hookMethodInHierarchy(hooked_class, "onClosed", closedHook, CameraDevice.class);
+        hookMethodInHierarchy(hooked_class, "onError", disconnectOrErrorHook, CameraDevice.class, int.class);
     }
 
     private static boolean isVirtualCameraDevice(@Nullable Object obj) {
@@ -3990,13 +4070,31 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
             return;
         }
 
+        // Prevent CameraDeviceImpl.setRemoteFailure from queuing mCallOnDisconnected / mCallOnError
+        // when cameraserver is down or returns ERROR_DISCONNECTED during openCameraDeviceUserAsync!
+        try {
+            XposedBridge.hookAllMethods(deviceClass, "setRemoteFailure", new XC_MethodHook() {
+                @Override
+                protected void beforeHookedMethod(MethodHookParam param) {
+                    if (isInjectionActive() && hasAnyMedia() && param.thisObject instanceof CameraDevice) {
+                        CameraDevice dev = (CameraDevice) param.thisObject;
+                        XposedHelpers.setAdditionalInstanceField(dev, "vcamVirtualDevice", Boolean.TRUE);
+                        LAST_REMOTE_FAILED_DEVICE.set(dev);
+                        param.setResult(null);
+                    }
+                }
+            });
+        } catch (Throwable ignored) {}
+
         try {
             XposedHelpers.findAndHookMethod(deviceClass, "getId", new XC_MethodHook() {
                 @Override
                 protected void beforeHookedMethod(MethodHookParam param) {
                     if (isVirtualCameraDevice(param.thisObject)) {
                         Object id = XposedHelpers.getAdditionalInstanceField(param.thisObject, "vcamCameraId");
-                        param.setResult(id instanceof String ? (String) id : "0");
+                        if (id instanceof String) {
+                            param.setResult(id);
+                        }
                     }
                 }
             });
@@ -4368,24 +4466,64 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
         sSinkDrainHandler.postDelayed(ticker, 16L);
     }
 
-    private void dispatchVirtualSingleCapture(@NonNull final CameraCaptureSession session,
-                                              @Nullable final Object[] args) {
-        final CaptureRequest req = extractFirstCaptureRequest(args);
-        if (req != null) {
-            Object targetsObj = XposedHelpers.getAdditionalInstanceField(req, "vcamTargets");
-            if (targetsObj instanceof Collection) {
-                for (Object item : (Collection<?>) targetsObj) {
-                    if (item instanceof Surface) {
-                        ActiveSurfaceFeeder feeder = ACTIVE_FEEDERS.get((Surface) item);
-                        if (feeder != null && feeder.bitmapFeeder != null
-                                && (feeder.format == ImageFormat.JPEG || feeder.format == 256)) {
-                            final StaticBitmapFeeder sbf = feeder.bitmapFeeder;
-                            stagingExecutor.execute(sbf::triggerSingleFrame);
+    private void hookCaptureCallbackInstance(@Nullable Class<?> cbClass) {
+        if (cbClass == null || !HOOKED_CAPTURE_CALLBACKS.add(cbClass)) {
+            return;
+        }
+        hookAllMethodsInHierarchy(cbClass, "onCaptureBufferLost", new XC_MethodHook() {
+            @Override
+            protected void beforeHookedMethod(MethodHookParam param) {
+                if (isInjectionActive()) {
+                    param.setResult(null);
+                    return;
+                }
+                if (param.args != null) {
+                    for (Object arg : param.args) {
+                        if (arg instanceof Surface && arg == c2_virtual_surface) {
+                            param.setResult(null);
+                            return;
                         }
                     }
                 }
             }
+        });
+    }
+
+    private void triggerJpegTargetsForCapture(@Nullable Object[] args) {
+        if (args == null) return;
+        for (Object arg : args) {
+            if (arg instanceof CaptureRequest) {
+                triggerJpegTargetsForRequest((CaptureRequest) arg);
+            } else if (arg instanceof List) {
+                for (Object elem : (List<?>) arg) {
+                    if (elem instanceof CaptureRequest) {
+                        triggerJpegTargetsForRequest((CaptureRequest) elem);
+                    }
+                }
+            }
         }
+    }
+
+    private void triggerJpegTargetsForRequest(@Nullable CaptureRequest req) {
+        if (req == null) return;
+        Object targetsObj = XposedHelpers.getAdditionalInstanceField(req, "vcamTargets");
+        if (targetsObj instanceof Collection) {
+            for (Object item : (Collection<?>) targetsObj) {
+                if (item instanceof Surface) {
+                    ActiveSurfaceFeeder feeder = ACTIVE_FEEDERS.get((Surface) item);
+                    if (feeder != null && feeder.bitmapFeeder != null
+                            && (feeder.format == ImageFormat.JPEG || feeder.format == 256)) {
+                        final StaticBitmapFeeder sbf = feeder.bitmapFeeder;
+                        stagingExecutor.execute(sbf::triggerSingleFrame);
+                    }
+                }
+            }
+        }
+    }
+
+    private void dispatchVirtualSingleCapture(@NonNull final CameraCaptureSession session,
+                                              @Nullable final Object[] args) {
+        final CaptureRequest req = extractFirstCaptureRequest(args);
         final CameraCaptureSession.CaptureCallback cb = extractCaptureCallback(args);
         if (cb == null || req == null) {
             return;
@@ -4421,6 +4559,10 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
         XC_MethodHook repeatingHook = new XC_MethodHook() {
             @Override
             protected void beforeHookedMethod(MethodHookParam param) {
+                CameraCaptureSession.CaptureCallback cb = extractCaptureCallback(param.args);
+                if (cb != null) {
+                    hookCaptureCallbackInstance(cb.getClass());
+                }
                 if (isInjectionActive()) {
                     ensureAllRegisteredFeedersRunning();
                 }
@@ -4433,8 +4575,13 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
         XC_MethodHook singleCaptureHook = new XC_MethodHook() {
             @Override
             protected void beforeHookedMethod(MethodHookParam param) {
+                CameraCaptureSession.CaptureCallback cb = extractCaptureCallback(param.args);
+                if (cb != null) {
+                    hookCaptureCallbackInstance(cb.getClass());
+                }
                 if (isInjectionActive()) {
                     ensureAllRegisteredFeedersRunning();
+                    triggerJpegTargetsForCapture(param.args);
                 }
                 if (isVirtualCaptureSession(param.thisObject) && param.thisObject instanceof CameraCaptureSession) {
                     dispatchVirtualSingleCapture((CameraCaptureSession) param.thisObject, param.args);
@@ -4681,16 +4828,7 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
             protected void beforeHookedMethod(MethodHookParam param) {
                 if (!isInjectionActive()) return;
                 ensureAllRegisteredFeedersRunning();
-                // Trigger on-demand frame push for any JPEG still-capture surface targeted by this request
                 Set<Surface> targets = getBuilderTargets(param.thisObject);
-                for (Surface s : targets) {
-                    ActiveSurfaceFeeder feeder = ACTIVE_FEEDERS.get(s);
-                    if (feeder != null && feeder.bitmapFeeder != null
-                            && (feeder.format == ImageFormat.JPEG || feeder.format == 256)) {
-                        final StaticBitmapFeeder sbf = feeder.bitmapFeeder;
-                        stagingExecutor.execute(sbf::triggerSingleFrame);
-                    }
-                }
                 if (isVirtualBuilder(param.thisObject)) {
                     CaptureRequest vReq = (CaptureRequest) allocateUnsafeInstance(CaptureRequest.class);
                     if (vReq != null) {

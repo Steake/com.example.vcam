@@ -40,6 +40,7 @@ public class StaticBitmapFeeder {
     private volatile boolean running;
 
     private ImageWriter writer;
+    private volatile boolean writerConnectFailed = false;
 
     // Cached source & transformed representations, keyed on mtime + size + transform signature
     private Bitmap rawSourceBitmap;
@@ -106,6 +107,7 @@ public class StaticBitmapFeeder {
             try { writer.close(); } catch (Throwable ignored) {}
             writer = null;
         }
+        writerConnectFailed = false;
     }
 
     /**
@@ -113,10 +115,12 @@ public class StaticBitmapFeeder {
      * still-capture ImageReader surface so JPEG buffers are only queued when requested).
      */
     public synchronized void triggerSingleFrame() {
+        HookMain.IN_INTERNAL_CHECK.set(Boolean.TRUE);
         try {
             TransformConfig cfg = HookMain.getActiveTransformConfig();
             if (cfg.passthroughRealCamera) return;
-            if (writer == null && surfaceFormat != FORMAT_PREVIEW && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            if (writer == null && !writerConnectFailed && surfaceFormat != FORMAT_PREVIEW
+                    && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                 writer = createWriter();
             }
             if (!ensureCache(cfg)) return;
@@ -125,29 +129,31 @@ public class StaticBitmapFeeder {
             } else if (surfaceFormat == ImageFormat.YUV_420_888
                     || surfaceFormat == ImageFormat.NV21
                     || surfaceFormat == ImageFormat.YV12) {
-                pushYuvFrame(cfg);
+                if (writer != null) {
+                    pushYuvFrame(cfg);
+                } else {
+                    drawOnCanvas(cfg);
+                }
             } else {
                 drawOnCanvas(cfg);
             }
         } catch (Throwable t) {
             XposedBridge.log("[VCAM][feeder] triggerSingleFrame: " + t);
+        } finally {
+            HookMain.IN_INTERNAL_CHECK.set(Boolean.FALSE);
         }
     }
 
     private void runLoop() {
-        try {
-            if (surfaceFormat != FORMAT_PREVIEW && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                writer = createWriter();
-            }
-        } catch (Throwable t) {
-            XposedBridge.log("[VCAM][feeder] writer init failed: " + t);
-            writer = null;
+        if (surfaceFormat != FORMAT_PREVIEW && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            writer = createWriter();
         }
 
         long nextTick = System.currentTimeMillis();
         while (running) {
             TransformConfig cfg = HookMain.getActiveTransformConfig();
             long intervalMs = cfg.fpsMatchEnabled ? DEFAULT_INTERVAL_MS : 66L;
+            HookMain.IN_INTERNAL_CHECK.set(Boolean.TRUE);
             try {
                 if (cfg.passthroughRealCamera) {
                     Thread.sleep(intervalMs);
@@ -164,7 +170,18 @@ public class StaticBitmapFeeder {
                 } else if (surfaceFormat == ImageFormat.YUV_420_888
                         || surfaceFormat == ImageFormat.NV21
                         || surfaceFormat == ImageFormat.YV12) {
-                    pushYuvFrame(cfg);
+                    if (writer != null) {
+                        pushYuvFrame(cfg);
+                    } else if (!writerConnectFailed && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                        writer = createWriter();
+                        if (writer != null) {
+                            pushYuvFrame(cfg);
+                        } else {
+                            drawOnCanvas(cfg);
+                        }
+                    } else {
+                        drawOnCanvas(cfg);
+                    }
                 } else {
                     drawOnCanvas(cfg);
                 }
@@ -172,6 +189,8 @@ public class StaticBitmapFeeder {
                 return;
             } catch (Throwable t) {
                 XposedBridge.log("[VCAM][feeder] tick: " + t);
+            } finally {
+                HookMain.IN_INTERNAL_CHECK.set(Boolean.FALSE);
             }
             nextTick += intervalMs;
             long sleep = nextTick - System.currentTimeMillis();
@@ -185,8 +204,14 @@ public class StaticBitmapFeeder {
 
     @Nullable
     private ImageWriter createWriter() {
+        if (writerConnectFailed) return null;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && surface != null && surface.isValid()) {
-            return ImageWriter.newInstance(surface, /* maxImages */ 2);
+            try {
+                return ImageWriter.newInstance(surface, /* maxImages */ 2);
+            } catch (Throwable t) {
+                writerConnectFailed = true;
+                return null;
+            }
         }
         return null;
     }
@@ -350,6 +375,8 @@ public class StaticBitmapFeeder {
             buf.limit(cachedJpeg.length);
             w.queueInputImage(img);
             img = null;
+        } catch (Throwable ignored) {
+            // Normal consumer backpressure when host ImageReader queue is full
         } finally {
             if (img != null) {
                 try { img.close(); } catch (Throwable ignored) {}
@@ -387,6 +414,8 @@ public class StaticBitmapFeeder {
             copyPlane(planes[2], i420, ySize + uvSize, useW / 2, useH / 2, 1);
             w.queueInputImage(img);
             img = null;
+        } catch (Throwable ignored) {
+            // Normal consumer backpressure when host ImageReader queue is full
         } finally {
             if (img != null) {
                 try { img.close(); } catch (Throwable ignored) {}

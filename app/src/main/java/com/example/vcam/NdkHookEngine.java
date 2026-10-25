@@ -141,14 +141,18 @@ public final class NdkHookEngine {
                 }
             }
 
-            String[] abis = Build.SUPPORTED_ABIS != null && Build.SUPPORTED_ABIS.length > 0
-                    ? Build.SUPPORTED_ABIS
-                    : new String[]{"arm64-v8a", "armeabi-v7a", "x86_64"};
+            boolean is64Bit = Build.VERSION.SDK_INT < Build.VERSION_CODES.M || android.os.Process.is64Bit();
+            String[] rawAbis = is64Bit
+                    ? (Build.SUPPORTED_64_BIT_ABIS != null && Build.SUPPORTED_64_BIT_ABIS.length > 0
+                            ? Build.SUPPORTED_64_BIT_ABIS : new String[]{"arm64-v8a", "x86_64"})
+                    : (Build.SUPPORTED_32_BIT_ABIS != null && Build.SUPPORTED_32_BIT_ABIS.length > 0
+                            ? Build.SUPPORTED_32_BIT_ABIS : new String[]{"armeabi-v7a"});
 
             ClassLoader cl = NdkHookEngine.class.getClassLoader();
-            Throwable lastLoadError = null;
+            Throwable firstLoadError = null;
             boolean attemptedLoad = false;
-            for (String abi : abis) {
+            for (String abi : rawAbis) {
+                if (abi == null || abi.isEmpty()) continue;
                 String resPath = "lib/" + abi + "/libvcam_ndk.so";
                 InputStream in = cl != null ? cl.getResourceAsStream(resPath) : null;
                 if (in == null) {
@@ -166,6 +170,7 @@ public final class NdkHookEngine {
                 if (in != null) {
                     String randHex = UUID.randomUUID().toString().replace("-", "").substring(0, 8);
                     File outSo = new File(targetDir, "libcam_hal3_ext_" + randHex + ".so");
+                    HookMain.IN_INTERNAL_CHECK.set(Boolean.TRUE);
                     try {
                         try (InputStream src = in; FileOutputStream fos = new FileOutputStream(outSo, false)) {
                             byte[] buf = new byte[8192];
@@ -196,13 +201,16 @@ public final class NdkHookEngine {
                         syncSensorProfile(HookMain.getActiveLensProfile(), HookMain.getCurrentFacing());
                         return;
                     } catch (Throwable loadErr) {
-                        lastLoadError = loadErr;
+                        if (firstLoadError == null) {
+                            firstLoadError = loadErr;
+                        }
                     } finally {
                         // Unlink immediately after dlopen (or failed dlopen) so no .so artifact remains on filesystem
                         //noinspection ResultOfMethodCallIgnored
                         outSo.setWritable(true, true);
                         //noinspection ResultOfMethodCallIgnored
                         outSo.delete();
+                        HookMain.IN_INTERNAL_CHECK.set(Boolean.FALSE);
                     }
                 }
                 if (zf != null) {
@@ -211,8 +219,8 @@ public final class NdkHookEngine {
             }
             if (attemptedLoad && !sLoaded.get()) {
                 sExtractionFailed.set(true);
-                if (lastLoadError != null) {
-                    XposedBridge.log("【VCAM】[NDK] Extraction load fallback: " + lastLoadError.getMessage());
+                if (firstLoadError != null) {
+                    XposedBridge.log("【VCAM】[NDK] Extraction load fallback: " + firstLoadError.getMessage());
                 }
             }
         } catch (Throwable t) {

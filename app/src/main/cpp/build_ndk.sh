@@ -74,7 +74,13 @@ build_arch() {
     "${cc}" -shared -fPIC -nostdlib "${STUB_DIR}/stubs_log.c" -Wl,-soname,liblog.so -o "${arch_stub}/liblog.so"
     "${cc}" -shared -fPIC -nostdlib "${STUB_DIR}/stubs_android.c" -Wl,-soname,libandroid.so -o "${arch_stub}/libandroid.so"
 
-    "${cc}" -shared -fPIC -ffreestanding -O2 -Wall -Wextra -fno-stack-protector -nostdlib \
+    local extra_flags=""
+    if [ "${abi}" = "arm64-v8a" ]; then
+        extra_flags="-mno-outline-atomics"
+    fi
+
+    # shellcheck disable=SC2086
+    "${cc}" -shared -fPIC -ffreestanding -O2 -Wall -Wextra -fno-stack-protector -nostdlib ${extra_flags} \
         "${SCRIPT_DIR}/vcam_ndk.c" \
         -L"${arch_stub}" -Wl,--no-as-needed -lc -ldl -llog -landroid -lgcc \
         -Wl,-soname,libvcam_ndk.so \

@@ -164,30 +164,59 @@ public class VideoToFrames implements Runnable {
         XposedBridge.log("[VCAM][decoder] Starting decode");
         MediaExtractor extractor = null;
         MediaCodec decoder = null;
+        android.os.ParcelFileDescriptor fallbackPfd = null;
+        HookMain.IN_INTERNAL_CHECK.set(Boolean.TRUE);
         try {
             extractor = new MediaExtractor();
             TransformConfig initCfg = HookMain.getActiveTransformConfig();
+            boolean dataSourceSet = false;
             if (TransformConfig.SOURCE_STREAM.equals(initCfg.sourceMode)
                     && initCfg.streamUrl != null && !initCfg.streamUrl.isEmpty()) {
                 extractor.setDataSource(initCfg.streamUrl);
+                dataSourceSet = true;
             } else if (videoFilePath != null && (videoFilePath.startsWith("http://")
                     || videoFilePath.startsWith("https://") || videoFilePath.startsWith("rtsp://"))) {
                 extractor.setDataSource(videoFilePath);
+                dataSourceSet = true;
             } else if (videoFd != null && videoFd.valid()) {
-                extractor.setDataSource(videoFd);
-            } else {
-                File videoFile = new File(videoFilePath);
-                if (videoFile.length() <= 0 && !videoFile.exists()) return;
                 try {
-                    java.io.FileInputStream fis = new java.io.FileInputStream(videoFile);
-                    try {
+                    extractor.setDataSource(videoFd);
+                    dataSourceSet = true;
+                } catch (Throwable ignored) {}
+            }
+            if (!dataSourceSet && videoFilePath != null && !videoFilePath.isEmpty()) {
+                File videoFile = new File(videoFilePath);
+                if (videoFile.exists() && videoFile.length() > 0) {
+                    try (java.io.FileInputStream fis = new java.io.FileInputStream(videoFile)) {
                         extractor.setDataSource(fis.getFD());
-                    } finally {
-                        try { fis.close(); } catch (Throwable ignored) {}
+                        dataSourceSet = true;
+                    } catch (Throwable t) {
+                        try {
+                            extractor.setDataSource(videoFilePath);
+                            dataSourceSet = true;
+                        } catch (Throwable ignored) {}
                     }
-                } catch (Throwable t) {
-                    extractor.setDataSource(videoFilePath);
                 }
+            }
+            if (!dataSourceSet) {
+                fallbackPfd = HookMain.openActiveVideoPfd();
+                if (fallbackPfd != null && fallbackPfd.getFileDescriptor() != null
+                        && fallbackPfd.getFileDescriptor().valid()) {
+                    extractor.setDataSource(fallbackPfd.getFileDescriptor());
+                    dataSourceSet = true;
+                }
+            }
+            if (!dataSourceSet) {
+                File resolved = HookMain.resolveBestVideoFile();
+                if (resolved != null && resolved.exists() && resolved.length() > 0) {
+                    try (java.io.FileInputStream fis = new java.io.FileInputStream(resolved)) {
+                        extractor.setDataSource(fis.getFD());
+                        dataSourceSet = true;
+                    } catch (Throwable ignored) {}
+                }
+            }
+            if (!dataSourceSet) {
+                return;
             }
             int trackIndex = selectTrack(extractor);
             if (trackIndex < 0) {
@@ -214,6 +243,7 @@ public class VideoToFrames implements Runnable {
         } catch (Exception e) {
             XposedBridge.log("[VCAM][videofile] " + e.toString());
         } finally {
+            HookMain.IN_INTERNAL_CHECK.set(Boolean.FALSE);
             if (decoder != null) {
                 try { decoder.stop(); } catch (Throwable ignored) {}
                 try { decoder.release(); } catch (Throwable ignored) {}
@@ -222,6 +252,9 @@ public class VideoToFrames implements Runnable {
             if (extractor != null) {
                 try { extractor.release(); } catch (Throwable ignored) {}
                 extractor = null;
+            }
+            if (fallbackPfd != null) {
+                try { fallbackPfd.close(); } catch (Throwable ignored) {}
             }
         }
     }
@@ -341,11 +374,16 @@ public class VideoToFrames implements Runnable {
                 if (outputBufferId >= 0) {
                     if ((info.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
                         if (!stopDecode && HookMain.isLoopVideoActive()) {
+                            try {
+                                decoder.releaseOutputBuffer(outputBufferId, false);
+                            } catch (Throwable ignored) {}
                             extractor.seekTo(0, MediaExtractor.SEEK_TO_CLOSEST_SYNC);
                             try { decoder.flush(); } catch (Throwable ignored) {}
                             sawInputEOS = false;
                             sawOutputEOS = false;
                             is_first = false;
+                            startWhen = 0L;
+                            continue;
                         } else {
                             sawOutputEOS = true;
                         }

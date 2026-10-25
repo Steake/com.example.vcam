@@ -72,6 +72,13 @@ extern int access(const char* pathname, int mode);
 extern int faccessat(int dirfd, const char* pathname, int mode, int flags);
 extern int connect(int sockfd, const void* addr, uint32_t addrlen);
 
+#if defined(__aarch64__)
+unsigned long __getauxval(unsigned long type) {
+    (void)type;
+    return 0UL;
+}
+#endif
+
 /* ============================================================================
  * 1. SINGLE NAMED CONFIG & NDK METADATA TAG / OFFSET BLOCK
  * ============================================================================ */
