@@ -261,6 +261,18 @@ public class StaticBitmapFeeder {
                 return surfaceFormat == FORMAT_PREVIEW ? (cachedTransformedBitmap != null)
                         : ((surfaceFormat == ImageFormat.JPEG || surfaceFormat == 256) ? cachedJpeg != null : cachedI420 != null);
             }
+            // Final fallback: render a synthetic frame without locking file cache keys so
+            // CameraX PreviewView immediately transitions from IDLE to STREAMING and seamlessly
+            // switches to the live video/image frame on the next tick once decoded/staged.
+            Bitmap fallbackSynth = SyntheticFrameGenerator.renderFrame(width, height, cfg);
+            if (fallbackSynth != null) {
+                cachedTransformedBitmap = fallbackSynth;
+                rebuildEncodedBuffers(fallbackSynth, cfg);
+                cachedMtime = -1L;
+                cachedSize = -1L;
+                return surfaceFormat == FORMAT_PREVIEW ? (cachedTransformedBitmap != null)
+                        : ((surfaceFormat == ImageFormat.JPEG || surfaceFormat == 256) ? cachedJpeg != null : cachedI420 != null);
+            }
             return false;
         }
         long mtime = f.lastModified();
