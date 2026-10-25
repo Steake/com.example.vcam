@@ -1,6 +1,8 @@
 # VCAM (`com.example.vcam`) — Hardware Sovereignty & Sensor-Level Virtual Camera Suite
 
-[![Version](https://img.shields.io/badge/release-v5.3.0-6366f1.svg)](https://github.com/Steake/com.example.vcam/releases)
+[![Version](https://img.shields.io/badge/release-v5.3.5-6366f1.svg)](https://github.com/Steake/com.example.vcam/raw/main/output/vcam-v5.3.5-release.apk)
+[![Download Release APK](https://img.shields.io/badge/Download_APK-vcam--v5.3.5--release.apk-10b981.svg)](https://github.com/Steake/com.example.vcam/raw/main/output/vcam-v5.3.5-release.apk)
+[![Download Debug APK](https://img.shields.io/badge/Download_APK-vcam--v5.3.5--debug.apk-3b82f6.svg)](https://github.com/Steake/com.example.vcam/raw/main/output/vcam-v5.3.5-debug.apk)
 [![API](https://img.shields.io/badge/Android-API%2021--34%20(5.0--14)-2dd4bf.svg)](https://github.com/Steake/com.example.vcam)
 [![Architecture](https://img.shields.io/badge/NDK-arm64--v8a%20%7C%20armeabi--v7a%20%7C%20x86__64-f59e0b.svg)](https://github.com/Steake/com.example.vcam)
 [![Hook Engine](https://img.shields.io/badge/Interception-Java%20%2B%20NDK%20ELF%20%2B%20HAL3-10b981.svg)](https://github.com/Steake/com.example.vcam)
@@ -13,7 +15,7 @@ There is a peculiarly modern species of insolence—practiced with pious solemni
 
 To call this "security" is to commit a grotesque violence against language. It is an epistemological confidence trick: the assertion that a remote server in Delaware or Cyprus possesses a divine right to verify the physical photons striking a lens you own, in a room you pay for, on a bus you administer. And like all orthodoxies founded on presumption rather than consent, its enforcement mechanisms are at once grandiose in their claims and laughably brittle in their physics.
 
-**VCAM (`v5.3.0`)** is the empirical refutation of that orthodoxy. Where basic virtual cameras fail—because they lazily swap a Java `Surface` while leaving the underlying NDK capture chain, hardware buffer usage flags, CMOS exposure telemetry, and IMU motion vectors untouched—VCAM reconstructs the entire physical capture chain across both the **Android Runtime (Camera1 / Camera2 / CameraX)** and the **Native Development Kit (`libcamera2ndk.so` / `libmediandk.so` / `libandroid.so`)**. At every boundary where a surveillance SDK reaches out to touch "hardware truth," it meets a deterministic, mathematically consistent synthesis of a physical sensor.
+**VCAM (`v5.3.5`)** is the empirical refutation of that orthodoxy. Where basic virtual cameras fail—because they lazily swap a Java `Surface` while leaving the underlying NDK capture chain, hardware buffer usage flags, CMOS exposure telemetry, and IMU motion vectors untouched—VCAM reconstructs the entire physical capture chain across both the **Android Runtime (Camera1 / Camera2 / CameraX)** and the **Native Development Kit (`libcamera2ndk.so` / `libmediandk.so` / `libandroid.so`)**. At every boundary where a surveillance SDK reaches out to touch "hardware truth," it meets a deterministic, mathematically consistent synthesis of a physical sensor.
 
 ---
 
@@ -21,7 +23,7 @@ To call this "security" is to commit a grotesque violence against language. It i
 
 Recent industry evaluations—most notably Bixelab's 600-transaction Injection Attack Detection (IAD) benchmark—demonstrated a 100% `SPOOF` rejection rate against conventional virtual cameras (OBS, standard Xposed `Surface` swappers, and HDMI injection rigs), even when paired with naive root or Frida masking. Disassembly and bytecode verification of **Sumsub SDK (`1.47.0`)** and **Persona Inquiry2 (`2.60.0`)** reveal why amateur hooks fail and how VCAM neutralizes each vector:
 
-| Inspection Vector | What Persona / Sumsub / Bixelab Check | How VCAM (`v5.3.0`) Neutralizes It |
+| Inspection Vector | What Persona / Sumsub / Bixelab Check | How VCAM (`v5.3.5`) Neutralizes It |
 | :--- | :--- | :--- |
 | **1. Native NDK Bypass (`libcamera2ndk.so` / `libmediandk.so`)** | High-security SDKs bypass Java `android.hardware.camera2` altogether or cross-check it via JNI against `ACameraManager_openCamera`, `ACaptureSessionOutput_create`, and `AImageReader_acquireLatestImage`. | **`libvcam_ndk.so`** installs ARM64 inline callee prologue trampolines (`LDR X16, #8; BR X16`), a self-healing Shadow GOT table, and `dlsym` interceptors across `libcamera2ndk.so`, `libmediandk.so`, and `libandroid.so`. |
 | **2. Sensor Timestamp Attestation (`ACAMERA_SENSOR_TIMESTAMP`)** | Validates `ACAMERA_SENSOR_INFO_TIMESTAMP_SOURCE == REALTIME` (`1`) and checks that `AImage_getTimestamp()` / `CaptureResult.SENSOR_TIMESTAMP` monotonically tracks `clock_gettime(CLOCK_BOOTTIME)` minus physical exposure duration. | Synthesizes start-of-exposure timestamps anchored to `CLOCK_BOOTTIME` (`now_boottime_ns - exposure_time_ns`, 12.5 ms nominal) across both Java `TotalCaptureResult` and native `AImage_getTimestamp()`. |
@@ -124,7 +126,8 @@ bash app/src/main/cpp/build_ndk.sh
 
 ### Verification Suite (`ExampleUnitTest` + Native IAD Harness)
 Every build executes:
-1. **BT.601 ARGB $ightarrow$ NV21 / I420 Colorimetric Accuracy Test**: Verifies zero Red/Blue channel inversion.
+1. **BT.601 ARGB $
+ightarrow$ NV21 / I420 Colorimetric Accuracy Test**: Verifies zero Red/Blue channel inversion.
 2. **Temporal Luma Shot-Noise Test**: Verifies consecutive frames produce distinct cryptographic hashes (`Frame[t] != Frame[t-1]`).
 3. **Little-Endian TIFF/EXIF APP1 Synthesizer Test**: Verifies binary `0xFFE1` EXIF header injection.
 4. **IMU Accelerometer/Gyroscope Optical-Flow Correlation Test**: Verifies `< 0.05 px` stationary deadband and directional sub-pixel tracking under hand movement.
