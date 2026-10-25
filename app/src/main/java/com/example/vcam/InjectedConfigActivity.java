@@ -74,6 +74,13 @@ public class InjectedConfigActivity extends AppCompatActivity {
         if (callerPackage == null && getCallingPackage() != null) {
             callerPackage = getCallingPackage();
         }
+        if (callerPackage != null) {
+            String lowerCaller = callerPackage.toLowerCase(java.util.Locale.ROOT);
+            if (lowerCaller.contains("webview") || lowerCaller.contains("trichrome")
+                    || BuildConfig.APPLICATION_ID.equals(callerPackage)) {
+                callerPackage = null;
+            }
+        }
         currentFacing = getIntent().getStringExtra(EXTRA_CURRENT_FACING);
 
         subtitle = findViewById(R.id.injected_subtitle);

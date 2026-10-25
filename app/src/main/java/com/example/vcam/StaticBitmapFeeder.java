@@ -137,8 +137,7 @@ public class StaticBitmapFeeder {
             } else {
                 drawOnCanvas(cfg);
             }
-        } catch (Throwable t) {
-            XposedBridge.log("[VCAM][feeder] triggerSingleFrame: " + t);
+        } catch (Throwable ignored) {
         } finally {
             HookMain.IN_INTERNAL_CHECK.set(Boolean.FALSE);
         }
@@ -235,9 +234,9 @@ public class StaticBitmapFeeder {
                     : ((surfaceFormat == ImageFormat.JPEG || surfaceFormat == 256) ? cachedJpeg != null : cachedI420 != null);
         }
 
-        // Live video frame priority: when a video is actively decoded, render the live video frame
-        // with full PTZ transforms so preview surfaces and JPEG captures reflect live video + PTZ!
-        if (HookMain.hasActiveVideoFrame()) {
+        // Live video frame priority: when a video is actively decoded or video mode is active,
+        // render the live video frame with full PTZ transforms and sensor orientation!
+        if (HookMain.hasActiveVideoFrame() || HookMain.isVideoModeActive()) {
             Bitmap videoBmp = HookMain.getLatestVideoFrameBitmap(width, height);
             if (videoBmp != null) {
                 cachedTransformedBitmap = FrameTransformPipeline.renderToBitmap(
@@ -252,21 +251,12 @@ public class StaticBitmapFeeder {
         }
 
         File f = HookMain.resolveBestImageFile(bitmapPath);
-        if (f == null || !f.exists() || f.length() == 0) {
+        if (f == null) {
             // Provider stream fallback when disk staging is unavailable
             Bitmap providerBmp = HookMain.decodeActiveImageFromProvider();
             if (providerBmp != null) {
                 cachedTransformedBitmap = FrameTransformPipeline.renderToBitmap(
                         providerBmp, 0, width, height, cfg, cachedTransformedBitmap);
-                rebuildEncodedBuffers(cachedTransformedBitmap, cfg);
-                return surfaceFormat == FORMAT_PREVIEW ? (cachedTransformedBitmap != null)
-                        : ((surfaceFormat == ImageFormat.JPEG || surfaceFormat == 256) ? cachedJpeg != null : cachedI420 != null);
-            }
-            // Video fallback via MediaMetadataRetriever if VideoToFrames hasn't emitted its first frame yet
-            Bitmap videoBmp = HookMain.getLatestVideoFrameBitmap(width, height);
-            if (videoBmp != null) {
-                cachedTransformedBitmap = FrameTransformPipeline.renderToBitmap(
-                        videoBmp, 0, width, height, cfg, cachedTransformedBitmap);
                 rebuildEncodedBuffers(cachedTransformedBitmap, cfg);
                 return surfaceFormat == FORMAT_PREVIEW ? (cachedTransformedBitmap != null)
                         : ((surfaceFormat == ImageFormat.JPEG || surfaceFormat == 256) ? cachedJpeg != null : cachedI420 != null);

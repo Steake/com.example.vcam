@@ -65,12 +65,21 @@ public final class MediaPaths {
         return new File(defaultDir(), DEFAULT_VIDEO_NAME);
     }
 
+    public static boolean isReadableNonEmptyFile(@Nullable File f) {
+        if (f == null) return false;
+        try (InputStream in = new java.io.FileInputStream(f)) {
+            return f.length() > 0 || in.available() > 0;
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
     /**
      * Resolves the effective staged image file: checks the global/default
      * {@link MediaMappings} entry in {@link MediaLibrary} first (which works
-     * without {@code MANAGE_EXTERNAL_STORAGE}), then falls back to the legacy
-     * {@code /sdcard/DCIM/Camera1/1000.bmp} file, and finally any imported
-     * image in {@link MediaLibrary}.
+     * without {@code MANAGE_EXTERNAL_STORAGE}), then any imported image in
+     * {@link MediaLibrary}, and finally falls back to the legacy
+     * {@code /sdcard/DCIM/Camera1/1000.bmp} file if actually readable.
      */
     @NonNull
     public static File resolveEffectiveImageFile(@NonNull Context ctx) {
@@ -81,25 +90,26 @@ public final class MediaPaths {
                 MediaLibrary.Entry e = MediaLibrary.fromUri(ctx, uri);
                 if (e != null) {
                     File libFile = MediaLibrary.fileFor(ctx, e);
-                    if (libFile.exists() && libFile.length() > 0) {
+                    if (isReadableNonEmptyFile(libFile)) {
                         return libFile;
                     }
                 }
             }
         } catch (Throwable ignored) {}
-        File legacy = getImageTarget(ctx);
-        if (legacy.exists() && legacy.length() > 0) {
-            return legacy;
-        }
         try {
             java.util.List<MediaLibrary.Entry> all = MediaLibrary.list(ctx);
-            for (MediaLibrary.Entry e : all) {
+            for (int i = all.size() - 1; i >= 0; i--) {
+                MediaLibrary.Entry e = all.get(i);
                 if (MediaLibrary.TYPE_IMAGE.equals(e.type)) {
                     File f = MediaLibrary.fileFor(ctx, e);
-                    if (f.exists() && f.length() > 0) return f;
+                    if (isReadableNonEmptyFile(f)) return f;
                 }
             }
         } catch (Throwable ignored) {}
+        File legacy = getImageTarget(ctx);
+        if (isReadableNonEmptyFile(legacy)) {
+            return legacy;
+        }
         File scannedImg = scanCamera1DirectoryForMedia(ctx, true);
         if (scannedImg != null) return scannedImg;
         return legacy;
@@ -107,9 +117,9 @@ public final class MediaPaths {
 
     /**
      * Resolves the effective staged video file: checks the global/default
-     * {@link MediaMappings} entry in {@link MediaLibrary} first, then falls
-     * back to the legacy {@code /sdcard/DCIM/Camera1/virtual.mp4} file, and
-     * finally any imported video in {@link MediaLibrary}.
+     * {@link MediaMappings} entry in {@link MediaLibrary} first, then any
+     * imported video in {@link MediaLibrary}, and finally falls back to the
+     * legacy {@code /sdcard/DCIM/Camera1/virtual.mp4} file if actually readable.
      */
     @NonNull
     public static File resolveEffectiveVideoFile(@NonNull Context ctx) {
@@ -120,25 +130,26 @@ public final class MediaPaths {
                 MediaLibrary.Entry e = MediaLibrary.fromUri(ctx, uri);
                 if (e != null) {
                     File libFile = MediaLibrary.fileFor(ctx, e);
-                    if (libFile.exists() && libFile.length() > 0) {
+                    if (isReadableNonEmptyFile(libFile)) {
                         return libFile;
                     }
                 }
             }
         } catch (Throwable ignored) {}
-        File legacy = getVideoTarget(ctx);
-        if (legacy.exists() && legacy.length() > 0) {
-            return legacy;
-        }
         try {
             java.util.List<MediaLibrary.Entry> all = MediaLibrary.list(ctx);
-            for (MediaLibrary.Entry e : all) {
+            for (int i = all.size() - 1; i >= 0; i--) {
+                MediaLibrary.Entry e = all.get(i);
                 if (MediaLibrary.TYPE_VIDEO.equals(e.type)) {
                     File f = MediaLibrary.fileFor(ctx, e);
-                    if (f.exists() && f.length() > 0) return f;
+                    if (isReadableNonEmptyFile(f)) return f;
                 }
             }
         } catch (Throwable ignored) {}
+        File legacy = getVideoTarget(ctx);
+        if (isReadableNonEmptyFile(legacy)) {
+            return legacy;
+        }
         File scannedVid = scanCamera1DirectoryForMedia(ctx, false);
         if (scannedVid != null) return scannedVid;
         return legacy;
@@ -161,7 +172,7 @@ public final class MediaPaths {
                 File[] children = d.listFiles();
                 if (children == null) continue;
                 for (File f : children) {
-                    if (f == null || !f.isFile() || f.length() <= 0) continue;
+                    if (f == null || !f.isFile() || !isReadableNonEmptyFile(f)) continue;
                     String lower = f.getName().toLowerCase(java.util.Locale.US);
                     if (markerNames.contains(lower)) continue;
                     if (image) {

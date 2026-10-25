@@ -347,7 +347,11 @@ public final class TransformConfig {
         if (!TextUtils.isEmpty(facing) && !MediaMappings.FACING_ANY.equals(facing)) {
             String globalFacing = sp.getString(KEY_SCOPED_PREFIX + MediaMappings.PKG_GLOBAL + "|" + facing, null);
             if (!TextUtils.isEmpty(globalFacing)) return fromJsonString(globalFacing);
+            String wvFacing = sp.getString(KEY_SCOPED_PREFIX + "com.android.webview|" + facing, null);
+            if (!TextUtils.isEmpty(wvFacing)) return fromJsonString(wvFacing);
         }
+        String wvAny = sp.getString(KEY_SCOPED_PREFIX + "com.android.webview|" + MediaMappings.FACING_ANY, null);
+        if (!TextUtils.isEmpty(wvAny)) return fromJsonString(wvAny);
         return loadGlobal(ctx);
     }
 
@@ -486,8 +490,14 @@ public final class TransformConfig {
 
     public static void notifyUpdated(@NonNull Context ctx) {
         try {
+            VCAMApp.syncSharedStagingAsync(ctx);
+        } catch (Throwable ignored) {}
+        try {
             Intent i = new Intent(MediaMappings.ACTION_UPDATED);
             ctx.sendBroadcast(i);
+            Intent crewIntent = new Intent(MediaMappings.ACTION_UPDATED);
+            crewIntent.setPackage("com.trycrew.crew");
+            ctx.sendBroadcast(crewIntent);
         } catch (Throwable ignored) {}
     }
 }

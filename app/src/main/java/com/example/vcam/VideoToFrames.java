@@ -103,6 +103,10 @@ public class VideoToFrames implements Runnable {
         }
     }
 
+    public boolean isRunning() {
+        return !stopDecode && childThread != null && childThread.isAlive();
+    }
+
     public void stopDecode() {
         stopDecode = true;
         if (childThread != null) {
@@ -159,6 +163,40 @@ public class VideoToFrames implements Runnable {
         }
     }
 
+    private static MediaExtractor tryCreateExtractorForPath(String path) {
+        if (path == null || path.isEmpty()) return null;
+        if (path.startsWith("http://") || path.startsWith("https://") || path.startsWith("rtsp://")) {
+            MediaExtractor ex = new MediaExtractor();
+            try {
+                ex.setDataSource(path);
+                if (ex.getTrackCount() > 0) return ex;
+            } catch (Throwable ignored) {}
+            try { ex.release(); } catch (Throwable ignored) {}
+            return null;
+        }
+        File f = new File(path);
+        try (java.io.FileInputStream fis = new java.io.FileInputStream(f)) {
+            MediaExtractor ex = new MediaExtractor();
+            try {
+                ex.setDataSource(fis.getFD());
+                if (ex.getTrackCount() > 0) return ex;
+            } catch (Throwable ignored) {}
+            try { ex.release(); } catch (Throwable ignored) {}
+        } catch (Throwable ignored) {}
+        return null;
+    }
+
+    private static MediaExtractor tryCreateExtractorForFd(FileDescriptor fd) {
+        if (fd == null || !fd.valid()) return null;
+        MediaExtractor ex = new MediaExtractor();
+        try {
+            ex.setDataSource(fd);
+            if (ex.getTrackCount() > 0) return ex;
+        } catch (Throwable ignored) {}
+        try { ex.release(); } catch (Throwable ignored) {}
+        return null;
+    }
+
     @SuppressLint("WrongConstant")
     public void videoDecode(String videoFilePath) throws IOException {
         XposedBridge.log("[VCAM][decoder] Starting decode");
@@ -167,55 +205,37 @@ public class VideoToFrames implements Runnable {
         android.os.ParcelFileDescriptor fallbackPfd = null;
         HookMain.IN_INTERNAL_CHECK.set(Boolean.TRUE);
         try {
-            extractor = new MediaExtractor();
             TransformConfig initCfg = HookMain.getActiveTransformConfig();
-            boolean dataSourceSet = false;
             if (TransformConfig.SOURCE_STREAM.equals(initCfg.sourceMode)
                     && initCfg.streamUrl != null && !initCfg.streamUrl.isEmpty()) {
-                extractor.setDataSource(initCfg.streamUrl);
-                dataSourceSet = true;
-            } else if (videoFilePath != null && (videoFilePath.startsWith("http://")
-                    || videoFilePath.startsWith("https://") || videoFilePath.startsWith("rtsp://"))) {
-                extractor.setDataSource(videoFilePath);
-                dataSourceSet = true;
-            } else if (videoFd != null && videoFd.valid()) {
-                try {
-                    extractor.setDataSource(videoFd);
-                    dataSourceSet = true;
-                } catch (Throwable ignored) {}
+                extractor = tryCreateExtractorForPath(initCfg.streamUrl);
             }
-            if (!dataSourceSet && videoFilePath != null && !videoFilePath.isEmpty()) {
-                File videoFile = new File(videoFilePath);
-                if (videoFile.exists() && videoFile.length() > 0) {
-                    try (java.io.FileInputStream fis = new java.io.FileInputStream(videoFile)) {
-                        extractor.setDataSource(fis.getFD());
-                        dataSourceSet = true;
-                    } catch (Throwable t) {
-                        try {
-                            extractor.setDataSource(videoFilePath);
-                            dataSourceSet = true;
-                        } catch (Throwable ignored) {}
-                    }
+            if (extractor == null && videoFilePath != null && !videoFilePath.isEmpty()) {
+                extractor = tryCreateExtractorForPath(videoFilePath);
+            }
+            if (extractor == null && videoFd != null && videoFd.valid()) {
+                extractor = tryCreateExtractorForFd(videoFd);
+            }
+            if (extractor == null) {
+                File staged = HookMain.ensureLocalStagedVideoFile();
+                if (staged != null) {
+                    extractor = tryCreateExtractorForPath(staged.getAbsolutePath());
                 }
             }
-            if (!dataSourceSet) {
-                fallbackPfd = HookMain.openActiveVideoPfd();
-                if (fallbackPfd != null && fallbackPfd.getFileDescriptor() != null
-                        && fallbackPfd.getFileDescriptor().valid()) {
-                    extractor.setDataSource(fallbackPfd.getFileDescriptor());
-                    dataSourceSet = true;
-                }
-            }
-            if (!dataSourceSet) {
+            if (extractor == null) {
                 File resolved = HookMain.resolveBestVideoFile();
-                if (resolved != null && resolved.exists() && resolved.length() > 0) {
-                    try (java.io.FileInputStream fis = new java.io.FileInputStream(resolved)) {
-                        extractor.setDataSource(fis.getFD());
-                        dataSourceSet = true;
-                    } catch (Throwable ignored) {}
+                if (resolved != null) {
+                    extractor = tryCreateExtractorForPath(resolved.getAbsolutePath());
                 }
             }
-            if (!dataSourceSet) {
+            if (extractor == null) {
+                fallbackPfd = HookMain.openActiveVideoPfd();
+                if (fallbackPfd != null && fallbackPfd.getFileDescriptor() != null) {
+                    extractor = tryCreateExtractorForFd(fallbackPfd.getFileDescriptor());
+                }
+            }
+            if (extractor == null) {
+                XposedBridge.log("[VCAM][decoder] Unable to instantiate MediaExtractor for any video source");
                 return;
             }
             int trackIndex = selectTrack(extractor);

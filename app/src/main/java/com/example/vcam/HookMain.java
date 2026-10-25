@@ -124,6 +124,7 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
     public static boolean is_hooked;
     public static VideoToFrames hw_decode_obj;
     public static VideoToFrames c2_hw_decode_obj;
+    public static ParcelFileDescriptor c2_hw_decode_pfd;
     public static VideoToFrames c2_hw_decode_obj_1;
     public static SurfaceTexture c1_fake_texture;
     public static Surface c1_fake_surface;
@@ -167,6 +168,8 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
 
     public int c2_ori_width = 1280;
     public int c2_ori_height = 720;
+    public int c2_preview_width = 1280;
+    public int c2_preview_height = 720;
 
     public static Class c2_state_callback;
     public Context toast_content;
@@ -186,10 +189,23 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
     // ---------------------------------------------------------------------
     // Core System Package Exclusions & Hook Deduplication Registries
     // ---------------------------------------------------------------------
+    private static volatile String sPrimaryHostPackage = null;
+    private static final java.util.concurrent.atomic.AtomicBoolean sProcessHooksInstalled =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+
     private static final Set<String> EXCLUDED_SYSTEM_PACKAGES = Collections.unmodifiableSet(
             new HashSet<>(Arrays.asList(
                     "android",
                     "system",
+                    "com.android.webview",
+                    "com.google.android.webview",
+                    "com.android.trichrome",
+                    "us.spotco.mulch_wv",
+                    "com.android.chrome",
+                    "org.chromium.webview_shell",
+                    "com.google.android.gms",
+                    "com.mgoogle.android.gms",
+                    "com.android.vending",
                     "com.android.systemui",
                     "com.google.android.systemui",
                     "com.miui.systemui",
@@ -215,6 +231,26 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
             ))
     );
 
+    @NonNull
+    private static String sanitizeHostPackage(@Nullable String pkg) {
+        if (sPrimaryHostPackage != null && !sPrimaryHostPackage.isEmpty()) {
+            return sPrimaryHostPackage;
+        }
+        if (pkg != null && !pkg.isEmpty()) {
+            String lower = pkg.toLowerCase(java.util.Locale.ROOT);
+            if (!lower.contains("webview") && !lower.contains("trichrome") && !"android".equals(lower)) {
+                return pkg;
+            }
+        }
+        try {
+            Application app = AndroidAppHelper.currentApplication();
+            if (app != null && app.getPackageName() != null && !app.getPackageName().isEmpty()) {
+                return app.getPackageName();
+            }
+        } catch (Throwable ignored) {}
+        return currentHostPackage != null ? currentHostPackage : "";
+    }
+
     private static boolean isExcludedSystemPackage(@NonNull XC_LoadPackage.LoadPackageParam lpparam) {
         int myAppId = android.os.Process.myUid() % 100000;
         // Never hook core system UIDs (< 10000: root=0, system_server=1000, radio=1001, etc.)
@@ -227,11 +263,18 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
         if ("system".equals(lpparam.processName) || "android".equals(lpparam.processName)) return true;
         if (EXCLUDED_SYSTEM_PACKAGES.contains(pkg)) return true;
         String lower = pkg.toLowerCase(java.util.Locale.ROOT);
-        if (lower.contains("systemui") || lower.contains("keyguard")
+        if (lower.contains("webview") || lower.contains("trichrome")
+                || lower.contains("systemui") || lower.contains("keyguard")
                 || lower.contains(".launcher") || lower.contains("inputmethod")
                 || lower.startsWith("com.android.providers.")
                 || lower.startsWith("com.android.server.")
                 || lower.startsWith("com.qualcomm.")) {
+            return true;
+        }
+        // Ignore secondary shared-library / WebView packages loaded into an already-running host process
+        if (!lpparam.isFirstApplication && lpparam.processName != null
+                && !lpparam.processName.isEmpty()
+                && !lpparam.processName.startsWith(pkg)) {
             return true;
         }
         if (lpparam.appInfo != null) {
@@ -447,7 +490,7 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
             if (mediaPlayer != null) {
                 return true;
             }
-            if (videoDecoder != null) {
+            if (videoDecoder != null && videoDecoder.isRunning()) {
                 return true;
             }
             return bitmapFeeder != null && bitmapFeeder.isRunning();
@@ -457,6 +500,10 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
             if (mediaPlayer != null) {
                 try {
                     mediaPlayer.stop();
+                } catch (Throwable ignored) {
+                }
+                try {
+                    mediaPlayer.setSurface(null);
                 } catch (Throwable ignored) {
                 }
                 try {
@@ -531,6 +578,13 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                 return t;
             });
 
+    private static final ExecutorService feederTriggerExecutor =
+            Executors.newSingleThreadExecutor(r -> {
+                Thread t = new Thread(r, "vcam-feeder-trigger");
+                t.setDaemon(true);
+                return t;
+            });
+
     // ---------------------------------------------------------------------
     // Public Static Accessors for Feeders, Overlay HUD, NDK & Synthesizers
     // ---------------------------------------------------------------------
@@ -551,7 +605,7 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
 
     @NonNull
     public static String getCurrentHostPackage() {
-        return currentHostPackage != null ? currentHostPackage : "";
+        return sanitizeHostPackage(currentHostPackage);
     }
 
     public static boolean isMetadataPatchActive() {
@@ -618,6 +672,9 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
         return nv != null && latestVideoWidth > 0 && latestVideoHeight > 0;
     }
 
+    private static volatile Bitmap sCachedMmrFrame = null;
+    private static volatile long sLastMmrExtractMs = 0L;
+
     @Nullable
     public static Bitmap getLatestVideoFrameBitmap(int targetW, int targetH) {
         byte[] nv21 = latestRawVideoNv21 != null ? latestRawVideoNv21 : latestVideoNv21;
@@ -629,24 +686,51 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                 return bmp;
             }
         }
-        // Fallback if MediaPlayer is rendering directly to a Surface without VideoToFrames active:
-        // extract the current frame from the staged video via MediaMetadataRetriever
-        File vidFile = getActiveVideoFile();
-        if (vidFile != null && vidFile.exists()) {
-            MediaMetadataRetriever mmr = new MediaMetadataRetriever();
-            try {
-                mmr.setDataSource(vidFile.getAbsolutePath());
+        long now = System.currentTimeMillis();
+        if (sCachedMmrFrame != null && !sCachedMmrFrame.isRecycled() && (now - sLastMmrExtractMs) < 250L) {
+            return sCachedMmrFrame;
+        }
+        sLastMmrExtractMs = now;
+        MediaMetadataRetriever mmr = new MediaMetadataRetriever();
+        ParcelFileDescriptor pfd = null;
+        boolean prevInternal = Boolean.TRUE.equals(IN_INTERNAL_CHECK.get());
+        IN_INTERNAL_CHECK.set(Boolean.TRUE);
+        try {
+            File vidFile = ensureLocalStagedVideoFile();
+            if (vidFile == null) {
+                vidFile = getActiveVideoFile();
+            }
+            boolean dsSet = false;
+            if (vidFile != null) {
+                try (java.io.FileInputStream fis = new java.io.FileInputStream(vidFile)) {
+                    mmr.setDataSource(fis.getFD());
+                    dsSet = true;
+                } catch (Throwable ignored) {}
+            }
+            if (!dsSet) {
+                pfd = openActiveVideoPfd();
+                if (pfd != null && pfd.getFileDescriptor() != null && pfd.getFileDescriptor().valid()) {
+                    mmr.setDataSource(pfd.getFileDescriptor());
+                    dsSet = true;
+                }
+            }
+            if (dsSet) {
                 long posUs = getActiveVideoPositionMs() * 1000L;
                 Bitmap frame = mmr.getFrameAtTime(posUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC);
                 if (frame != null) {
+                    sCachedMmrFrame = frame;
                     return frame;
                 }
-            } catch (Throwable ignored) {
-            } finally {
-                try { mmr.release(); } catch (Throwable ignored) {}
+            }
+        } catch (Throwable ignored) {
+        } finally {
+            IN_INTERNAL_CHECK.set(prevInternal);
+            try { mmr.release(); } catch (Throwable ignored) {}
+            if (pfd != null) {
+                try { pfd.close(); } catch (Throwable ignored) {}
             }
         }
-        return null;
+        return sCachedMmrFrame;
     }
 
     @Nullable
@@ -746,18 +830,35 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
         return null;
     }
 
+    private static final Map<String, Long> UNREADABLE_PUBLIC_PATH_CACHE = new ConcurrentHashMap<>();
+
     private static boolean isNonEmptyReadableFile(@Nullable File f) {
         if (f == null) return false;
+        String absPath = f.getAbsolutePath();
+        boolean isPublicPath = absPath.startsWith("/storage/") || absPath.startsWith("/sdcard/");
+        if (isPublicPath) {
+            Long blockedAt = UNREADABLE_PUBLIC_PATH_CACHE.get(absPath);
+            if (blockedAt != null && (System.currentTimeMillis() - blockedAt) < 10000L) {
+                return false;
+            }
+        }
         boolean prev = Boolean.TRUE.equals(IN_INTERNAL_CHECK.get());
         IN_INTERNAL_CHECK.set(Boolean.TRUE);
         try {
-            if (!f.exists() || !f.canRead() || f.length() <= 0) {
-                return false;
-            }
+            // Open FileInputStream directly without gating on File.exists()/canRead() so root-detection
+            // hooks (e.g. com.gauravssnl.bypassrootcheck.pro) cannot spoof File.exists()!
             try (java.io.FileInputStream fis = new java.io.FileInputStream(f)) {
-                return fis.getFD() != null && fis.getFD().valid();
+                boolean valid = fis.getFD() != null && fis.getFD().valid()
+                        && (fis.getChannel().size() > 0 || fis.available() > 0);
+                if (isPublicPath && !valid) {
+                    UNREADABLE_PUBLIC_PATH_CACHE.put(absPath, System.currentTimeMillis());
+                }
+                return valid;
             }
         } catch (Throwable ignored) {
+            if (isPublicPath) {
+                UNREADABLE_PUBLIC_PATH_CACHE.put(absPath, System.currentTimeMillis());
+            }
             return false;
         } finally {
             IN_INTERNAL_CHECK.set(prev);
@@ -765,7 +866,57 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
     }
 
     @Nullable
+    public static File ensureLocalStagedVideoFile() {
+        boolean prev = Boolean.TRUE.equals(IN_INTERNAL_CHECK.get());
+        IN_INTERNAL_CHECK.set(Boolean.TRUE);
+        try {
+            File existing = resolveBestVideoFile();
+            if (existing != null && existing.getAbsolutePath().contains("vcam_stage")) {
+                return existing;
+            }
+            Context ctx = resolveHostContext();
+            if (ctx != null) {
+                File stageDir = new File(ctx.getFilesDir(), "vcam_stage");
+                //noinspection ResultOfMethodCallIgnored
+                stageDir.mkdirs();
+                File dst = new File(stageDir, "virtual.mp4");
+                if (isNonEmptyReadableFile(dst)) {
+                    return dst;
+                }
+                try (ParcelFileDescriptor pfd = openActiveVideoPfd()) {
+                    if (pfd != null && pfd.getFileDescriptor() != null && pfd.getFileDescriptor().valid()) {
+                        File tmp = new File(dst.getAbsolutePath() + ".tmp");
+                        long total = 0;
+                        try (InputStream in = new java.io.FileInputStream(pfd.getFileDescriptor());
+                             OutputStream out = new FileOutputStream(tmp)) {
+                            byte[] buf = new byte[64 * 1024];
+                            int n;
+                            while ((n = in.read(buf)) > 0) {
+                                out.write(buf, 0, n);
+                                total += n;
+                            }
+                            out.flush();
+                        }
+                        if (total > 0) {
+                            //noinspection ResultOfMethodCallIgnored
+                            tmp.renameTo(dst);
+                            return dst;
+                        } else {
+                            //noinspection ResultOfMethodCallIgnored
+                            tmp.delete();
+                        }
+                    }
+                } catch (Throwable ignored) {}
+            }
+            return existing;
+        } finally {
+            IN_INTERNAL_CHECK.set(prev);
+        }
+    }
+
+    @Nullable
     public static File resolveBestVideoFile() {
+        boolean prev = Boolean.TRUE.equals(IN_INTERNAL_CHECK.get());
         try {
             IN_INTERNAL_CHECK.set(Boolean.TRUE);
             Context ctx = resolveHostContext();
@@ -800,9 +951,18 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
             if (isNonEmptyReadableFile(primary)) {
                 return primary;
             }
+            for (String bridgePath : new String[]{
+                    "/data/local/tmp/.vcam_shared/virtual.mp4",
+                    "/data/user/0/com.example.vcam/files/shared_bridge/virtual.mp4",
+                    "/data/data/com.example.vcam/files/shared_bridge/virtual.mp4"}) {
+                File bf = new File(bridgePath);
+                if (isNonEmptyReadableFile(bf)) {
+                    return bf;
+                }
+            }
             for (String libBase : new String[]{
-                    "/data/data/com.example.vcam/files/library",
-                    "/data/user/0/com.example.vcam/files/library"}) {
+                    "/data/user/0/com.example.vcam/files/library",
+                    "/data/data/com.example.vcam/files/library"}) {
                 for (int id = 32; id >= 1; id--) {
                     File libVid = new File(libBase, "video_" + id);
                     if (isNonEmptyReadableFile(libVid)) {
@@ -818,13 +978,14 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
             if (isNonEmptyReadableFile(pub3)) return pub3;
         } catch (Throwable ignored) {
         } finally {
-            IN_INTERNAL_CHECK.set(Boolean.FALSE);
+            IN_INTERNAL_CHECK.set(prev);
         }
         return null;
     }
 
     @Nullable
     public static File resolveBestImageFile(@Nullable String preferredPath) {
+        boolean prev = Boolean.TRUE.equals(IN_INTERNAL_CHECK.get());
         try {
             IN_INTERNAL_CHECK.set(Boolean.TRUE);
             if (preferredPath != null && !preferredPath.isEmpty()) {
@@ -865,9 +1026,18 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
             if (isNonEmptyReadableFile(primary)) {
                 return primary;
             }
+            for (String bridgePath : new String[]{
+                    "/data/local/tmp/.vcam_shared/1000.bmp",
+                    "/data/user/0/com.example.vcam/files/shared_bridge/1000.bmp",
+                    "/data/data/com.example.vcam/files/shared_bridge/1000.bmp"}) {
+                File bf = new File(bridgePath);
+                if (isNonEmptyReadableFile(bf)) {
+                    return bf;
+                }
+            }
             for (String libBase : new String[]{
-                    "/data/data/com.example.vcam/files/library",
-                    "/data/user/0/com.example.vcam/files/library"}) {
+                    "/data/user/0/com.example.vcam/files/library",
+                    "/data/data/com.example.vcam/files/library"}) {
                 for (int id = 32; id >= 1; id--) {
                     File libImg = new File(libBase, "image_" + id);
                     if (isNonEmptyReadableFile(libImg)) {
@@ -883,7 +1053,7 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
             if (isNonEmptyReadableFile(pub3)) return pub3;
         } catch (Throwable ignored) {
         } finally {
-            IN_INTERNAL_CHECK.set(Boolean.FALSE);
+            IN_INTERNAL_CHECK.set(prev);
         }
         return null;
     }
@@ -897,16 +1067,22 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
         try {
             String imgUri = lastResolvedImageUri;
             if (imgUri == null || MediaProvider.STATUS_UNSET.equals(imgUri)) {
-                imgUri = queryResolve(ctx, currentHostPackage, currentFacing, MediaMappings.TYPE_IMAGE);
+                imgUri = queryResolve(ctx, getCurrentHostPackage(), currentFacing, MediaMappings.TYPE_IMAGE);
             }
-            if (imgUri == null || MediaProvider.STATUS_UNSET.equals(imgUri)) {
-                return null;
+            if (imgUri != null && !MediaProvider.STATUS_UNSET.equals(imgUri)) {
+                try (InputStream in = ctx.getContentResolver().openInputStream(Uri.parse(imgUri))) {
+                    if (in != null) {
+                        Bitmap bmp = BitmapFactory.decodeStream(in);
+                        if (bmp != null) return bmp;
+                    }
+                } catch (Throwable ignored) {}
             }
-            try (InputStream in = ctx.getContentResolver().openInputStream(Uri.parse(imgUri))) {
+            try (InputStream in = ctx.getContentResolver().openInputStream(MediaProvider.URI_IMAGE)) {
                 if (in != null) {
-                    return BitmapFactory.decodeStream(in);
+                    Bitmap bmp = BitmapFactory.decodeStream(in);
+                    if (bmp != null) return bmp;
                 }
-            }
+            } catch (Throwable ignored) {}
         } catch (Throwable ignored) {
         }
         return null;
@@ -926,15 +1102,21 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
         try {
             String vidUri = lastResolvedVideoUri;
             if (vidUri == null || MediaProvider.STATUS_UNSET.equals(vidUri)) {
-                vidUri = queryResolve(ctx, currentHostPackage, currentFacing, MediaMappings.TYPE_VIDEO);
+                vidUri = queryResolve(ctx, getCurrentHostPackage(), currentFacing, MediaMappings.TYPE_VIDEO);
             }
-            if (vidUri == null || MediaProvider.STATUS_UNSET.equals(vidUri)) {
-                return null;
+            if (vidUri != null && !MediaProvider.STATUS_UNSET.equals(vidUri)) {
+                try {
+                    ParcelFileDescriptor pfd = ctx.getContentResolver().openFileDescriptor(Uri.parse(vidUri), "r");
+                    if (pfd != null) return pfd;
+                } catch (Throwable ignored) {}
             }
-            return ctx.getContentResolver().openFileDescriptor(Uri.parse(vidUri), "r");
+            try {
+                ParcelFileDescriptor pfd = ctx.getContentResolver().openFileDescriptor(MediaProvider.URI_VIDEO, "r");
+                if (pfd != null) return pfd;
+            } catch (Throwable ignored) {}
         } catch (Throwable ignored) {
-            return null;
         }
+        return null;
     }
 
     @Nullable
@@ -1268,7 +1450,21 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
         if (isExcludedSystemPackage(lpparam)) {
             return;
         }
+        // Prevent secondary packages (e.g. com.android.webview or shared SDK APKs loaded into the
+        // same process) from overwriting currentHostPackage, NdkHookEngine.setHostDataDir, or
+        // registering duplicate hooks on BootClassLoader classes!
+        if (!sProcessHooksInstalled.compareAndSet(false, true)) {
+            try {
+                Class<?> pipeSeqClass = XposedHelpers.findClassIfExists(
+                        "androidx.camera.camera2.pipe.compat.Camera2CaptureSequence", lpparam.classLoader);
+                if (pipeSeqClass != null) {
+                    hookCaptureCallbackInstance(pipeSeqClass);
+                }
+            } catch (Throwable ignored) {}
+            return;
+        }
         sInstance = this;
+        sPrimaryHostPackage = lpparam.packageName;
         if (sModuleApkPath == null) {
             if (lpparam.appInfo != null && BuildConfig.APPLICATION_ID.equals(lpparam.packageName)) {
                 sModuleApkPath = lpparam.appInfo.sourceDir;
@@ -1281,7 +1477,7 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
         }
         final boolean isSelfManager = BuildConfig.APPLICATION_ID.equals(lpparam.packageName);
 
-        currentHostPackage = lpparam.packageName;
+        currentHostPackage = sPrimaryHostPackage;
         applyInjectedStoragePermissions(lpparam);
 
         // Install CaptureResult metadata patcher (Bypass Vector #10 & Photometric alignment)
@@ -1745,8 +1941,15 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                             int fmt = (int) param.args[2];
                             Object req = param.getObjectExtra("requestedFormat");
                             int requestedFormat = req instanceof Integer ? (Integer) req : fmt;
-                            c2_ori_width = w;
-                            c2_ori_height = h;
+                            if (fmt != ImageFormat.JPEG && fmt != 256) {
+                                c2_preview_width = w;
+                                c2_preview_height = h;
+                                c2_ori_width = w;
+                                c2_ori_height = h;
+                            } else if (c2_ori_width <= 0 || c2_ori_height <= 0) {
+                                c2_ori_width = w;
+                                c2_ori_height = h;
+                            }
                             imageReaderFormat = fmt;
                             if (param.getResult() instanceof ImageReader) {
                                 ImageReader ir = (ImageReader) param.getResult();
@@ -1783,8 +1986,15 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                                 int fmt = (int) param.args[2];
                                 Object req = param.getObjectExtra("requestedFormat");
                                 int requestedFormat = req instanceof Integer ? (Integer) req : fmt;
-                                c2_ori_width = w;
-                                c2_ori_height = h;
+                                if (fmt != ImageFormat.JPEG && fmt != 256) {
+                                    c2_preview_width = w;
+                                    c2_preview_height = h;
+                                    c2_ori_width = w;
+                                    c2_ori_height = h;
+                                } else if (c2_ori_width <= 0 || c2_ori_height <= 0) {
+                                    c2_ori_width = w;
+                                    c2_ori_height = h;
+                                }
                                 imageReaderFormat = fmt;
                                 if (param.getResult() instanceof ImageReader) {
                                     ImageReader ir = (ImageReader) param.getResult();
@@ -1837,8 +2047,15 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                             int w = ir.getWidth();
                             int h = ir.getHeight();
                             int fmt = ir.getImageFormat();
-                            c2_ori_width = w;
-                            c2_ori_height = h;
+                            if (fmt != ImageFormat.JPEG && fmt != 256) {
+                                c2_preview_width = w;
+                                c2_preview_height = h;
+                                c2_ori_width = w;
+                                c2_ori_height = h;
+                            } else if (c2_ori_width <= 0 || c2_ori_height <= 0) {
+                                c2_ori_width = w;
+                                c2_ori_height = h;
+                            }
                             imageReaderFormat = fmt;
                             Object req = XposedHelpers.getAdditionalInstanceField(param.thisObject, "requestedFormat");
                             int requestedFormat = req instanceof Integer ? (Integer) req : fmt;
@@ -3496,6 +3713,23 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
         } catch (Throwable ignored) {
         }
         try {
+            Class<?> sessionCbProxy = Class.forName("android.hardware.camera2.impl.CameraCaptureSessionImpl$1");
+            hookCaptureCallbackInstance(sessionCbProxy);
+            for (java.lang.reflect.Method m : sessionCbProxy.getDeclaredMethods()) {
+                if (m.getName().contains("onCaptureBufferLost")) {
+                    XposedBridge.hookMethod(m, new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+                            if (isInjectionActive()) {
+                                param.setResult(null);
+                            }
+                        }
+                    });
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        try {
             Class<?> pipeSeqClass = XposedHelpers.findClassIfExists(
                     "androidx.camera.camera2.pipe.compat.Camera2CaptureSequence", lpparam.classLoader);
             if (pipeSeqClass != null) {
@@ -3618,7 +3852,14 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                                     }
                                 }
                             } else if (arg instanceof android.util.Size) {
-                                XposedHelpers.setAdditionalInstanceField(param.thisObject, "vcamConfiguredSize", arg);
+                                android.util.Size sz = (android.util.Size) arg;
+                                XposedHelpers.setAdditionalInstanceField(param.thisObject, "vcamConfiguredSize", sz);
+                                if (sz.getWidth() > 1 && sz.getHeight() > 1) {
+                                    c2_preview_width = sz.getWidth();
+                                    c2_preview_height = sz.getHeight();
+                                    c2_ori_width = c2_preview_width;
+                                    c2_ori_height = c2_preview_height;
+                                }
                             }
                         }
                     }
@@ -4514,7 +4755,7 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                     if (feeder != null && feeder.bitmapFeeder != null
                             && (feeder.format == ImageFormat.JPEG || feeder.format == 256)) {
                         final StaticBitmapFeeder sbf = feeder.bitmapFeeder;
-                        stagingExecutor.execute(sbf::triggerSingleFrame);
+                        feederTriggerExecutor.execute(sbf::triggerSingleFrame);
                     }
                 }
             }
@@ -4963,8 +5204,8 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
         // Preview surfaces (SurfaceView / SurfaceTexture) also have s.toString() containing
         // "Surface(name=null)" and MUST remain isReader = false (FORMAT_PREVIEW)!
         boolean isReader = (meta != null);
-        int w = meta != null ? meta.width : c2_ori_width;
-        int h = meta != null ? meta.height : c2_ori_height;
+        int w = meta != null ? meta.width : (c2_preview_width > 0 ? c2_preview_width : c2_ori_width);
+        int h = meta != null ? meta.height : (c2_preview_height > 0 ? c2_preview_height : c2_ori_height);
         if (!isReader) {
             android.util.Size cfgSz = SURFACE_CONFIGURED_SIZE_MAP.get(s);
             if (cfgSz != null && cfgSz.getWidth() > 1 && cfgSz.getHeight() > 1) {
@@ -4977,8 +5218,15 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                     if (sz != null && sz.getWidth() > 1 && sz.getHeight() > 1) {
                         w = sz.getWidth();
                         h = sz.getHeight();
+                        SURFACE_CONFIGURED_SIZE_MAP.put(s, sz);
                     }
                 } catch (Throwable ignored) {}
+            }
+            if (w > 1 && h > 1) {
+                c2_preview_width = w;
+                c2_preview_height = h;
+                c2_ori_width = w;
+                c2_ori_height = h;
             }
             ensurePreviewSurfaceBufferSize(s, w, h);
         }
@@ -5010,16 +5258,20 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                 ACTIVE_FEEDERS.remove(s);
                 continue;
             }
-            if (feeder.videoDecoder != null) {
+            if (feeder.videoDecoder != null && feeder.videoDecoder.isRunning()) {
                 hasRunningVideoDecoder = true;
             }
             if (feeder.isRunning()) {
                 continue;
             }
             startFeederInstance(feeder, videoMode, imageMode);
-            if (feeder.videoDecoder != null) {
+            if (feeder.videoDecoder != null && feeder.videoDecoder.isRunning()) {
                 hasRunningVideoDecoder = true;
             }
+        }
+
+        if (c2_hw_decode_obj != null && !c2_hw_decode_obj.isRunning()) {
+            c2_hw_decode_obj = null;
         }
 
         // Guarantee background VideoToFrames decoder is populating latestRawVideoNv21/latestVideoNv21
@@ -5031,7 +5283,7 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                         c2_ori_height > 0 ? c2_ori_height : 720);
                 bgVtf.setSaveFrames("", OutputImageFormat.NV21);
                 String streamUrl = getActiveStreamUrl();
-                File localVid = resolveBestVideoFile();
+                File localVid = ensureLocalStagedVideoFile();
                 if (streamUrl != null) {
                     bgVtf.decodeStream(streamUrl);
                     c2_hw_decode_obj = bgVtf;
@@ -5041,6 +5293,10 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                 } else {
                     ParcelFileDescriptor pfd = openActiveVideoPfd();
                     if (pfd != null) {
+                        if (c2_hw_decode_pfd != null) {
+                            try { c2_hw_decode_pfd.close(); } catch (Throwable ignored) {}
+                        }
+                        c2_hw_decode_pfd = pfd;
                         bgVtf.decode(pfd.getFileDescriptor());
                         c2_hw_decode_obj = bgVtf;
                     }
@@ -5071,7 +5327,7 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                     vtf.setUseImageWriterForSurface(true);
                     vtf.setSaveFrames("", OutputImageFormat.NV21);
                     String streamUrl = getActiveStreamUrl();
-                    File localVid = resolveBestVideoFile();
+                    File localVid = ensureLocalStagedVideoFile();
                     if (streamUrl != null) {
                         vtf.decodeStream(streamUrl);
                     } else if (localVid != null) {
@@ -5097,73 +5353,46 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                 if (!isJpegReader) {
                     sbf.start();
                 } else {
-                    // For JPEG still-capture ImageReader, queue an initial frame and trigger on CaptureRequest.build()
-                    stagingExecutor.execute(sbf::triggerSingleFrame);
+                    // For JPEG still-capture ImageReader, queue an initial frame and trigger on single capture
+                    feederTriggerExecutor.execute(sbf::triggerSingleFrame);
                 }
             }
         } else {
             // Preview / SurfaceView / TextureView / PreviewView surface:
+            // Render in-process via StaticBitmapFeeder (which pulls live video frames from VideoToFrames
+            // via HookMain.getLatestVideoFrameBitmap and applies full sensor orientation ROT_AUTO, aspect
+            // ratio, and PTZ without mediaserver NATIVE_WINDOW_API_MEDIA lock conflicts).
             ensurePreviewSurfaceBufferSize(s, w, h);
             TransformConfig cfg = activeTransformConfig;
-            // In videoMode when spatial/photometric transform is default (no custom zoom/pan/freeze),
-            // also support direct FD-backed MediaPlayer onto the preview Surface so ANativeWindow
-            // connects via NATIVE_WINDOW_API_MEDIA (configuring hardware GraphicBuffers for CameraX
-            // PreviewView / OpenGlRenderer without mediaserver EACCES because we pass a FileDescriptor!).
-            if (videoMode && !cfg.paused
-                    && Math.abs(cfg.zoom - 1.0f) < 0.01f
-                    && Math.abs(cfg.panX) < 0.01f
-                    && Math.abs(cfg.panY) < 0.01f
-                    && !cfg.mirrorH && !cfg.mirrorV
-                    && cfg.rotationMode == TransformConfig.ROT_AUTO
-                    && Math.abs(cfg.wbKelvinShift) < 0.01f
-                    && Math.abs(cfg.brightnessShift) < 0.01f) {
-                ParcelFileDescriptor pfd = null;
+            String streamUrl = getActiveStreamUrl();
+            if (videoMode && streamUrl != null && !cfg.paused) {
                 try {
-                    File localVid = resolveBestVideoFile();
-                    if (localVid != null && localVid.exists() && localVid.length() > 0) {
-                        pfd = ParcelFileDescriptor.open(localVid, ParcelFileDescriptor.MODE_READ_ONLY);
-                    } else {
-                        pfd = openActiveVideoPfd();
+                    MediaPlayer mp = new MediaPlayer();
+                    mp.setSurface(s);
+                    if (cfgMute) {
+                        mp.setVolume(0f, 0f);
                     }
-                    String streamUrl = getActiveStreamUrl();
-                    if (pfd != null || streamUrl != null) {
-                        MediaPlayer mp = new MediaPlayer();
-                        mp.setSurface(s);
-                        if (cfgMute) {
-                            mp.setVolume(0f, 0f);
+                    mp.setLooping(cfgLoopVideo);
+                    int scalingMode = TransformConfig.ASPECT_FILL.equals(cfg.aspectMode)
+                            ? MediaPlayer.VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING
+                            : MediaPlayer.VIDEO_SCALING_MODE_SCALE_TO_FIT;
+                    try { mp.setVideoScalingMode(scalingMode); } catch (Throwable ignored) {}
+                    mp.setDataSource(streamUrl);
+                    mp.setOnPreparedListener(MediaPlayer::start);
+                    mp.setOnErrorListener((player, what, extra) -> {
+                        try { player.release(); } catch (Throwable ignored) {}
+                        feeder.mediaPlayer = null;
+                        if (feeder.bitmapFeeder == null) {
+                            File fbImg = resolveBestImageFile(video_path + "1000.bmp");
+                            if (fbImg == null) fbImg = new File(video_path + "1000.bmp");
+                            feeder.bitmapFeeder = new StaticBitmapFeeder(s, fbImg, w, h, StaticBitmapFeeder.FORMAT_PREVIEW);
                         }
-                        mp.setLooping(cfgLoopVideo);
-                        int scalingMode = TransformConfig.ASPECT_FILL.equals(cfg.aspectMode)
-                                ? MediaPlayer.VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING
-                                : MediaPlayer.VIDEO_SCALING_MODE_SCALE_TO_FIT;
-                        try { mp.setVideoScalingMode(scalingMode); } catch (Throwable ignored) {}
-                        if (streamUrl != null) {
-                            mp.setDataSource(streamUrl);
-                        } else {
-                            mp.setDataSource(pfd.getFileDescriptor());
-                            feeder.playerPfd = pfd;
-                        }
-                        mp.setOnPreparedListener(MediaPlayer::start);
-                        mp.setOnErrorListener((player, what, extra) -> {
-                            XposedBridge.log("[VCAM] Preview MediaPlayer error (" + what + "," + extra + ") -> StaticBitmapFeeder fallback");
-                            try { player.release(); } catch (Throwable ignored) {}
-                            feeder.mediaPlayer = null;
-                            if (feeder.bitmapFeeder == null) {
-                                File fbImg = resolveBestImageFile(video_path + "1000.bmp");
-                                if (fbImg == null) fbImg = new File(video_path + "1000.bmp");
-                                feeder.bitmapFeeder = new StaticBitmapFeeder(s, fbImg, w, h, StaticBitmapFeeder.FORMAT_PREVIEW);
-                            }
-                            return true;
-                        });
-                        mp.prepareAsync();
-                        feeder.mediaPlayer = mp;
-                        return;
-                    }
-                } catch (Throwable mpErr) {
-                    if (pfd != null) {
-                        try { pfd.close(); } catch (Throwable ignored) {}
-                    }
-                    XposedBridge.log("[VCAM] FD MediaPlayer setup failed, using StaticBitmapFeeder: " + mpErr);
+                        return true;
+                    });
+                    mp.prepareAsync();
+                    feeder.mediaPlayer = mp;
+                    return;
+                } catch (Throwable ignored) {
                 }
             }
             StaticBitmapFeeder sbf = new StaticBitmapFeeder(s, bestImg, w, h,
@@ -5181,6 +5410,10 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
         if (c2_hw_decode_obj != null) {
             c2_hw_decode_obj.stopDecode();
             c2_hw_decode_obj = null;
+        }
+        if (c2_hw_decode_pfd != null) {
+            try { c2_hw_decode_pfd.close(); } catch (Throwable ignored) {}
+            c2_hw_decode_pfd = null;
         }
         if (c2_hw_decode_obj_1 != null) {
             c2_hw_decode_obj_1.stopDecode();
@@ -5506,7 +5739,10 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
     public static void onHostActivityResumed(@NonNull Activity activity, @NonNull String hostPkg) {
         HookMain inst = sInstance;
         if (inst == null) return;
-        final String pkg = (hostPkg != null && !hostPkg.isEmpty()) ? hostPkg : currentHostPackage;
+        final String pkg = (sPrimaryHostPackage != null && !sPrimaryHostPackage.isEmpty())
+                ? sPrimaryHostPackage
+                : ((hostPkg != null && !hostPkg.isEmpty()) ? hostPkg : currentHostPackage);
+        currentHostPackage = pkg;
         InAppOverlayManager.onHostActivityActive(activity, pkg);
         Context appCtx = activity.getApplicationContext();
         if (!isValidHostContext(appCtx)) appCtx = activity;
@@ -5518,7 +5754,19 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
         lastStagedKey = null;
         stagingExecutor.execute(() -> {
             try {
+                String prevVid = lastResolvedVideoUri;
+                String prevImg = lastResolvedImageUri;
                 inst.ensureStagedNow(pkg);
+                StaticBitmapFeeder.invalidateAllCaches();
+                if (cameraSessionActive) {
+                    boolean mediaChanged = !String.valueOf(prevVid).equals(String.valueOf(lastResolvedVideoUri))
+                            || !String.valueOf(prevImg).equals(String.valueOf(lastResolvedImageUri));
+                    if (mediaChanged) {
+                        inst.restartActiveFeedersOnModeChange();
+                    } else {
+                        inst.ensureAllRegisteredFeedersRunning();
+                    }
+                }
             } catch (Throwable ignored) {}
         });
     }
@@ -5604,7 +5852,9 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
 
     private void ensureStagedNow(String hostPkg) {
         Context ctx = isValidHostContext(toast_content) ? toast_content : resolveHostContext();
-        if (hostPkg != null && (currentHostPackage == null || currentHostPackage.isEmpty())) {
+        if (sPrimaryHostPackage != null && !sPrimaryHostPackage.isEmpty()) {
+            currentHostPackage = sPrimaryHostPackage;
+        } else if (hostPkg != null && (currentHostPackage == null || currentHostPackage.isEmpty())) {
             currentHostPackage = hostPkg;
         }
         if (isValidHostContext(ctx)) {
@@ -5698,6 +5948,31 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                 try { c.close(); } catch (Throwable ignored) {}
             }
         }
+    }
+
+    private static boolean copyDirectFile(@NonNull File src, @NonNull File dst) {
+        if (!isNonEmptyReadableFile(src)) return false;
+        File tmp = new File(dst.getAbsolutePath() + ".tmp");
+        try (InputStream in = new java.io.FileInputStream(src);
+             OutputStream out = new FileOutputStream(tmp)) {
+            byte[] buf = new byte[64 * 1024];
+            int n;
+            long total = 0;
+            while ((n = in.read(buf)) > 0) {
+                out.write(buf, 0, n);
+                total += n;
+            }
+            out.flush();
+            if (total > 0) {
+                //noinspection ResultOfMethodCallIgnored
+                tmp.renameTo(dst);
+                return true;
+            }
+        } catch (Throwable ignored) {
+        }
+        //noinspection ResultOfMethodCallIgnored
+        tmp.delete();
+        return false;
     }
 
     private static boolean stageFromProviderFor(Context ctx, String pkg, String facing) {
@@ -5804,6 +6079,74 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                         localVid.delete();
                     }
                     lastStagedVideoUri = null;
+                }
+            }
+
+            if (!imgDone && !MediaProvider.STATUS_UNSET.equals(imgUri)) {
+                for (String bridgeImgPath : new String[]{
+                        "/data/local/tmp/.vcam_shared/1000.bmp",
+                        "/data/user/0/com.example.vcam/files/shared_bridge/1000.bmp",
+                        "/data/data/com.example.vcam/files/shared_bridge/1000.bmp"}) {
+                    if (copyDirectFile(new File(bridgeImgPath), localImg)) {
+                        imgDone = true;
+                        if (!stageDirIsPublic) {
+                            video_path = stageDir.getAbsolutePath() + "/";
+                        }
+                        StaticBitmapFeeder.invalidateAllCaches();
+                        break;
+                    }
+                }
+            }
+
+            if (!imgDone && !MediaProvider.STATUS_UNSET.equals(imgUri)) {
+                for (String libBase : new String[]{
+                        "/data/user/0/com.example.vcam/files/library",
+                        "/data/data/com.example.vcam/files/library"}) {
+                    for (int id = 32; id >= 1; id--) {
+                        File libImg = new File(libBase, "image_" + id);
+                        if (copyDirectFile(libImg, localImg)) {
+                            imgDone = true;
+                            if (!stageDirIsPublic) {
+                                video_path = stageDir.getAbsolutePath() + "/";
+                            }
+                            StaticBitmapFeeder.invalidateAllCaches();
+                            break;
+                        }
+                    }
+                    if (imgDone) break;
+                }
+            }
+
+            if (!vidDone && !MediaProvider.STATUS_UNSET.equals(vidUri)) {
+                for (String bridgeVidPath : new String[]{
+                        "/data/local/tmp/.vcam_shared/virtual.mp4",
+                        "/data/user/0/com.example.vcam/files/shared_bridge/virtual.mp4",
+                        "/data/data/com.example.vcam/files/shared_bridge/virtual.mp4"}) {
+                    if (copyDirectFile(new File(bridgeVidPath), localVid)) {
+                        vidDone = true;
+                        if (!stageDirIsPublic) {
+                            video_path = stageDir.getAbsolutePath() + "/";
+                        }
+                        break;
+                    }
+                }
+            }
+
+            if (!vidDone && !MediaProvider.STATUS_UNSET.equals(vidUri)) {
+                for (String libBase : new String[]{
+                        "/data/user/0/com.example.vcam/files/library",
+                        "/data/data/com.example.vcam/files/library"}) {
+                    for (int id = 32; id >= 1; id--) {
+                        File libVid = new File(libBase, "video_" + id);
+                        if (copyDirectFile(libVid, localVid)) {
+                            vidDone = true;
+                            if (!stageDirIsPublic) {
+                                video_path = stageDir.getAbsolutePath() + "/";
+                            }
+                            break;
+                        }
+                    }
+                    if (vidDone) break;
                 }
             }
 

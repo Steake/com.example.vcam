@@ -131,11 +131,15 @@ public final class MediaMappings {
                 {pkg, facing},
                 {pkg, FACING_ANY},
                 {PKG_GLOBAL, facing},
-                {PKG_GLOBAL, FACING_ANY}
+                {PKG_GLOBAL, FACING_ANY},
+                {"com.android.webview", facing},
+                {"com.android.webview", FACING_ANY},
+                {"com.google.android.webview", facing},
+                {"com.google.android.webview", FACING_ANY}
         };
         for (String[] p : probes) {
-            if (FACING_ANY.equals(p[1]) && FACING_ANY.equals(facing) && p == probes[1]) {
-                // Probe 2 and probe 1 collapse when facing=="any"; skip the dup.
+            if (FACING_ANY.equals(p[1]) && FACING_ANY.equals(facing)
+                    && (p == probes[1] || p == probes[3] || p == probes[5] || p == probes[7])) {
                 continue;
             }
             for (Mapping m : all) {
@@ -146,7 +150,7 @@ public final class MediaMappings {
         }
         // Fallback: if the user mapped media only to "back" (or "front") and the SDK
         // opened the opposite camera without a specific mapping, fall back to any
-        // mapped facing for this package first, then any global mapping.
+        // mapped facing for this package first, then any global mapping, then webview.
         for (Mapping m : all) {
             if (!m.pkg.equals(pkg)) continue;
             String uri = TYPE_IMAGE.equals(type) ? m.imageUri : m.videoUri;
@@ -154,6 +158,11 @@ public final class MediaMappings {
         }
         for (Mapping m : all) {
             if (!m.pkg.equals(PKG_GLOBAL)) continue;
+            String uri = TYPE_IMAGE.equals(type) ? m.imageUri : m.videoUri;
+            if (!TextUtils.isEmpty(uri)) return uri;
+        }
+        for (Mapping m : all) {
+            if (!"com.android.webview".equals(m.pkg) && !"com.google.android.webview".equals(m.pkg)) continue;
             String uri = TYPE_IMAGE.equals(type) ? m.imageUri : m.videoUri;
             if (!TextUtils.isEmpty(uri)) return uri;
         }
@@ -257,11 +266,23 @@ public final class MediaMappings {
 
     private static void broadcastUpdated(@NonNull Context ctx) {
         try {
+            VCAMApp.syncSharedStagingAsync(ctx);
+        } catch (Throwable ignored) {}
+        try {
             Intent i = new Intent(ACTION_UPDATED);
-            // Keep the broadcast scoped to apps that are actually watching via
-            // their own exported receivers — but don't restrict to a package
-            // so hooked host processes (under unpredictable UIDs) can observe.
             ctx.sendBroadcast(i);
+            java.util.Set<String> pkgs = new java.util.HashSet<>();
+            pkgs.add("com.trycrew.crew");
+            for (Mapping m : all(ctx)) {
+                if (!TextUtils.isEmpty(m.pkg) && !PKG_GLOBAL.equals(m.pkg) && !m.pkg.contains("webview")) {
+                    pkgs.add(m.pkg);
+                }
+            }
+            for (String p : pkgs) {
+                Intent explicit = new Intent(ACTION_UPDATED);
+                explicit.setPackage(p);
+                ctx.sendBroadcast(explicit);
+            }
         } catch (Throwable ignored) {}
     }
 }

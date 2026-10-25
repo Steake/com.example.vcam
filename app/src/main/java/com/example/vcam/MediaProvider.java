@@ -147,10 +147,26 @@ public class MediaProvider extends ContentProvider {
             throws FileNotFoundException {
         enforceCallerIsCameraApp();
         File f = resolveFile(uri);
-        if (f == null || !f.exists() || f.length() == 0) {
-            throw new FileNotFoundException("No staged media for " + uri);
+        if (f != null && MediaPaths.isReadableNonEmptyFile(f)) {
+            return ParcelFileDescriptor.open(f, ParcelFileDescriptor.MODE_READ_ONLY);
         }
-        return ParcelFileDescriptor.open(f, ParcelFileDescriptor.MODE_READ_ONLY);
+        Context ctx = getContext();
+        if (ctx != null) {
+            int match = MATCHER.match(uri);
+            boolean wantVideo = (match == MATCH_VIDEO || match == MATCH_VIDEO_ID);
+            String expectedType = wantVideo ? MediaLibrary.TYPE_VIDEO : MediaLibrary.TYPE_IMAGE;
+            List<MediaLibrary.Entry> all = MediaLibrary.list(ctx);
+            for (int i = all.size() - 1; i >= 0; i--) {
+                MediaLibrary.Entry e = all.get(i);
+                if (expectedType.equals(e.type)) {
+                    File libFile = MediaLibrary.fileFor(ctx, e);
+                    if (MediaPaths.isReadableNonEmptyFile(libFile)) {
+                        return ParcelFileDescriptor.open(libFile, ParcelFileDescriptor.MODE_READ_ONLY);
+                    }
+                }
+            }
+        }
+        throw new FileNotFoundException("No staged media for " + uri);
     }
 
     private static final int FIRST_ISOLATED_UID = 99000;
@@ -299,8 +315,8 @@ public class MediaProvider extends ContentProvider {
         MediaMigration.migrateIfNeeded(ctx);
         String resolved = MediaMappings.resolve(ctx, pkg, facing, type);
         if (!TextUtils.isEmpty(resolved)) {
-            // Verify the backing file actually exists and is non-empty (supports both library item URIs and direct URI_IMAGE/URI_VIDEO)
-            File backing = null;
+            // Verify the backing file actually exists and is readable (supports both library item URIs and direct URI_IMAGE/URI_VIDEO)
+            File backing;
             if (URI_IMAGE.toString().equals(resolved)) {
                 backing = MediaPaths.resolveEffectiveImageFile(ctx);
             } else if (URI_VIDEO.toString().equals(resolved)) {
@@ -308,16 +324,16 @@ public class MediaProvider extends ContentProvider {
             } else {
                 backing = libraryFileForUri(ctx, resolved, type);
             }
-            if (backing == null || !backing.exists() || backing.length() == 0) {
+            if (!MediaPaths.isReadableNonEmptyFile(backing)) {
                 resolved = null;
             }
         }
         if (TextUtils.isEmpty(resolved)) {
-            // Fall back to effective staged/imported file (MediaLibrary or /DCIM/Camera1) if present
+            // Fall back to effective staged/imported file (MediaLibrary or readable /DCIM/Camera1) if present
             File effective = MediaMappings.TYPE_IMAGE.equals(type)
                     ? MediaPaths.resolveEffectiveImageFile(ctx)
                     : MediaPaths.resolveEffectiveVideoFile(ctx);
-            if (effective.exists() && effective.length() > 0) {
+            if (MediaPaths.isReadableNonEmptyFile(effective)) {
                 resolved = (MediaMappings.TYPE_IMAGE.equals(type) ? URI_IMAGE : URI_VIDEO).toString();
             }
         }
