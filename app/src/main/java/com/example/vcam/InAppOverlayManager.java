@@ -137,6 +137,17 @@ public final class InAppOverlayManager {
         }
     }
 
+    public static void refreshActiveOverlayUi() {
+        mainHandler.post(() -> {
+            OverlayRootView ov = activeOverlayRef != null ? activeOverlayRef.get() : null;
+            if (ov != null) {
+                try {
+                    ov.refreshUiFromState();
+                } catch (Throwable ignored) {}
+            }
+        });
+    }
+
     @Nullable
     private static Activity findTopRunningActivity() {
         Activity cached = currentActivityRef != null ? currentActivityRef.get() : null;
