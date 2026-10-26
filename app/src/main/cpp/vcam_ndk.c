@@ -395,10 +395,10 @@ struct JNINativeInterface {
     jboolean (*CallBooleanMethodV)(JNIEnv*, jobject, jmethodID, void*);
     jboolean (*CallBooleanMethodA)(JNIEnv*, jobject, jmethodID, const void*);
     int8_t (*CallByteMethod)(JNIEnv*, jobject, jmethodID, ...);
-    void* call_other[78];
+    void* call_other[72];
     jmethodID (*GetStaticMethodID)(JNIEnv*, jclass, const char*, const char*);
     jobject (*CallStaticObjectMethod)(JNIEnv*, jclass, jmethodID, ...);
-    void* call_static_other[29];
+    void* call_static_other[28];
     void (*CallStaticVoidMethod)(JNIEnv*, jclass, jmethodID, ...);
     void* rest_jni[100];
 };
