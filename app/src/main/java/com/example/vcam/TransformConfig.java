@@ -329,7 +329,10 @@ public final class TransformConfig {
 
     public static void saveGlobal(@NonNull Context ctx, @NonNull TransformConfig cfg) {
         SharedPreferences sp = ctx.getSharedPreferences(VCAMApp.PREFS, Context.MODE_PRIVATE);
-        sp.edit().putString(KEY_GLOBAL_TRANSFORM, cfg.toJson().toString()).apply();
+        sp.edit()
+                .putString(KEY_GLOBAL_TRANSFORM, cfg.toJson().toString())
+                .putBoolean(VCAMApp.KEY_PASSTHROUGH_MODE, cfg.passthroughRealCamera)
+                .apply();
         notifyUpdated(ctx);
     }
 
@@ -364,7 +367,90 @@ public final class TransformConfig {
         }
         String normFacing = MediaMappings.normalizeFacing(facing);
         SharedPreferences sp = ctx.getSharedPreferences(VCAMApp.PREFS, Context.MODE_PRIVATE);
-        sp.edit().putString(KEY_SCOPED_PREFIX + pkg + "|" + normFacing, cfg.toJson().toString()).apply();
+        TransformConfig globalCfg = loadGlobal(ctx);
+        globalCfg.sourceMode = cfg.sourceMode;
+        globalCfg.preferredMediaType = cfg.preferredMediaType;
+        globalCfg.passthroughRealCamera = cfg.passthroughRealCamera;
+        sp.edit()
+                .putString(KEY_SCOPED_PREFIX + pkg + "|" + normFacing, cfg.toJson().toString())
+                .putString(KEY_GLOBAL_TRANSFORM, globalCfg.toJson().toString())
+                .putBoolean(VCAMApp.KEY_PASSTHROUGH_MODE, cfg.passthroughRealCamera)
+                .apply();
+        notifyUpdated(ctx);
+    }
+
+    /**
+     * Updates {@code sourceMode} and {@code preferredMediaType} in the global transform config
+     * AND in all existing scoped transform configs (or for the specified {@code pkg}/{@code facing}
+     * if non-global) so that selecting Image or Movie in MainActivity, MediaLibraryActivity,
+     * InjectedConfigActivity, or the HUD is never shadowed by a stale scoped config.
+     */
+    public static void updateSourceAndMediaTypeEverywhere(@NonNull Context ctx,
+                                                          @Nullable String pkg,
+                                                          @Nullable String facing,
+                                                          @Nullable String sourceMode,
+                                                          @Nullable String preferredMediaType) {
+        SharedPreferences sp = ctx.getSharedPreferences(VCAMApp.PREFS, Context.MODE_PRIVATE);
+        SharedPreferences.Editor ed = sp.edit();
+
+        TransformConfig globalCfg = loadGlobal(ctx);
+        if (!TextUtils.isEmpty(sourceMode)) globalCfg.sourceMode = sourceMode;
+        if (!TextUtils.isEmpty(preferredMediaType)) globalCfg.preferredMediaType = preferredMediaType;
+        globalCfg.passthroughRealCamera = false;
+        ed.putString(KEY_GLOBAL_TRANSFORM, globalCfg.toJson().toString());
+        ed.putBoolean(VCAMApp.KEY_PASSTHROUGH_MODE, false);
+
+        boolean updateAllScopes = TextUtils.isEmpty(pkg) || MediaMappings.PKG_GLOBAL.equals(pkg);
+        String targetPrefix = updateAllScopes ? KEY_SCOPED_PREFIX : (KEY_SCOPED_PREFIX + pkg + "|");
+
+        java.util.Map<String, ?> all = sp.getAll();
+        if (all != null) {
+            for (java.util.Map.Entry<String, ?> entry : all.entrySet()) {
+                String k = entry.getKey();
+                if (k != null && k.startsWith(KEY_SCOPED_PREFIX) && (updateAllScopes || k.startsWith(targetPrefix))) {
+                    Object val = entry.getValue();
+                    if (val instanceof String) {
+                        TransformConfig sc = fromJsonString((String) val);
+                        if (!TextUtils.isEmpty(sourceMode)) sc.sourceMode = sourceMode;
+                        if (!TextUtils.isEmpty(preferredMediaType)) sc.preferredMediaType = preferredMediaType;
+                        sc.passthroughRealCamera = false;
+                        ed.putString(k, sc.toJson().toString());
+                    }
+                }
+            }
+        }
+        ed.apply();
+        notifyUpdated(ctx);
+    }
+
+    /**
+     * Updates {@code passthroughRealCamera} across both global and all scoped transform configs
+     * as well as {@link VCAMApp#KEY_PASSTHROUGH_MODE}.
+     */
+    public static void updatePassthroughEverywhere(@NonNull Context ctx, boolean passthrough) {
+        SharedPreferences sp = ctx.getSharedPreferences(VCAMApp.PREFS, Context.MODE_PRIVATE);
+        SharedPreferences.Editor ed = sp.edit();
+        ed.putBoolean(VCAMApp.KEY_PASSTHROUGH_MODE, passthrough);
+
+        TransformConfig globalCfg = loadGlobal(ctx);
+        globalCfg.passthroughRealCamera = passthrough;
+        ed.putString(KEY_GLOBAL_TRANSFORM, globalCfg.toJson().toString());
+
+        java.util.Map<String, ?> all = sp.getAll();
+        if (all != null) {
+            for (java.util.Map.Entry<String, ?> entry : all.entrySet()) {
+                String k = entry.getKey();
+                if (k != null && k.startsWith(KEY_SCOPED_PREFIX)) {
+                    Object val = entry.getValue();
+                    if (val instanceof String) {
+                        TransformConfig sc = fromJsonString((String) val);
+                        sc.passthroughRealCamera = passthrough;
+                        ed.putString(k, sc.toJson().toString());
+                    }
+                }
+            }
+        }
+        ed.apply();
         notifyUpdated(ctx);
     }
 

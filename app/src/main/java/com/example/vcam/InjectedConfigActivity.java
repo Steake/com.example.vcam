@@ -250,42 +250,71 @@ public class InjectedConfigActivity extends AppCompatActivity {
 
     private void refresh() {
         chips.removeAllViews();
-        File img = MediaPaths.getImageTarget(this);
-        File vid = MediaPaths.getVideoTarget(this);
+        String pkg = TextUtils.isEmpty(callerPackage) ? MediaMappings.PKG_GLOBAL : callerPackage;
+        String facing = TextUtils.isEmpty(currentFacing) ? MediaMappings.FACING_ANY : currentFacing;
+        TransformConfig cfg = TransformConfig.resolve(this, pkg, facing);
+
+        File img = MediaPaths.resolveEffectiveImageFile(this);
+        File vid = MediaPaths.resolveEffectiveVideoFile(this);
+        boolean hasImg = img != null && img.exists() && img.length() > 0;
+        boolean hasVid = vid != null && vid.exists() && vid.length() > 0;
+        boolean preferImage = TransformConfig.MEDIA_IMAGE.equals(cfg.preferredMediaType)
+                || (!hasVid && hasImg);
 
         Bitmap thumb = null;
-        if (img.exists() && img.length() > 0) {
-            addChip(getString(R.string.chip_image_loaded));
+        if (hasImg) {
+            Chip imgChip = addChip((preferImage ? "✓ " : "") + getString(R.string.chip_image_loaded));
+            imgChip.setClickable(true);
+            imgChip.setOnClickListener(v -> {
+                TransformConfig.updateSourceAndMediaTypeEverywhere(
+                        this, pkg, facing, TransformConfig.SOURCE_MEDIA, TransformConfig.MEDIA_IMAGE);
+                Toast.makeText(this, "Active source: Image", Toast.LENGTH_SHORT).show();
+                refresh();
+            });
             int[] r = MediaPaths.imageResolution(img);
             if (r != null) addChip(getString(R.string.chip_resolution_format, r[0], r[1]));
             addChip(MediaPaths.humanBytes(img.length()));
-            thumb = MediaPaths.decodeImageThumb(img, 800);
+            if (preferImage) {
+                thumb = MediaPaths.decodeImageThumb(img, 800);
+            }
         } else {
             addChip(getString(R.string.chip_image_none));
         }
 
-        if (vid.exists() && vid.length() > 0) {
-            addChip(getString(R.string.chip_video_loaded));
+        if (hasVid) {
+            Chip vidChip = addChip((!preferImage ? "✓ " : "") + getString(R.string.chip_video_loaded));
+            vidChip.setClickable(true);
+            vidChip.setOnClickListener(v -> {
+                TransformConfig.updateSourceAndMediaTypeEverywhere(
+                        this, pkg, facing, TransformConfig.SOURCE_MEDIA, TransformConfig.MEDIA_VIDEO);
+                Toast.makeText(this, "Active source: Movie", Toast.LENGTH_SHORT).show();
+                refresh();
+            });
+            int[] r = MediaPaths.videoResolution(vid);
+            if (r != null) addChip(getString(R.string.chip_resolution_format, r[0], r[1]));
+            addChip(MediaPaths.humanBytes(vid.length()));
             if (thumb == null) {
                 thumb = MediaPaths.decodeVideoFrame(vid);
-                int[] r = MediaPaths.videoResolution(vid);
-                if (r != null) addChip(getString(R.string.chip_resolution_format, r[0], r[1]));
-                addChip(MediaPaths.humanBytes(vid.length()));
             }
         } else {
             addChip(getString(R.string.chip_video_none));
+        }
+
+        if (thumb == null && hasImg) {
+            thumb = MediaPaths.decodeImageThumb(img, 800);
         }
 
         if (thumb != null) preview.setImageBitmap(thumb);
         else preview.setImageResource(android.R.drawable.ic_menu_gallery);
 
         // Show the current effective mapping for (pkg, facing).
-        String pkg = TextUtils.isEmpty(callerPackage) ? MediaMappings.PKG_GLOBAL : callerPackage;
-        String facing = TextUtils.isEmpty(currentFacing) ? MediaMappings.FACING_ANY : currentFacing;
         String iUri = MediaMappings.resolve(this, pkg, facing, MediaMappings.TYPE_IMAGE);
         String vUri = MediaMappings.resolve(this, pkg, facing, MediaMappings.TYPE_VIDEO);
+        String activeModeLabel = TransformConfig.SOURCE_MEDIA.equals(cfg.sourceMode)
+                ? (preferImage ? "Image" : "Movie")
+                : cfg.sourceMode;
         effective.setText(getString(R.string.injected_effective_format,
-                shortName(iUri), shortName(vUri)));
+                shortName(iUri), shortName(vUri)) + "  •  Active: " + activeModeLabel);
     }
 
     @NonNull
@@ -302,12 +331,13 @@ public class InjectedConfigActivity extends AppCompatActivity {
         return getString(R.string.injected_facing_any);
     }
 
-    private void addChip(String text) {
+    private Chip addChip(String text) {
         Chip c = new Chip(this);
         c.setText(text);
         c.setClickable(false);
         c.setCheckable(false);
         chips.addView(c);
+        return c;
     }
 
     private void returnToCaller() {

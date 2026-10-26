@@ -205,6 +205,8 @@ public final class MediaLibrary {
         }
         //noinspection ResultOfMethodCallIgnored
         dst.setReadable(true, false);
+        try { android.system.Os.chmod(dst.getAbsolutePath(), 0644); } catch (Throwable ignored) {}
+        VCAMApp.ensureWorldReadableLibraryDirs(ctx);
         Entry e = new Entry(id, type,
                 TextUtils.isEmpty(displayName) ? (type + "-" + id) : displayName,
                 bytes, System.currentTimeMillis());
@@ -237,6 +239,8 @@ public final class MediaLibrary {
         }
         //noinspection ResultOfMethodCallIgnored
         dst.setReadable(true, false);
+        try { android.system.Os.chmod(dst.getAbsolutePath(), 0644); } catch (Throwable ignored) {}
+        VCAMApp.ensureWorldReadableLibraryDirs(ctx);
         Entry e = new Entry(id, type,
                 TextUtils.isEmpty(displayName) ? src.getName() : displayName,
                 dst.length(), System.currentTimeMillis());

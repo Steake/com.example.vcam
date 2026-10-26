@@ -46,6 +46,7 @@ public class VideoToFrames implements Runnable {
 
     private int targetWidth = 0;
     private int targetHeight = 0;
+    private volatile int videoRotationDegrees = 0;
     private volatile long currentPositionMs = 0L;
     private volatile long durationMs = 0L;
     private long lastHandledSeekTimestamp = 0L;
@@ -248,6 +249,12 @@ public class VideoToFrames implements Runnable {
             if (mediaFormat.containsKey(MediaFormat.KEY_DURATION)) {
                 durationMs = mediaFormat.getLong(MediaFormat.KEY_DURATION) / 1000L;
             }
+            videoRotationDegrees = 0;
+            try {
+                if (mediaFormat.containsKey("rotation-degrees")) {
+                    videoRotationDegrees = ((mediaFormat.getInteger("rotation-degrees") % 360) + 360) % 360;
+                }
+            } catch (Throwable ignored) {}
             String mime = mediaFormat.getString(MediaFormat.KEY_MIME);
             decoder = MediaCodec.createDecoderByType(mime);
             showSupportedColorFormat(decoder.getCodecInfo().getCapabilitiesForType(mime));
@@ -329,6 +336,10 @@ public class VideoToFrames implements Runnable {
             final int height = mediaFormat.getInteger(MediaFormat.KEY_HEIGHT);
             int outputFrameCount = 0;
             while (!sawOutputEOS && !stopDecode) {
+                if (!HookMain.isVideoModeActive()) {
+                    stopDecode = true;
+                    break;
+                }
                 TransformConfig cfg = HookMain.getActiveTransformConfig();
 
                 // 1. Handle pause (freeze-frame): keep HookMain.data_buffer alive with sensor grain
@@ -444,11 +455,12 @@ public class VideoToFrames implements Runnable {
                                         int srcH = crop.height();
                                         updateLumaPhotometry(rawNv21, srcW, srcH);
 
-                                        HookMain.updateLatestRawVideoFrame(rawNv21, srcW, srcH);
+                                        HookMain.updateLatestRawVideoFrame(rawNv21, srcW, srcH, videoRotationDegrees);
                                         int dstW = targetWidth > 0 ? targetWidth : srcW;
                                         int dstH = targetHeight > 0 ? targetHeight : srcH;
                                         byte[] finalNv21;
                                         if (srcW == dstW && srcH == dstH
+                                                && videoRotationDegrees == 0
                                                 && (cfg.rotationMode <= 0)
                                                 && !cfg.mirrorH && !cfg.mirrorV
                                                 && cfg.zoom == 1.0f && cfg.panX == 0.0f && cfg.panY == 0.0f) {

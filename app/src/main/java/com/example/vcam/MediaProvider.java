@@ -518,6 +518,10 @@ public class MediaProvider extends ContentProvider {
             String type = extras.getString("type", MediaMappings.TYPE_VIDEO);
             String uri = extras.getString("uri");
             MediaMappings.setOne(ctx, pkg, facing, type, uri);
+            String prefType = MediaMappings.TYPE_IMAGE.equals(type)
+                    ? TransformConfig.MEDIA_IMAGE : TransformConfig.MEDIA_VIDEO;
+            TransformConfig.updateSourceAndMediaTypeEverywhere(
+                    ctx, pkg, facing, TransformConfig.SOURCE_MEDIA, prefType);
             reply.putBoolean("ok", true);
             return reply;
         }

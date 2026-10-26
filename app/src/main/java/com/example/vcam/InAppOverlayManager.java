@@ -440,13 +440,26 @@ public final class InAppOverlayManager {
         private Button btnMirH;
         private Button btnMirV;
         private Button btnFreeze;
-        private Button btnSrcMedia;
+        private Button btnSrcMovie;
+        private Button btnSrcImage;
         private Button btnSrcGrid;
         private Button btnSrcQr;
         private Button btnGrain;
 
         private boolean expanded = false;
         private int activeTab = 0; // 0 = PTZ, 1 = Playback/Cues, 2 = Sensor/Source
+        private boolean userScrubbing = false;
+
+        private final Runnable playbackTicker = new Runnable() {
+            @Override
+            public void run() {
+                if (!isAttachedToWindow()) return;
+                if (expanded && activeTab == 1) {
+                    updatePlaybackReadout();
+                }
+                postDelayed(this, 400L);
+            }
+        };
 
         OverlayRootView(@NonNull Activity activity,
                         @Nullable WindowManager wm,
@@ -463,7 +476,7 @@ public final class InAppOverlayManager {
             pinchDetector = new ScaleGestureDetector(activity, new ScaleGestureDetector.SimpleOnScaleGestureListener() {
                 @Override
                 public boolean onScale(ScaleGestureDetector detector) {
-                    TransformConfig cfg = HookMain.getActiveTransformConfig();
+                    TransformConfig cfg = HookMain.getActiveTransformConfig().copy();
                     cfg.zoom = Math.max(0.25f, Math.min(5.0f, cfg.zoom * detector.getScaleFactor()));
                     applyAndPersistTransform(cfg);
                     refreshUiFromState();
@@ -576,17 +589,20 @@ public final class InAppOverlayManager {
             statusLabel = new TextView(ctx);
             statusLabel.setText("VCAM HUD");
             statusLabel.setTextColor(0xFF80D8FF);
-            statusLabel.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+            statusLabel.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
             statusLabel.getPaint().setFakeBoldText(true);
             LinearLayout.LayoutParams titleLp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
             header.addView(statusLabel, titleLp);
 
-            btnPassthrough = makeSmallButton(ctx, "LIVE/VIRT", v -> {
-                TransformConfig cfg = HookMain.getActiveTransformConfig();
+            btnPassthrough = makeSmallButton(ctx, "🎥 VIRT", v -> {
+                TransformConfig cfg = HookMain.getActiveTransformConfig().copy();
                 cfg.passthroughRealCamera = !cfg.passthroughRealCamera;
                 cfg.passthroughMode = cfg.passthroughRealCamera;
                 applyAndPersistTransform(cfg);
                 refreshUiFromState();
+                Toast.makeText(ctx, cfg.passthroughRealCamera
+                        ? "Passthrough ON: Real hardware camera linked"
+                        : "Virtual camera active", Toast.LENGTH_SHORT).show();
             });
             header.addView(btnPassthrough);
 
@@ -640,7 +656,7 @@ public final class InAppOverlayManager {
             joyRow.setGravity(Gravity.CENTER_VERTICAL);
 
             joystickView = new JoystickView(ctx, (normX, normY) -> {
-                TransformConfig cfg = HookMain.getActiveTransformConfig();
+                TransformConfig cfg = HookMain.getActiveTransformConfig().copy();
                 cfg.panX = normX;
                 cfg.panY = normY;
                 applyAndPersistTransform(cfg);
@@ -660,7 +676,7 @@ public final class InAppOverlayManager {
             dpadRow.addView(makeSmallButton(ctx, "▼", v -> nudgePan(0f, 0.05f)));
             dpadRow.addView(makeSmallButton(ctx, "▶", v -> nudgePan(0.05f, 0f)));
             dpadRow.addView(makeSmallButton(ctx, "◎", v -> {
-                TransformConfig cfg = HookMain.getActiveTransformConfig();
+                TransformConfig cfg = HookMain.getActiveTransformConfig().copy();
                 cfg.resetSpatial();
                 applyAndPersistTransform(cfg);
                 refreshUiFromState();
@@ -685,20 +701,20 @@ public final class InAppOverlayManager {
             rotRow.setPadding(0, dp(ctx, 4), 0, 0);
             btnRotAuto = makeSmallButton(ctx, "AUTO°", v -> setRot(TransformConfig.ROT_AUTO));
             btnRot90 = makeSmallButton(ctx, "+90°", v -> {
-                TransformConfig cfg = HookMain.getActiveTransformConfig();
+                TransformConfig cfg = HookMain.getActiveTransformConfig().copy();
                 int cur = cfg.rotationMode < 0 ? 0 : cfg.rotationMode;
                 cfg.setRotation((cur + 90) % 360);
                 applyAndPersistTransform(cfg);
                 refreshUiFromState();
             });
             btnMirH = makeSmallButton(ctx, "⇔H", v -> {
-                TransformConfig cfg = HookMain.getActiveTransformConfig();
+                TransformConfig cfg = HookMain.getActiveTransformConfig().copy();
                 cfg.mirrorH = !cfg.mirrorH;
                 applyAndPersistTransform(cfg);
                 refreshUiFromState();
             });
             btnMirV = makeSmallButton(ctx, "⇕V", v -> {
-                TransformConfig cfg = HookMain.getActiveTransformConfig();
+                TransformConfig cfg = HookMain.getActiveTransformConfig().copy();
                 cfg.mirrorV = !cfg.mirrorV;
                 applyAndPersistTransform(cfg);
                 refreshUiFromState();
@@ -736,7 +752,7 @@ public final class InAppOverlayManager {
                 @Override
                 public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
                     if (!fromUser) return;
-                    TransformConfig cfg = HookMain.getActiveTransformConfig();
+                    TransformConfig cfg = HookMain.getActiveTransformConfig().copy();
                     cfg.zoom = (25 + progress) / 100.0f;
                     zoomReadout.setText(String.format(Locale.US, "%.2fx", cfg.zoom));
                     applyAndPersistTransform(cfg);
@@ -746,7 +762,7 @@ public final class InAppOverlayManager {
             });
             zoomRow.addView(zoomSlider, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
             zoomRow.addView(makeSmallButton(ctx, "1x", v -> {
-                TransformConfig cfg = HookMain.getActiveTransformConfig();
+                TransformConfig cfg = HookMain.getActiveTransformConfig().copy();
                 cfg.zoom = 1.0f;
                 applyAndPersistTransform(cfg);
                 refreshUiFromState();
@@ -759,20 +775,20 @@ public final class InAppOverlayManager {
             presetRow.setOrientation(LinearLayout.HORIZONTAL);
             presetRow.setPadding(0, dp(ctx, 4), 0, 0);
             presetRow.addView(makeSmallButton(ctx, "Fit Auto", v -> {
-                TransformConfig cfg = HookMain.getActiveTransformConfig();
+                TransformConfig cfg = HookMain.getActiveTransformConfig().copy();
                 cfg.resetSpatial();
                 applyAndPersistTransform(cfg);
                 refreshUiFromState();
             }));
             presetRow.addView(makeSmallButton(ctx, "Selfie Mirror", v -> {
-                TransformConfig cfg = HookMain.getActiveTransformConfig();
+                TransformConfig cfg = HookMain.getActiveTransformConfig().copy();
                 cfg.aspectMode = TransformConfig.ASPECT_FILL;
                 cfg.mirrorH = true;
                 applyAndPersistTransform(cfg);
                 refreshUiFromState();
             }));
             presetRow.addView(makeSmallButton(ctx, "1.5x Crop", v -> {
-                TransformConfig cfg = HookMain.getActiveTransformConfig();
+                TransformConfig cfg = HookMain.getActiveTransformConfig().copy();
                 cfg.aspectMode = TransformConfig.ASPECT_FILL;
                 cfg.zoom = 1.5f;
                 applyAndPersistTransform(cfg);
@@ -798,7 +814,7 @@ public final class InAppOverlayManager {
             ctrlRow.setGravity(Gravity.CENTER_VERTICAL);
 
             btnFreeze = makeSmallButton(ctx, "⏯ Freeze/Play", v -> {
-                TransformConfig cfg = HookMain.getActiveTransformConfig();
+                TransformConfig cfg = HookMain.getActiveTransformConfig().copy();
                 cfg.paused = !cfg.paused;
                 HookMain.setPlaybackPaused(cfg.paused);
                 applyAndPersistTransform(cfg);
@@ -808,6 +824,7 @@ public final class InAppOverlayManager {
 
             ctrlRow.addView(makeSmallButton(ctx, "⏮ 0:00", v -> {
                 HookMain.seekActiveVideo(0L);
+                updatePlaybackReadout();
             }));
 
             timeReadout = new TextView(ctx);
@@ -835,8 +852,8 @@ public final class InAppOverlayManager {
                         HookMain.seekActiveVideo((dur * progress) / 1000L);
                     }
                 }
-                @Override public void onStartTrackingTouch(SeekBar seekBar) {}
-                @Override public void onStopTrackingTouch(SeekBar seekBar) {}
+                @Override public void onStartTrackingTouch(SeekBar seekBar) { userScrubbing = true; }
+                @Override public void onStopTrackingTouch(SeekBar seekBar) { userScrubbing = false; }
             });
             box.addView(scrubSlider);
 
@@ -873,17 +890,31 @@ public final class InAppOverlayManager {
             LinearLayout box = new LinearLayout(ctx);
             box.setOrientation(LinearLayout.VERTICAL);
 
-            // Source mode selector: Media | Test Pattern | Live QR | Picker Dialog
+            // Source mode selector: Movie | Image | Grid | QR | Swap...
+            HorizontalScrollView srcScroll = new HorizontalScrollView(ctx);
+            srcScroll.setHorizontalScrollBarEnabled(false);
             LinearLayout srcRow = new LinearLayout(ctx);
             srcRow.setOrientation(LinearLayout.HORIZONTAL);
-            btnSrcMedia = makeSmallButton(ctx, "Media", v -> setSourceMode(TransformConfig.SOURCE_MEDIA));
-            btnSrcGrid = makeSmallButton(ctx, "Test Grid", v -> setSourceMode(TransformConfig.SOURCE_TEST_PATTERN));
-            btnSrcQr = makeSmallButton(ctx, "QR Code", v -> promptQrInput(ctx));
-            srcRow.addView(btnSrcMedia);
+            btnSrcMovie = makeSmallButton(ctx, "🎬 Movie", v -> {
+                setMediaSourceType(TransformConfig.MEDIA_VIDEO);
+                Toast.makeText(ctx, "Source: Movie", Toast.LENGTH_SHORT).show();
+            });
+            btnSrcImage = makeSmallButton(ctx, "🖼 Image", v -> {
+                setMediaSourceType(TransformConfig.MEDIA_IMAGE);
+                Toast.makeText(ctx, "Source: Still Image", Toast.LENGTH_SHORT).show();
+            });
+            btnSrcGrid = makeSmallButton(ctx, "Grid", v -> {
+                setSourceMode(TransformConfig.SOURCE_TEST_PATTERN);
+                Toast.makeText(ctx, "Source: Test Grid", Toast.LENGTH_SHORT).show();
+            });
+            btnSrcQr = makeSmallButton(ctx, "QR", v -> promptQrInput(ctx));
+            srcRow.addView(btnSrcMovie);
+            srcRow.addView(btnSrcImage);
             srcRow.addView(btnSrcGrid);
             srcRow.addView(btnSrcQr);
             srcRow.addView(makeSmallButton(ctx, "Swap...", v -> launchInjectedConfig(ctx)));
-            box.addView(srcRow);
+            srcScroll.addView(srcRow);
+            box.addView(srcScroll);
 
             // White Balance Slider
             LinearLayout wbRow = new LinearLayout(ctx);
@@ -907,7 +938,7 @@ public final class InAppOverlayManager {
                 @Override
                 public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
                     if (!fromUser) return;
-                    TransformConfig cfg = HookMain.getActiveTransformConfig();
+                    TransformConfig cfg = HookMain.getActiveTransformConfig().copy();
                     cfg.wbKelvinShift = (progress - 100) / 100.0f;
                     applyAndPersistTransform(cfg);
                 }
@@ -939,7 +970,7 @@ public final class InAppOverlayManager {
                 @Override
                 public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
                     if (!fromUser) return;
-                    TransformConfig cfg = HookMain.getActiveTransformConfig();
+                    TransformConfig cfg = HookMain.getActiveTransformConfig().copy();
                     cfg.brightnessShift = (progress - 50) / 100.0f;
                     applyAndPersistTransform(cfg);
                 }
@@ -949,7 +980,7 @@ public final class InAppOverlayManager {
             expRow.addView(expBar, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
             btnGrain = makeSmallButton(ctx, "Grain", v -> {
-                TransformConfig cfg = HookMain.getActiveTransformConfig();
+                TransformConfig cfg = HookMain.getActiveTransformConfig().copy();
                 cfg.sensorGrainEnabled = !cfg.sensorGrainEnabled;
                 applyAndPersistTransform(cfg);
                 refreshUiFromState();
@@ -963,7 +994,6 @@ public final class InAppOverlayManager {
         }
 
         private void promptQrInput(@NonNull final Context ctx) {
-            // Temporarily clear FLAG_NOT_FOCUSABLE on our overlay window or use an AlertDialog
             try {
                 final EditText input = new EditText(ctx);
                 input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
@@ -972,9 +1002,10 @@ public final class InAppOverlayManager {
                         .setTitle("Live QR Code Payload")
                         .setView(input)
                         .setPositiveButton("Project QR", (d, w) -> {
-                            TransformConfig cfg = HookMain.getActiveTransformConfig();
+                            TransformConfig cfg = HookMain.getActiveTransformConfig().copy();
                             cfg.qrPayload = input.getText().toString().trim();
                             cfg.sourceMode = TransformConfig.SOURCE_QR_CODE;
+                            cfg.passthroughRealCamera = false;
                             applyAndPersistTransform(cfg);
                             refreshUiFromState();
                         })
@@ -1013,10 +1044,13 @@ public final class InAppOverlayManager {
             try {
                 getViewTreeObserver().addOnGlobalLayoutListener(zOrderKeepTopListener);
             } catch (Throwable ignored) {}
+            removeCallbacks(playbackTicker);
+            postDelayed(playbackTicker, 400L);
         }
 
         @Override
         protected void onDetachedFromWindow() {
+            removeCallbacks(playbackTicker);
             try {
                 getViewTreeObserver().removeOnGlobalLayoutListener(zOrderKeepTopListener);
             } catch (Throwable ignored) {}
@@ -1033,8 +1067,15 @@ public final class InAppOverlayManager {
 
         private void applyOverlayPosition() {
             try {
-                decorParams.leftMargin = Math.max(0, windowParams.x);
-                decorParams.topMargin = Math.max(0, windowParams.y);
+                android.util.DisplayMetrics dm = getResources().getDisplayMetrics();
+                int viewW = expanded ? dp(getContext(), 340) : dp(getContext(), 54);
+                int viewH = expanded ? dp(getContext(), 280) : dp(getContext(), 54);
+                int maxX = Math.max(0, dm.widthPixels - viewW);
+                int maxY = Math.max(0, dm.heightPixels - viewH);
+                windowParams.x = Math.max(0, Math.min(maxX, windowParams.x));
+                windowParams.y = Math.max(0, Math.min(maxY, windowParams.y));
+                decorParams.leftMargin = windowParams.x;
+                decorParams.topMargin = windowParams.y;
                 setLayoutParams(decorParams);
                 bringToFront();
             } catch (Throwable ignored) {}
@@ -1071,17 +1112,44 @@ public final class InAppOverlayManager {
             }
             bg.setCornerRadius(dp(ctx, 8));
             b.setBackground(bg);
-            int ph = dp(ctx, 9);
+            int ph = dp(ctx, 8);
             int pv = dp(ctx, 5);
             b.setPadding(ph, pv, ph, pv);
         }
 
+        private void updatePlaybackReadout() {
+            if (timeReadout == null || scrubSlider == null) return;
+            long dur = HookMain.getActiveVideoDurationMs();
+            long pos = HookMain.getActiveVideoPositionMs();
+            if (dur > 0 && HookMain.isVideoModeActive()) {
+                timeReadout.setText(String.format(Locale.US, "%d:%02d / %d:%02d",
+                        (pos / 1000) / 60, (pos / 1000) % 60,
+                        (dur / 1000) / 60, (dur / 1000) % 60));
+                if (!userScrubbing) {
+                    int prog = (int) Math.max(0L, Math.min(1000L, (pos * 1000L) / dur));
+                    scrubSlider.setProgress(prog);
+                }
+            } else {
+                timeReadout.setText(HookMain.isVideoModeActive() ? "LIVE VIDEO" : "STATIC");
+            }
+        }
+
         void refreshUiFromState() {
             TransformConfig cfg = HookMain.getActiveTransformConfig();
-            String modeBadge = cfg.passthroughRealCamera ? "REAL-CAM"
+            boolean isMedia = TransformConfig.SOURCE_MEDIA.equals(cfg.sourceMode);
+            boolean isImageSelected = isMedia && TransformConfig.MEDIA_IMAGE.equals(cfg.preferredMediaType);
+            boolean isMovieSelected = isMedia && !isImageSelected;
+            String srcBadge = cfg.passthroughRealCamera ? "REAL-CAM"
+                    : (isImageSelected ? "IMAGE"
+                    : (isMovieSelected ? "MOVIE"
+                    : (TransformConfig.SOURCE_TEST_PATTERN.equals(cfg.sourceMode) ? "GRID" : "QR")));
+            String modeBadge = cfg.passthroughRealCamera ? "LIVE"
                     : (cfg.paused ? "FROZEN" : cfg.aspectMode.toUpperCase(Locale.US));
-            statusLabel.setText(String.format(Locale.US, "VCAM · %s · %s",
-                    HookMain.getCurrentFacing().toUpperCase(Locale.US), modeBadge));
+            statusLabel.setText(String.format(Locale.US, "VCAM · %s · %s · %s",
+                    HookMain.getCurrentFacing().toUpperCase(Locale.US), srcBadge, modeBadge));
+            if (btnPassthrough != null) {
+                btnPassthrough.setText(cfg.passthroughRealCamera ? "🟢 LIVE" : "🎥 VIRT");
+            }
             zoomReadout.setText(String.format(Locale.US, "%.2fx", cfg.zoom));
             zoomSlider.setProgress(Math.max(0, Math.min(475, Math.round(cfg.zoom * 100) - 25)));
             if (joystickView != null) {
@@ -1105,14 +1173,16 @@ public final class InAppOverlayManager {
                 btnFreeze.setText(cfg.paused ? "▶ Resume" : "⏸ Freeze");
                 styleHudButton(btnFreeze, cfg.paused);
             }
-            styleHudButton(btnSrcMedia, TransformConfig.SOURCE_MEDIA.equals(cfg.sourceMode));
+            styleHudButton(btnSrcMovie, isMovieSelected);
+            styleHudButton(btnSrcImage, isImageSelected);
             styleHudButton(btnSrcGrid, TransformConfig.SOURCE_TEST_PATTERN.equals(cfg.sourceMode));
             styleHudButton(btnSrcQr, TransformConfig.SOURCE_QR_CODE.equals(cfg.sourceMode));
             styleHudButton(btnGrain, cfg.sensorGrainEnabled);
+            updatePlaybackReadout();
         }
 
         private void nudgePan(float dx, float dy) {
-            TransformConfig cfg = HookMain.getActiveTransformConfig();
+            TransformConfig cfg = HookMain.getActiveTransformConfig().copy();
             cfg.panX = Math.max(-1.0f, Math.min(1.0f, cfg.panX + dx));
             cfg.panY = Math.max(-1.0f, Math.min(1.0f, cfg.panY + dy));
             applyAndPersistTransform(cfg);
@@ -1120,22 +1190,34 @@ public final class InAppOverlayManager {
         }
 
         private void setAspect(String mode) {
-            TransformConfig cfg = HookMain.getActiveTransformConfig();
+            TransformConfig cfg = HookMain.getActiveTransformConfig().copy();
             cfg.aspectMode = mode;
             applyAndPersistTransform(cfg);
             refreshUiFromState();
         }
 
         private void setRot(int rot) {
-            TransformConfig cfg = HookMain.getActiveTransformConfig();
+            TransformConfig cfg = HookMain.getActiveTransformConfig().copy();
             cfg.setRotation(rot);
             applyAndPersistTransform(cfg);
             refreshUiFromState();
         }
 
+        private void setMediaSourceType(String mediaType) {
+            TransformConfig cfg = HookMain.getActiveTransformConfig().copy();
+            cfg.sourceMode = TransformConfig.SOURCE_MEDIA;
+            cfg.preferredMediaType = mediaType;
+            cfg.passthroughRealCamera = false;
+            cfg.passthroughMode = false;
+            applyAndPersistTransform(cfg);
+            refreshUiFromState();
+        }
+
         private void setSourceMode(String srcMode) {
-            TransformConfig cfg = HookMain.getActiveTransformConfig();
+            TransformConfig cfg = HookMain.getActiveTransformConfig().copy();
             cfg.sourceMode = srcMode;
+            cfg.passthroughRealCamera = false;
+            cfg.passthroughMode = false;
             applyAndPersistTransform(cfg);
             refreshUiFromState();
         }
@@ -1165,12 +1247,12 @@ public final class InAppOverlayManager {
             b.getPaint().setFakeBoldText(true);
             b.setTextColor(0xFFE2E8F0);
             b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
-            int ph = dp(ctx, 9);
+            int ph = dp(ctx, 8);
             int pv = dp(ctx, 5);
             b.setPadding(ph, pv, ph, pv);
             b.setMinWidth(0);
             b.setMinHeight(0);
-            b.setMinimumWidth(dp(ctx, 44));
+            b.setMinimumWidth(dp(ctx, 42));
             b.setMinimumHeight(dp(ctx, 36));
 
             GradientDrawable bg = new GradientDrawable();
@@ -1181,7 +1263,7 @@ public final class InAppOverlayManager {
 
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            lp.setMargins(dp(ctx, 3), dp(ctx, 2), dp(ctx, 3), dp(ctx, 2));
+            lp.setMargins(dp(ctx, 2), dp(ctx, 2), dp(ctx, 2), dp(ctx, 2));
             b.setLayoutParams(lp);
             b.setOnClickListener(listener);
             return b;

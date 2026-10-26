@@ -212,6 +212,12 @@ public final class MediaMappings {
         if (TYPE_IMAGE.equals(type)) img = uri;
         else vid = uri;
         set(ctx, pkg, facing, img, vid);
+        if (!TextUtils.isEmpty(uri)) {
+            String prefType = TYPE_IMAGE.equals(type)
+                    ? TransformConfig.MEDIA_IMAGE : TransformConfig.MEDIA_VIDEO;
+            TransformConfig.updateSourceAndMediaTypeEverywhere(
+                    ctx, pkg, facing, TransformConfig.SOURCE_MEDIA, prefType);
+        }
     }
 
     public static void clear(@NonNull Context ctx, @NonNull String pkg, @NonNull String facing) {

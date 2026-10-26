@@ -60,8 +60,15 @@ public class StaticBitmapFeeder {
                               int height, String bitmapPath) {
         this.surface = surface;
         this.surfaceFormat = surfaceFormat;
-        this.width = Math.max(2, (width > 0 ? width : 1280) & ~1);
-        this.height = Math.max(2, (height > 0 ? height : 720) & ~1);
+        int w = Math.max(2, (width > 0 ? width : 1280) & ~1);
+        int h = Math.max(2, (height > 0 ? height : 720) & ~1);
+        if (surfaceFormat == FORMAT_PREVIEW && HookMain.isHostDisplayPortrait() && w > h) {
+            int tmp = w;
+            w = h;
+            h = tmp;
+        }
+        this.width = w;
+        this.height = h;
         this.bitmapPath = bitmapPath != null ? bitmapPath : "";
     }
 
@@ -234,13 +241,13 @@ public class StaticBitmapFeeder {
                     : ((surfaceFormat == ImageFormat.JPEG || surfaceFormat == 256) ? cachedJpeg != null : cachedI420 != null);
         }
 
-        // Live video frame priority: when a video is actively decoded or video mode is active,
-        // render the live video frame with full PTZ transforms and sensor orientation!
-        if (HookMain.hasActiveVideoFrame() || HookMain.isVideoModeActive()) {
+        // Live video frame priority: only when video mode is active (not when user selected Image mode!),
+        // render the live video frame with full PTZ transforms, video container rotation, and sensor orientation!
+        if (HookMain.isVideoModeActive()) {
             Bitmap videoBmp = HookMain.getLatestVideoFrameBitmap(width, height);
             if (videoBmp != null) {
                 cachedTransformedBitmap = FrameTransformPipeline.renderToBitmap(
-                        videoBmp, 0, width, height, cfg, cachedTransformedBitmap);
+                        videoBmp, HookMain.getLatestVideoRotation(), width, height, cfg, cachedTransformedBitmap);
                 rebuildEncodedBuffers(cachedTransformedBitmap, cfg);
                 cachedMtime = -1L;
                 cachedSize = -1L;
@@ -354,7 +361,7 @@ public class StaticBitmapFeeder {
         return c.aspectMode + "|" + c.rotationMode + "|" + c.mirrorH + "|" + c.mirrorV
                 + "|" + c.zoom + "|" + c.panX + "|" + c.panY
                 + "|" + c.wbKelvinShift + "|" + c.brightnessShift
-                + "|" + c.sourceMode + "|" + c.qrPayload
+                + "|" + c.sourceMode + "|" + c.preferredMediaType + "|" + c.qrPayload
                 + "|" + width + "x" + height;
     }
 
@@ -504,8 +511,19 @@ public class StaticBitmapFeeder {
             }
             if (c == null) return;
             c.drawColor(android.graphics.Color.BLACK);
-            android.graphics.Rect dstRect = new android.graphics.Rect(0, 0, c.getWidth(), c.getHeight());
-            c.drawBitmap(bmp, null, dstRect, null);
+            int cw = c.getWidth();
+            int ch = c.getHeight();
+            if (cw > 1 && ch > 1 && (cw != bmp.getWidth() || ch != bmp.getHeight())
+                    && !TransformConfig.ASPECT_STRETCH.equals(cfg.aspectMode)) {
+                TransformConfig canvasFitCfg = new TransformConfig();
+                canvasFitCfg.aspectMode = cfg.aspectMode;
+                android.graphics.Matrix m = FrameTransformPipeline.buildTransformMatrix(
+                        bmp.getWidth(), bmp.getHeight(), cw, ch, 0, canvasFitCfg);
+                c.drawBitmap(bmp, m, null);
+            } else {
+                android.graphics.Rect dstRect = new android.graphics.Rect(0, 0, cw, ch);
+                c.drawBitmap(bmp, null, dstRect, null);
+            }
         } catch (Throwable t) {
             // Gracefully handle surfaces that have active hardware renderers (EGL/Vulkan) or are already locked
         } finally {

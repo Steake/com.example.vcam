@@ -212,10 +212,12 @@ public class MainActivity extends AppCompatActivity {
         });
         if (chipImage != null) {
             chipImage.setOnClickListener(v -> {
-                TransformConfig cfg = TransformConfig.loadGlobal(this);
-                cfg.sourceMode = TransformConfig.SOURCE_MEDIA;
-                cfg.preferredMediaType = TransformConfig.MEDIA_IMAGE;
-                saveGlobalTransformAndRefresh(cfg);
+                TransformConfig.updateSourceAndMediaTypeEverywhere(
+                        this, MediaMappings.PKG_GLOBAL, MediaMappings.FACING_ANY,
+                        TransformConfig.SOURCE_MEDIA, TransformConfig.MEDIA_IMAGE);
+                MediaMappings.notifyUpdated(this);
+                refreshTransformStatusUi();
+                applyDemoTextureTransform();
                 syncStateWithFiles();
                 startDemoPlayback();
                 Toast.makeText(this, "Active feed: Still Image", Toast.LENGTH_SHORT).show();
@@ -223,10 +225,12 @@ public class MainActivity extends AppCompatActivity {
         }
         if (chipVideo != null) {
             chipVideo.setOnClickListener(v -> {
-                TransformConfig cfg = TransformConfig.loadGlobal(this);
-                cfg.sourceMode = TransformConfig.SOURCE_MEDIA;
-                cfg.preferredMediaType = TransformConfig.MEDIA_VIDEO;
-                saveGlobalTransformAndRefresh(cfg);
+                TransformConfig.updateSourceAndMediaTypeEverywhere(
+                        this, MediaMappings.PKG_GLOBAL, MediaMappings.FACING_ANY,
+                        TransformConfig.SOURCE_MEDIA, TransformConfig.MEDIA_VIDEO);
+                MediaMappings.notifyUpdated(this);
+                refreshTransformStatusUi();
+                applyDemoTextureTransform();
                 syncStateWithFiles();
                 startDemoPlayback();
                 Toast.makeText(this, "Active feed: Video Loop", Toast.LENGTH_SHORT).show();
@@ -439,6 +443,9 @@ public class MainActivity extends AppCompatActivity {
         findViewById(R.id.btn_src_media).setOnClickListener(v -> {
             TransformConfig cfg = TransformConfig.loadGlobal(this);
             cfg.sourceMode = TransformConfig.SOURCE_MEDIA;
+            TransformConfig.updateSourceAndMediaTypeEverywhere(
+                    this, MediaMappings.PKG_GLOBAL, MediaMappings.FACING_ANY,
+                    TransformConfig.SOURCE_MEDIA, cfg.preferredMediaType);
             saveGlobalTransformAndRefresh(cfg);
             syncStateWithFiles();
             startDemoPlayback();
@@ -446,6 +453,9 @@ public class MainActivity extends AppCompatActivity {
         findViewById(R.id.btn_src_pattern).setOnClickListener(v -> {
             TransformConfig cfg = TransformConfig.loadGlobal(this);
             cfg.sourceMode = TransformConfig.SOURCE_TEST_PATTERN;
+            TransformConfig.updateSourceAndMediaTypeEverywhere(
+                    this, MediaMappings.PKG_GLOBAL, MediaMappings.FACING_ANY,
+                    TransformConfig.SOURCE_TEST_PATTERN, cfg.preferredMediaType);
             saveGlobalTransformAndRefresh(cfg);
             syncStateWithFiles();
             startDemoPlayback();
@@ -470,6 +480,9 @@ public class MainActivity extends AppCompatActivity {
                         updated.qrPayload = txt;
                     }
                     updated.sourceMode = TransformConfig.SOURCE_QR;
+                    TransformConfig.updateSourceAndMediaTypeEverywhere(
+                            this, MediaMappings.PKG_GLOBAL, MediaMappings.FACING_ANY,
+                            TransformConfig.SOURCE_QR, updated.preferredMediaType);
                     saveGlobalTransformAndRefresh(updated);
                     startDemoPlayback();
                 })
@@ -493,6 +506,9 @@ public class MainActivity extends AppCompatActivity {
                     updated.sourceMode = url.isEmpty()
                             ? TransformConfig.SOURCE_MEDIA
                             : TransformConfig.SOURCE_STREAM;
+                    TransformConfig.updateSourceAndMediaTypeEverywhere(
+                            this, MediaMappings.PKG_GLOBAL, MediaMappings.FACING_ANY,
+                            updated.sourceMode, updated.preferredMediaType);
                     saveGlobalTransformAndRefresh(updated);
                     startDemoPlayback();
                 })
@@ -606,10 +622,7 @@ public class MainActivity extends AppCompatActivity {
             Toast.makeText(this, c ? R.string.toast_virtual_mic_enabled : R.string.toast_virtual_mic_disabled, Toast.LENGTH_SHORT).show();
         });
         switchPassthrough.setOnCheckedChangeListener((b, c) -> {
-            prefs.edit().putBoolean(VCAMApp.KEY_PASSTHROUGH_MODE, c).apply();
-            TransformConfig cfg = TransformConfig.loadGlobal(this);
-            cfg.passthroughMode = c;
-            TransformConfig.saveGlobal(this, cfg);
+            TransformConfig.updatePassthroughEverywhere(this, c);
             MediaMappings.notifyUpdated(this);
             Toast.makeText(this, c ? R.string.toast_passthrough_enabled : R.string.toast_passthrough_disabled, Toast.LENGTH_SHORT).show();
         });
