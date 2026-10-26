@@ -1223,7 +1223,7 @@ public final class InAppOverlayManager {
         }
 
         private void applyAndPersistTransform(@NonNull TransformConfig cfg) {
-            HookMain.updateActiveTransformInProcess(cfg);
+            HookMain.updateActiveTransformFromHud(cfg);
             // Persist asynchronously back to MediaProvider so it survives camera restarts
             final String json = cfg.toJson().toString();
             final String facing = HookMain.getCurrentFacing();

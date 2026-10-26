@@ -106,9 +106,17 @@ public class StaticBitmapFeeder {
 
     public synchronized void stop() {
         running = false;
-        if (worker != null) {
-            worker.interrupt();
-            worker = null;
+        Thread t = worker;
+        worker = null;
+        if (t != null) {
+            t.interrupt();
+            if (t != Thread.currentThread()) {
+                try {
+                    t.join(150L);
+                } catch (InterruptedException ignored) {
+                    Thread.currentThread().interrupt();
+                }
+            }
         }
         if (writer != null) {
             try { writer.close(); } catch (Throwable ignored) {}
@@ -208,11 +216,24 @@ public class StaticBitmapFeeder {
         }
     }
 
+    private void configureJpegSurfaceGeometry() {
+        if ((surfaceFormat == ImageFormat.JPEG || surfaceFormat == 256)
+                && surface != null && surface.isValid()) {
+            // Qualcomm Gralloc (qdgralloc) requires HAL_PIXEL_FORMAT_BLOB (0x21)
+            // buffers to have dimensions (maxJpegSize, 1) (height == 1).
+            int jpegBufSize = Math.max(width * height * 3 / 2, 4 * 1024 * 1024);
+            try {
+                NdkHookEngine.setSurfaceBuffersGeometry(surface, jpegBufSize, 1, 0x21 /* HAL_PIXEL_FORMAT_BLOB */);
+            } catch (Throwable ignored) {}
+        }
+    }
+
     @Nullable
     private ImageWriter createWriter() {
         if (writerConnectFailed) return null;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && surface != null && surface.isValid()) {
             try {
+                configureJpegSurfaceGeometry();
                 return ImageWriter.newInstance(surface, /* maxImages */ 2);
             } catch (Throwable t) {
                 writerConnectFailed = true;
@@ -370,8 +391,22 @@ public class StaticBitmapFeeder {
         if (w == null || cachedJpeg == null) return;
         Image img = null;
         try {
-            img = w.dequeueInputImage();
+            try {
+                img = w.dequeueInputImage();
+            } catch (Throwable firstDeqErr) {
+                // If the surface was connected before ANativeWindow_setBuffersGeometry(height=1, BLOB)
+                // took effect on Qualcomm Gralloc, reconnect after re-applying BLOB geometry.
+                try { w.close(); } catch (Throwable ignored) {}
+                writer = null;
+                configureJpegSurfaceGeometry();
+                writer = createWriter();
+                w = writer;
+                if (w != null) {
+                    img = w.dequeueInputImage();
+                }
+            }
             if (img == null) return;
+            ExifSynthesizer.CURRENT_PHOTOMETRY.frameTimestampNs = android.os.SystemClock.elapsedRealtimeNanos();
             img.setTimestamp(ExifSynthesizer.CURRENT_PHOTOMETRY.frameTimestampNs);
             ByteBuffer buf = img.getPlanes()[0].getBuffer();
             if (buf.capacity() < cachedJpeg.length) {
@@ -381,6 +416,18 @@ public class StaticBitmapFeeder {
             }
             buf.rewind();
             buf.put(cachedJpeg);
+            if (buf.capacity() >= cachedJpeg.length + 8) {
+                int blobOffset = buf.capacity() - 8;
+                java.nio.ByteOrder prevOrder = buf.order();
+                try {
+                    buf.order(java.nio.ByteOrder.nativeOrder());
+                    buf.putShort(blobOffset, (short) 0x00FF); // CAMERA3_JPEG_BLOB_ID
+                    buf.putInt(blobOffset + 4, cachedJpeg.length);
+                } finally {
+                    buf.order(prevOrder);
+                }
+            }
+            buf.position(0);
             buf.limit(cachedJpeg.length);
             w.queueInputImage(img);
             img = null;
@@ -513,17 +560,12 @@ public class StaticBitmapFeeder {
             c.drawColor(android.graphics.Color.BLACK);
             int cw = c.getWidth();
             int ch = c.getHeight();
-            if (cw > 1 && ch > 1 && (cw != bmp.getWidth() || ch != bmp.getHeight())
-                    && !TransformConfig.ASPECT_STRETCH.equals(cfg.aspectMode)) {
-                TransformConfig canvasFitCfg = new TransformConfig();
-                canvasFitCfg.aspectMode = cfg.aspectMode;
-                android.graphics.Matrix m = FrameTransformPipeline.buildTransformMatrix(
-                        bmp.getWidth(), bmp.getHeight(), cw, ch, 0, canvasFitCfg);
-                c.drawBitmap(bmp, m, null);
-            } else {
-                android.graphics.Rect dstRect = new android.graphics.Rect(0, 0, cw, ch);
-                c.drawBitmap(bmp, null, dstRect, null);
-            }
+            // cachedTransformedBitmap is already rendered at the target aspect ratio (FIT, FILL, STRETCH),
+            // orientation, zoom, and pan. Map it directly to the canvas rect so SurfaceView buffers
+            // whose fixed producer dimensions remain landscape (e.g. 1920x1080) inside a portrait view
+            // are not double-letterboxed (which squished the image to 0.316x width in the center).
+            android.graphics.Rect dstRect = new android.graphics.Rect(0, 0, cw, ch);
+            c.drawBitmap(bmp, null, dstRect, null);
         } catch (Throwable t) {
             // Gracefully handle surfaces that have active hardware renderers (EGL/Vulkan) or are already locked
         } finally {

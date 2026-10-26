@@ -110,8 +110,16 @@ public class VideoToFrames implements Runnable {
 
     public void stopDecode() {
         stopDecode = true;
-        if (childThread != null) {
-            childThread.interrupt();
+        Thread t = childThread;
+        if (t != null) {
+            t.interrupt();
+            if (t != Thread.currentThread()) {
+                try {
+                    t.join(150L);
+                } catch (InterruptedException ignored) {
+                    Thread.currentThread().interrupt();
+                }
+            }
         }
     }
 

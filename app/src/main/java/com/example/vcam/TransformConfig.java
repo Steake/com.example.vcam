@@ -367,12 +367,43 @@ public final class TransformConfig {
         }
         String normFacing = MediaMappings.normalizeFacing(facing);
         SharedPreferences sp = ctx.getSharedPreferences(VCAMApp.PREFS, Context.MODE_PRIVATE);
+        SharedPreferences.Editor ed = sp.edit();
         TransformConfig globalCfg = loadGlobal(ctx);
         globalCfg.sourceMode = cfg.sourceMode;
         globalCfg.preferredMediaType = cfg.preferredMediaType;
+        globalCfg.aspectMode = cfg.aspectMode;
+        globalCfg.rotationMode = cfg.rotationMode;
+        globalCfg.rotationDegrees = cfg.rotationDegrees;
+        globalCfg.mirrorH = cfg.mirrorH;
+        globalCfg.mirrorV = cfg.mirrorV;
+        globalCfg.zoom = cfg.zoom;
+        globalCfg.panX = cfg.panX;
+        globalCfg.panY = cfg.panY;
         globalCfg.passthroughRealCamera = cfg.passthroughRealCamera;
-        sp.edit()
-                .putString(KEY_SCOPED_PREFIX + pkg + "|" + normFacing, cfg.toJson().toString())
+
+        java.util.Map<String, ?> all = sp.getAll();
+        if (all != null) {
+            for (java.util.Map.Entry<String, ?> entry : all.entrySet()) {
+                String k = entry.getKey();
+                if (k != null && k.startsWith(KEY_SCOPED_PREFIX) && entry.getValue() instanceof String) {
+                    TransformConfig sc = fromJsonString((String) entry.getValue());
+                    sc.sourceMode = cfg.sourceMode;
+                    sc.preferredMediaType = cfg.preferredMediaType;
+                    sc.aspectMode = cfg.aspectMode;
+                    sc.rotationMode = cfg.rotationMode;
+                    sc.rotationDegrees = cfg.rotationDegrees;
+                    sc.mirrorH = cfg.mirrorH;
+                    sc.mirrorV = cfg.mirrorV;
+                    sc.zoom = cfg.zoom;
+                    sc.panX = cfg.panX;
+                    sc.panY = cfg.panY;
+                    sc.passthroughRealCamera = cfg.passthroughRealCamera;
+                    ed.putString(k, sc.toJson().toString());
+                }
+            }
+        }
+
+        ed.putString(KEY_SCOPED_PREFIX + pkg + "|" + normFacing, cfg.toJson().toString())
                 .putString(KEY_GLOBAL_TRANSFORM, globalCfg.toJson().toString())
                 .putBoolean(VCAMApp.KEY_PASSTHROUGH_MODE, cfg.passthroughRealCamera)
                 .apply();

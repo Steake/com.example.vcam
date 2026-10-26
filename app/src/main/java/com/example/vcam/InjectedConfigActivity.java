@@ -203,18 +203,22 @@ public class InjectedConfigActivity extends AppCompatActivity {
             return;
         }
         String[] scope = selectedScope();
-        MediaMappings.setOne(this, scope[0], scope[1], type, e.uri().toString());
-        // Always ensure global fallback is also populated so any unmapped facing/package resolves immediately
-        MediaMappings.setOne(this, MediaMappings.PKG_GLOBAL, MediaMappings.FACING_ANY, type, e.uri().toString());
-        VCAMApp.ensureWorldReadableLibraryDirs(this);
-
-        // Also mirror into the legacy staged file so non-provider-aware hooks
-        // and users who rely on the DCIM workflow keep seeing the most
-        // recently imported media.
+        // Mirror into the legacy staged file first so any immediate broadcast listener sees fresh bytes
         File dst = isImage ? MediaPaths.getImageTarget(this) : MediaPaths.getVideoTarget(this);
         try {
             MediaPaths.copyUriToFile(this, uri, dst);
         } catch (Throwable ignored) {}
+
+        MediaMappings.setOne(this, scope[0], scope[1], type, e.uri().toString());
+        // Always ensure global fallback is also populated so any unmapped facing/package resolves immediately
+        MediaMappings.setOne(this, MediaMappings.PKG_GLOBAL, MediaMappings.FACING_ANY, type, e.uri().toString());
+        TransformConfig.updateSourceAndMediaTypeEverywhere(
+                this,
+                scope[0],
+                scope[1],
+                TransformConfig.SOURCE_MEDIA,
+                isImage ? TransformConfig.MEDIA_IMAGE : TransformConfig.MEDIA_VIDEO);
+        VCAMApp.ensureWorldReadableLibraryDirs(this);
 
         String importedMsg = getString(R.string.media_imported_format, MediaPaths.humanBytes(e.size));
         Toast.makeText(this, importedMsg, Toast.LENGTH_SHORT).show();

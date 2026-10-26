@@ -473,6 +473,9 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
         return true;
     }
 
+    private static final Map<Surface, android.util.Size> SURFACE_APPLIED_GEOMETRY_MAP =
+            Collections.synchronizedMap(new WeakHashMap<>());
+
     public static void ensurePreviewSurfaceBufferSize(@Nullable Surface s, int w, int h) {
         if (s == null || w <= 1 || h <= 1) return;
         SurfaceTexture st = SURFACE_TO_TEXTURE_MAP.get(s);
@@ -485,6 +488,13 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
             } finally {
                 IN_INTERNAL_CHECK.set(prev);
             }
+        }
+        android.util.Size prevGeo = SURFACE_APPLIED_GEOMETRY_MAP.get(s);
+        if (prevGeo == null || prevGeo.getWidth() != w || prevGeo.getHeight() != h) {
+            SURFACE_APPLIED_GEOMETRY_MAP.put(s, new android.util.Size(w, h));
+            try {
+                NdkHookEngine.setSurfaceBuffersGeometry(s, w, h, 0);
+            } catch (Throwable ignored) {}
         }
     }
 
@@ -514,7 +524,13 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
             if (videoDecoder != null && videoDecoder.isRunning()) {
                 return true;
             }
-            return bitmapFeeder != null && bitmapFeeder.isRunning();
+            if (bitmapFeeder != null) {
+                if (format == ImageFormat.JPEG || format == 256) {
+                    return true;
+                }
+                return bitmapFeeder.isRunning();
+            }
+            return false;
         }
 
         void stop() {
@@ -1324,6 +1340,13 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
         }
     }
 
+    private static volatile long lastInProcessTransformUpdateMs = 0L;
+
+    public static void updateActiveTransformFromHud(@NonNull TransformConfig cfg) {
+        lastInProcessTransformUpdateMs = android.os.SystemClock.elapsedRealtime();
+        updateActiveTransformInProcess(cfg);
+    }
+
     public static void updateActiveTransformInProcess(@NonNull TransformConfig cfg) {
         TransformConfig prev = activeTransformConfig;
         boolean prevPassthrough = cfgPassthroughMode || (prev != null && prev.passthroughRealCamera);
@@ -1383,8 +1406,8 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
     }
 
     private void restartActiveFeedersOnModeChange() {
-        List<Surface> trackedSurfaces = new ArrayList<>(ACTIVE_FEEDERS.keySet());
-        for (ActiveSurfaceFeeder feeder : ACTIVE_FEEDERS.values()) {
+        List<ActiveSurfaceFeeder> prevFeeders = new ArrayList<>(ACTIVE_FEEDERS.values());
+        for (ActiveSurfaceFeeder feeder : prevFeeders) {
             feeder.stop();
         }
         ACTIVE_FEEDERS.clear();
@@ -1404,9 +1427,10 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
         if (isPassthroughActive()) {
             return;
         }
-        for (Surface s : trackedSurfaces) {
-            if (s != null && s.isValid()) {
-                registerTargetSurface(s);
+        for (ActiveSurfaceFeeder f : prevFeeders) {
+            if (f.surface != null && f.surface.isValid()) {
+                ACTIVE_FEEDERS.put(f.surface,
+                        new ActiveSurfaceFeeder(f.surface, f.isReaderSurface, f.width, f.height, f.format));
             }
         }
         ensureAllRegisteredFeedersRunning();
@@ -4100,6 +4124,10 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
             INITIALIZED_CAMERA_DEVICES.put(camera, Boolean.TRUE);
         }
         stopAllCamera2Feeders();
+        lastStagedKey = null;
+        try {
+            ensureStagedNow(currentHostPackage);
+        } catch (Throwable ignored) {}
         need_recreate = true;
         getOrCreateVirtualSinkSurface();
         NdkHookEngine.syncSensorProfile(activeLensProfile, currentFacing);
@@ -5909,19 +5937,12 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
         lastStagedKey = null;
         stagingExecutor.execute(() -> {
             try {
-                String prevVid = lastResolvedVideoUri;
-                String prevImg = lastResolvedImageUri;
                 inst.ensureStagedNow(pkg);
                 StaticBitmapFeeder.invalidateAllCaches();
                 if (cameraSessionActive) {
-                    boolean mediaChanged = !String.valueOf(prevVid).equals(String.valueOf(lastResolvedVideoUri))
-                            || !String.valueOf(prevImg).equals(String.valueOf(lastResolvedImageUri));
-                    if (mediaChanged) {
-                        inst.restartActiveFeedersOnModeChange();
-                    } else {
-                        inst.ensureAllRegisteredFeedersRunning();
-                    }
+                    inst.restartActiveFeedersOnModeChange();
                 }
+                InAppOverlayManager.refreshActiveOverlayUi();
             } catch (Throwable ignored) {}
         });
     }
@@ -6016,7 +6037,6 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
             if (!isValidHostContext(toast_content)) {
                 toast_content = ctx;
                 lastStagedKey = null;
-                refreshConfigFromProvider(ctx, currentHostPackage);
                 resolveWritableVideoPath(ctx);
             }
             try {
@@ -6032,11 +6052,13 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
     private static synchronized void maybeRestage(Context ctx, String pkg, String facing) {
         if (ctx == null) return;
         String key = pkg + "|" + facing;
-        refreshConfigFromProvider(ctx, pkg);
+        // Stage media files FIRST so 1000.bmp / virtual.mp4 and lastResolvedImageUri / lastResolvedVideoUri
+        // are already updated on disk before refreshConfigFromProvider triggers updateActiveTransformInProcess!
         boolean completed = stageFromProviderFor(ctx, pkg, facing);
         if (completed) {
             lastStagedKey = key;
         }
+        refreshConfigFromProvider(ctx, pkg);
     }
 
     private static void refreshConfigFromProvider(@NonNull Context ctx, @NonNull String pkg) {
@@ -6071,12 +6093,15 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                 if (c.getColumnCount() > 11) {
                     String tfJson = c.getString(11);
                     if (tfJson != null && !tfJson.isEmpty()) {
-                        TransformConfig parsed = TransformConfig.fromJson(tfJson);
-                        parsed.sensorGrainEnabled = cfgSensorGrainEnabled;
-                        if (cfgPassthroughMode) {
-                            parsed.passthroughRealCamera = true;
+                        long sinceHudMs = android.os.SystemClock.elapsedRealtime() - lastInProcessTransformUpdateMs;
+                        if (lastInProcessTransformUpdateMs == 0L || sinceHudMs >= 2500L) {
+                            TransformConfig parsed = TransformConfig.fromJson(tfJson);
+                            parsed.sensorGrainEnabled = cfgSensorGrainEnabled;
+                            if (cfgPassthroughMode) {
+                                parsed.passthroughRealCamera = true;
+                            }
+                            updateActiveTransformInProcess(parsed);
                         }
-                        updateActiveTransformInProcess(parsed);
                     }
                 }
                 if (c.getColumnCount() > 12) {
@@ -6414,17 +6439,16 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                     lastStagedKey = null;
                     stagingExecutor.execute(() -> {
                         try {
-                            refreshConfigFromProvider(context, currentHostPackage);
                             HookMain inst = sInstance;
                             if (inst != null) {
                                 inst.ensureStagedNow(currentHostPackage);
                                 StaticBitmapFeeder.invalidateAllCaches();
                                 if (cameraSessionActive) {
-                                    for (ActiveSurfaceFeeder f : ACTIVE_FEEDERS.values()) {
-                                        f.stop();
-                                    }
-                                    inst.ensureAllRegisteredFeedersRunning();
+                                    inst.restartActiveFeedersOnModeChange();
                                 }
+                                InAppOverlayManager.refreshActiveOverlayUi();
+                            } else {
+                                refreshConfigFromProvider(context, currentHostPackage);
                             }
                         } catch (Throwable ignored) {}
                     });
