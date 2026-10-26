@@ -281,4 +281,52 @@ public class ExampleUnitTest {
         assertTrue("MediaProvider must declare android:directBootAware=true",
                 xml.contains("android:directBootAware=\"true\""));
     }
+
+    @Test
+    public void ndkLibraries_exportSetSurfaceBuffersGeometrySymbol() throws Exception {
+        String[] abis = new String[]{"arm64-v8a", "armeabi-v7a", "x86_64"};
+        for (String abi : abis) {
+            File soFile = new File("src/main/jniLibs/" + abi + "/libvcam_ndk.so");
+            if (!soFile.exists()) {
+                soFile = new File("app/src/main/jniLibs/" + abi + "/libvcam_ndk.so");
+            }
+            byte[] bytes = new byte[(int) soFile.length()];
+            try (FileInputStream fis = new FileInputStream(soFile)) {
+                int read = 0;
+                while (read < bytes.length) {
+                    int n = fis.read(bytes, read, bytes.length - read);
+                    if (n <= 0) break;
+                    read += n;
+                }
+            }
+            String ascii = new String(bytes, java.nio.charset.StandardCharsets.ISO_8859_1);
+            assertTrue("libvcam_ndk.so (" + abi + ") must export nativeSetSurfaceBuffersGeometry",
+                    ascii.contains("Java_com_example_vcam_NdkHookEngine_nativeSetSurfaceBuffersGeometry"));
+            assertTrue("libvcam_ndk.so (" + abi + ") must reference ANativeWindow_setBuffersGeometry",
+                    ascii.contains("ANativeWindow_setBuffersGeometry"));
+        }
+    }
+
+    @Test
+    public void hudTransformUpdate_switchesActiveSourceModeImmediately() {
+        TransformConfig imgCfg = new TransformConfig();
+        imgCfg.sourceMode = TransformConfig.SOURCE_MEDIA;
+        imgCfg.preferredMediaType = TransformConfig.MEDIA_IMAGE;
+        HookMain.updateActiveTransformFromHud(imgCfg);
+        assertEquals(TransformConfig.SOURCE_MEDIA, HookMain.getActiveTransformConfig().sourceMode);
+        assertEquals(TransformConfig.MEDIA_IMAGE, HookMain.getActiveTransformConfig().preferredMediaType);
+        assertFalse(HookMain.isVideoModeActive());
+
+        TransformConfig gridCfg = imgCfg.copy();
+        gridCfg.sourceMode = TransformConfig.SOURCE_TEST_PATTERN;
+        HookMain.updateActiveTransformFromHud(gridCfg);
+        assertEquals(TransformConfig.SOURCE_TEST_PATTERN, HookMain.getActiveTransformConfig().sourceMode);
+
+        TransformConfig vidCfg = gridCfg.copy();
+        vidCfg.sourceMode = TransformConfig.SOURCE_MEDIA;
+        vidCfg.preferredMediaType = TransformConfig.MEDIA_VIDEO;
+        HookMain.updateActiveTransformFromHud(vidCfg);
+        assertEquals(TransformConfig.SOURCE_MEDIA, HookMain.getActiveTransformConfig().sourceMode);
+        assertEquals(TransformConfig.MEDIA_VIDEO, HookMain.getActiveTransformConfig().preferredMediaType);
+    }
 }
