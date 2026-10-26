@@ -421,6 +421,7 @@ extern void ANativeWindow_release(void* window);
 extern int32_t ANativeWindow_getWidth(void* window);
 extern int32_t ANativeWindow_getHeight(void* window);
 extern int32_t ANativeWindow_getFormat(void* window);
+extern int32_t ANativeWindow_setBuffersGeometry(void* window, int32_t width, int32_t height, int32_t format);
 
 #define LOG_TAG "VCAM_NDK"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -2219,6 +2220,19 @@ void Java_com_example_vcam_NdkHookEngine_nativeUpdateImuMotion(
     (void)env;
     (void)clazz;
     vcam_ndk_set_imu_motion(dxPx, dyPx, pitchRad, rollRad);
+}
+
+__attribute__((visibility("default")))
+jint Java_com_example_vcam_NdkHookEngine_nativeSetSurfaceBuffersGeometry(
+        JNIEnv* env, jclass clazz, jobject surface, jint width, jint height, jint format) {
+    (void)clazz;
+    if (!env || !surface || width <= 0 || height <= 0) return -22;
+    pfn_ANativeWindow_fromSurface fn = orig_ANativeWindow_fromSurface ? orig_ANativeWindow_fromSurface : &ANativeWindow_fromSurface;
+    void* anw = fn(env, surface);
+    if (!anw) return -19;
+    int32_t rc = ANativeWindow_setBuffersGeometry(anw, width, height, format);
+    ANativeWindow_release(anw);
+    return (jint)rc;
 }
 
 __attribute__((visibility("default")))

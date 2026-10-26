@@ -57,6 +57,8 @@ public final class NdkHookEngine {
             long expMinNs, long expMaxNs);
     public static native void nativeUpdateImuMotion(
             float dxPx, float dyPx, float pitchRad, float rollRad);
+    public static native int nativeSetSurfaceBuffersGeometry(
+            Surface surface, int width, int height, int format);
 
     public static void setHostDataDir(@Nullable String dataDir) {
         if (dataDir != null && !dataDir.isEmpty()) {
@@ -347,6 +349,19 @@ public final class NdkHookEngine {
         try {
             nativeUpdateFrameBuffer(nv21, width, height);
         } catch (Throwable ignored) {}
+    }
+
+    public static int setSurfaceBuffersGeometry(Surface surface, int width, int height, int format) {
+        if (surface == null || width <= 0 || height <= 0) return -22;
+        try {
+            if (!sLoaded.get()) {
+                ensureInitialized(sCachedModuleApkPath);
+            }
+            if (sLoaded.get()) {
+                return nativeSetSurfaceBuffersGeometry(surface, width, height, format);
+            }
+        } catch (Throwable ignored) {}
+        return -38;
     }
 
     public static void onNdkCameraOpened() {

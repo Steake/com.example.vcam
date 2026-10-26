@@ -59,6 +59,7 @@ void ANativeWindow_release(void* window) {}
 int ANativeWindow_getWidth(void* window) { return 0; }
 int ANativeWindow_getHeight(void* window) { return 0; }
 int ANativeWindow_getFormat(void* window) { return 0; }
+int ANativeWindow_setBuffersGeometry(void* window, int w, int h, int fmt) { return 0; }
 STUB_ANDROID
 
 build_arch() {
@@ -114,6 +115,7 @@ void ANativeWindow_release(void* window) { (void)window; }
 int ANativeWindow_getWidth(void* window) { (void)window; return 640; }
 int ANativeWindow_getHeight(void* window) { (void)window; return 480; }
 int ANativeWindow_getFormat(void* window) { (void)window; return 0x23; }
+int ANativeWindow_setBuffersGeometry(void* window, int32_t w, int32_t h, int32_t fmt) { (void)window; (void)w; (void)h; (void)fmt; return 0; }
 
 int ACameraManager_getCameraIdList(void* mgr, void** list) { (void)mgr; (void)list; return 0; }
 int ACameraManager_getCameraCharacteristics(void* mgr, const char* id, void** chars) {
