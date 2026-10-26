@@ -1579,9 +1579,10 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
             VirtualAudioFeeder.installHooks();
         }
 
-        // Install Native NDK Camera2 / Media / ANativeWindow PLT/GOT & dlsym hooks
+        // Register Native NDK library load interceptors (lazy native extraction & GOT scan
+        // deferred until Application context is bound and cfgEnabled && cfgAllowedByFilter is verified)
         if (!isSelfManager) {
-            NdkHookEngine.ensureInitialized(sModuleApkPath);
+            NdkHookEngine.installLibraryLoadInterceptors(sModuleApkPath);
         }
 
         // Install Anti-Detection Callstack, File & Reflection Cloaking hooks
@@ -1651,7 +1652,7 @@ public class HookMain implements IXposedHookLoadPackage, IXposedHookZygoteInit {
                                     InAppOverlayManager.setOverlayEnabled(true);
                                 }
                                 ensureStagedNow(lpparam.packageName);
-                                if (!isSelfManager) {
+                                if (!isSelfManager && cfgEnabled && cfgAllowedByFilter) {
                                     NdkHookEngine.ensureInitialized(sModuleApkPath);
                                 }
                             } catch (Throwable t) {

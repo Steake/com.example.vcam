@@ -260,7 +260,13 @@ public final class NdkHookEngine {
         return null;
     }
 
-    private static void installLibraryLoadInterceptors(final String moduleApkPath) {
+    public static void installLibraryLoadInterceptors(final String moduleApkPath) {
+        if (moduleApkPath != null && !moduleApkPath.isEmpty()) {
+            sCachedModuleApkPath = moduleApkPath;
+        } else if (sCachedModuleApkPath == null) {
+            sCachedModuleApkPath = resolveModuleApkPath();
+        }
+        final String resolvedPath = sCachedModuleApkPath;
         if (!sLoadHooksInstalled.compareAndSet(false, true)) return;
         try {
             XposedBridge.hookAllMethods(Runtime.class, "loadLibrary0", new XC_MethodHook() {
@@ -278,7 +284,7 @@ public final class NdkHookEngine {
                     if (libName != null && (libName.contains("vcam_ndk") || libName.contains("libcam_hal3_ext_"))) {
                         return;
                     }
-                    onHostNativeLibraryLoaded(moduleApkPath);
+                    onHostNativeLibraryLoaded(resolvedPath);
                 }
             });
             XposedBridge.hookAllMethods(Runtime.class, "load0", new XC_MethodHook() {
@@ -296,7 +302,7 @@ public final class NdkHookEngine {
                     if (fileName != null && (fileName.contains("vcam_ndk") || fileName.contains("libcam_hal3_ext_"))) {
                         return;
                     }
-                    onHostNativeLibraryLoaded(moduleApkPath);
+                    onHostNativeLibraryLoaded(resolvedPath);
                 }
             });
         } catch (Throwable ignored) {

@@ -224,7 +224,8 @@ typedef struct {
     ElfW_Sxword r_addend;
 } ElfW_Rela;
 
-#define ELF_R_SYM(i) ((i) >> 32)
+#define ELF_R_SYM(i)  ((i) >> 32)
+#define ELF_R_TYPE(i) ((uint32_t)((i) & 0xffffffffULL))
 #define USE_RELA 1
 #else
 typedef uint32_t ElfW_Addr;
@@ -266,7 +267,8 @@ typedef struct {
     ElfW_Word r_info;
 } ElfW_Rel;
 
-#define ELF_R_SYM(i) ((i) >> 8)
+#define ELF_R_SYM(i)  ((i) >> 8)
+#define ELF_R_TYPE(i) ((uint32_t)((i) & 0xffU))
 #define USE_RELA 0
 #endif
 
@@ -727,7 +729,6 @@ typedef int (*pfn_access)(const char* pathname, int mode);
 typedef int (*pfn_faccessat)(int dirfd, const char* pathname, int mode, int flags);
 typedef int (*pfn_connect)(int sockfd, const void* addr, uint32_t addrlen);
 typedef void* (*pfn_dlopen)(const char* filename, int flags);
-typedef void* (*pfn_android_dlopen_ext)(const char* filename, int flags, const void* extinfo);
 typedef void* (*pfn_dlsym)(void* handle, const char* symbol);
 
 static pfn_ACameraManager_getCameraIdList orig_ACameraManager_getCameraIdList = 0;
@@ -762,7 +763,6 @@ static pfn_access orig_access = 0;
 static pfn_faccessat orig_faccessat = 0;
 static pfn_connect orig_connect = 0;
 static pfn_dlopen orig_dlopen = 0;
-static pfn_android_dlopen_ext orig_android_dlopen_ext = 0;
 static pfn_dlsym orig_dlsym = 0;
 
 /* Static backing buffers for spoofed ACameraMetadata_const_entry values */
@@ -1561,11 +1561,14 @@ typedef struct {
 } HookEntry;
 
 static void* hook_dlsym(void* handle, const char* symbol);
-static void* hook_dlopen(const char* filename, int flags);
-static void* hook_android_dlopen_ext(const char* filename, int flags, const void* extinfo);
 static int hook_dl_iterate_phdr(int (*callback)(struct dl_phdr_info* info, size_t size, void* data), void* data);
 static int (*orig_dl_iterate_phdr)(int (*callback)(struct dl_phdr_info* info, size_t size, void* data), void* data) = 0;
 
+/* Note: dlopen and android_dlopen_ext are intentionally NOT GOT-hooked because Bionic linker
+ * uses __builtin_return_address(0) inside dlopen/android_dlopen_ext to determine the caller
+ * linker namespace. Redirecting them through an isolated module namespace breaks subsequent
+ * host-app native library loads on Android 7-14. Instead, NdkHookEngine hooks Java
+ * Runtime.loadLibrary0/load0 and LSPosed native_init provides on_so_loaded. */
 static HookEntry g_hooks[] = {
     {"ACameraManager_getCameraIdList", (void*)hook_ACameraManager_getCameraIdList, (void**)&orig_ACameraManager_getCameraIdList, 0},
     {"ACameraManager_deleteCameraIdList", (void*)hook_ACameraManager_deleteCameraIdList, (void**)&orig_ACameraManager_deleteCameraIdList, 0},
@@ -1598,13 +1601,77 @@ static HookEntry g_hooks[] = {
     {"access", (void*)hook_access, (void**)&orig_access, 0},
     {"faccessat", (void*)hook_faccessat, (void**)&orig_faccessat, 0},
     {"connect", (void*)hook_connect, (void**)&orig_connect, 0},
-    {"dlopen", (void*)hook_dlopen, (void**)&orig_dlopen, 0},
-    {"android_dlopen_ext", (void*)hook_android_dlopen_ext, (void**)&orig_android_dlopen_ext, 0},
     {"dl_iterate_phdr", (void*)hook_dl_iterate_phdr, (void**)&orig_dl_iterate_phdr, 0},
     {"dlsym", (void*)hook_dlsym, (void**)&orig_dlsym, 0}
 };
 
 #define NUM_HOOKS (sizeof(g_hooks) / sizeof(g_hooks[0]))
+
+/* Non-faulting kernel memory readability probe using pipe2 + write() (copy_from_user).
+ * Prevents SIGSEGV (SEGV_ACCERR / SEGV_MAPERR) when Zygisk/LSPosed or anti-cheat modules
+ * mark their ELF headers or .dynstr/.dynsym pages PROT_NONE (---p) in /proc/self/maps. */
+static int s_probe_pipe[2] = {-1, -1};
+static volatile int s_probe_lock = 0;
+
+static void init_probe_pipe_locked(void) {
+    if (s_probe_pipe[0] >= 0 && s_probe_pipe[1] >= 0) return;
+    /* O_CLOEXEC (02000000 = 0x80000) | O_NONBLOCK (04000 = 0x800) = 0x80800 */
+#if defined(__aarch64__)
+    syscall(59, s_probe_pipe, 0x80800);  /* __NR_pipe2 on arm64 */
+#elif defined(__arm__)
+    syscall(359, s_probe_pipe, 0x80800); /* __NR_pipe2 on arm32 */
+#elif defined(__x86_64__)
+    syscall(293, s_probe_pipe, 0x80800); /* __NR_pipe2 on x86_64 */
+#endif
+}
+
+static int is_memory_readable(const void* addr, size_t len) {
+    if (!addr || len == 0) return 0;
+    uintptr_t start = (uintptr_t)addr;
+    if (start < 4096U || start + len < start) return 0;
+
+    while (__sync_lock_test_and_set(&s_probe_lock, 1)) {}
+    init_probe_pipe_locked();
+    if (s_probe_pipe[0] < 0 || s_probe_pipe[1] < 0) {
+        __sync_lock_release(&s_probe_lock);
+        return 1;
+    }
+
+    uintptr_t page_size = 4096U;
+    uintptr_t cur_page = start & ~(page_size - 1U);
+    uintptr_t end_page = (start + len - 1U) & ~(page_size - 1U);
+    uint8_t drain_buf[16];
+    int ok = 1;
+
+    for (uintptr_t p = cur_page; p <= end_page; p += page_size) {
+        const void* probe_ptr = (p == cur_page) ? addr : (const void*)p;
+        ssize_t w = write(s_probe_pipe[1], probe_ptr, 1);
+        if (w != 1) {
+            ok = 0;
+            break;
+        }
+        (void)read(s_probe_pipe[0], drain_buf, 1);
+        if (end_page - p < page_size) break; /* guard overflow */
+    }
+
+    __sync_lock_release(&s_probe_lock);
+    return ok;
+}
+
+static int is_got_reloc_type(uint32_t r_type) {
+#if defined(__aarch64__)
+    /* R_AARCH64_GLOB_DAT (1025) | R_AARCH64_JUMP_SLOT (1026) */
+    return (r_type == 1025U || r_type == 1026U);
+#elif defined(__arm__)
+    /* R_ARM_GLOB_DAT (21) | R_ARM_JUMP_SLOT (22) */
+    return (r_type == 21U || r_type == 22U);
+#elif defined(__x86_64__)
+    /* R_X86_64_GLOB_DAT (6) | R_X86_64_JUMP_SLOT (7) */
+    return (r_type == 6U || r_type == 7U);
+#else
+    return (r_type != 0U);
+#endif
+}
 
 /* Shadow GOT Table for GOT Integrity Self-Check & Restoration */
 #define MAX_SHADOW_GOT 512
@@ -1640,12 +1707,12 @@ static int verify_and_heal_got(int restore_originals) {
     uintptr_t page_size = 4096;
     for (size_t i = 0; i < g_shadow_got_count; i++) {
         void** slot = g_shadow_got[i].slot;
-        if (!slot) continue;
+        if (!slot || !is_memory_readable(slot, sizeof(void*))) continue;
         uintptr_t addr = (uintptr_t)slot;
         uintptr_t page_start = addr & ~(page_size - 1);
         void* desired = restore_originals ? g_shadow_got[i].orig_target : g_shadow_got[i].hook_target;
         if (desired && *slot != desired) {
-            if (mprotect((void*)page_start, page_size * 2, PROT_READ | PROT_WRITE) == 0) {
+            if (mprotect((void*)page_start, page_size, PROT_READ | PROT_WRITE) == 0) {
                 *slot = desired;
                 healed++;
             }
@@ -1697,14 +1764,14 @@ static int install_inline_trampoline_arm64(void* target_fn, void* hook_fn, void*
     uintptr_t page_start = addr & ~(page_size - 1);
     /* Make target page readable + writable FIRST so Execute-Only Memory (XOM, --x) on Android 10+
      * never triggers SIGSEGV when inspecting insns[0..3]! */
-    if (mprotect((void*)page_start, page_size * 2, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
+    if (mprotect((void*)page_start, page_size, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
         return -1;
     }
     uint32_t* insns = (uint32_t*)target_fn;
     /* Check first 4 instructions (16 bytes) for PC-relative branches before patching */
     for (int i = 0; i < 4; i++) {
         if (is_pc_relative_arm64(insns[i])) {
-            mprotect((void*)page_start, page_size * 2, PROT_READ | PROT_EXEC);
+            mprotect((void*)page_start, page_size, PROT_READ | PROT_EXEC);
             return -1; /* Fallback to shadow GOT for short PC-relative stubs */
         }
     }
@@ -1714,12 +1781,12 @@ static int install_inline_trampoline_arm64(void* target_fn, void* hook_fn, void*
                                            MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         if (g_trampoline_pool == MAP_FAILED) {
             g_trampoline_pool = 0;
-            mprotect((void*)page_start, page_size * 2, PROT_READ | PROT_EXEC);
+            mprotect((void*)page_start, page_size, PROT_READ | PROT_EXEC);
             return -1;
         }
     }
     if (g_trampoline_used + 32 > 4096) {
-        mprotect((void*)page_start, page_size * 2, PROT_READ | PROT_EXEC);
+        mprotect((void*)page_start, page_size, PROT_READ | PROT_EXEC);
         return -1;
     }
     mprotect((void*)g_trampoline_pool, 4096, PROT_READ | PROT_WRITE);
@@ -1741,7 +1808,7 @@ static int install_inline_trampoline_arm64(void* target_fn, void* hook_fn, void*
     insns[1] = 0xD61F0200U; /* BR X16 */
     *(uint64_t*)((uint8_t*)target_fn + 8) = (uint64_t)(uintptr_t)hook_fn;
     __builtin___clear_cache((char*)target_fn, (char*)((uint8_t*)target_fn + 16));
-    mprotect((void*)page_start, page_size * 2, PROT_READ | PROT_EXEC);
+    mprotect((void*)page_start, page_size, PROT_READ | PROT_EXEC);
 
     *out_trampoline = (void*)tramp;
     return 0;
@@ -1779,7 +1846,7 @@ static int is_excluded_system_process(void) {
         strstr(cmdline, "com.android.keyguard") != 0 ||
         strstr(cmdline, "com.android.launcher") != 0 ||
         strstr(cmdline, "org.lsposed.manager") != 0 ||
-         strcmp(cmdline, "com.example.vcam") == 0) {
+        strcmp(cmdline, "com.example.vcam") == 0) {
         s_excluded = 1;
     }
     s_checked = 1;
@@ -1798,7 +1865,6 @@ static void resolve_originals(void) {
     if (!orig_connect) orig_connect = &connect;
 
     pfn_dlopen fn_dlopen = orig_dlopen ? orig_dlopen : &dlopen;
-    /* Use RTLD_NOLOAD (4) | RTLD_LAZY (1) first; only load if needed */
     void* h_cam = fn_dlopen("libcamera2ndk.so", 1);
     void* h_med = fn_dlopen("libmediandk.so", 1);
     void* h_and = fn_dlopen("libandroid.so", 1);
@@ -1811,7 +1877,6 @@ static void resolve_originals(void) {
             if (!sym && h_med) sym = orig_dlsym(h_med, g_hooks[i].name);
             if (!sym && h_and) sym = orig_dlsym(h_and, g_hooks[i].name);
             if (!sym && h_c)   sym = orig_dlsym(h_c, g_hooks[i].name);
-            if (!sym)          sym = orig_dlsym((void*)0, g_hooks[i].name);
             if (sym && sym != g_hooks[i].hook_fn) {
                 *g_hooks[i].orig_fn = sym;
 #if defined(__aarch64__)
@@ -1860,47 +1925,15 @@ static void* hook_dlsym(void* handle, const char* symbol) {
 
 static int phdr_callback(struct dl_phdr_info* info, size_t size, void* data);
 
-static void* hook_dlopen(const char* filename, int flags) {
-    if (!orig_dlopen) orig_dlopen = &dlopen;
-    void* h = orig_dlopen(filename, flags);
-    if (h && filename && strstr(filename, "vcam_ndk") == 0 && strstr(filename, "libcam_hal3_ext_") == 0) {
-        resolve_originals();
-        if (orig_dl_iterate_phdr) {
-            orig_dl_iterate_phdr(phdr_callback, 0);
-        } else {
-            dl_iterate_phdr(phdr_callback, 0);
-        }
-    }
-    return h;
-}
-
-static void* hook_android_dlopen_ext(const char* filename, int flags, const void* extinfo) {
-    if (!orig_android_dlopen_ext) {
-        void* h_dl = orig_dlopen ? orig_dlopen("libdl.so", 1) : dlopen("libdl.so", 1);
-        if (h_dl && orig_dlsym) {
-            orig_android_dlopen_ext = (pfn_android_dlopen_ext)orig_dlsym(h_dl, "android_dlopen_ext");
-        }
-    }
-    void* h = orig_android_dlopen_ext
-            ? orig_android_dlopen_ext(filename, flags, extinfo)
-            : (orig_dlopen ? orig_dlopen(filename, flags) : dlopen(filename, flags));
-    if (h && filename && strstr(filename, "vcam_ndk") == 0 && strstr(filename, "libcam_hal3_ext_") == 0) {
-        resolve_originals();
-        if (orig_dl_iterate_phdr) {
-            orig_dl_iterate_phdr(phdr_callback, 0);
-        } else {
-            dl_iterate_phdr(phdr_callback, 0);
-        }
-    }
-    return h;
-}
-
 static void patch_got_entry(void** slot, void* new_fn, void** orig_slot) {
-    if (!slot || *slot == new_fn) return;
+    if (!slot || !is_memory_readable(slot, sizeof(void*)) || *slot == new_fn) return;
     uintptr_t page_size = 4096;
     uintptr_t addr = (uintptr_t)slot;
     uintptr_t page_start = addr & ~(page_size - 1);
-    if (mprotect((void*)page_start, page_size * 2, PROT_READ | PROT_WRITE) == 0) {
+    /* Single-page mprotect: GOT slots are pointer-aligned (8-byte on 64-bit, 4-byte on 32-bit)
+     * and never straddle a 4KB page boundary. Using page_size (not page_size * 2) avoids
+     * stripping PROT_EXEC from an adjacent .text/.plt page or failing on an unmapped guard page. */
+    if (mprotect((void*)page_start, page_size, PROT_READ | PROT_WRITE) == 0) {
         void* prev = *slot;
         if (*orig_slot == 0 && prev != 0 && prev != new_fn) {
             *orig_slot = prev;
@@ -1913,12 +1946,18 @@ static void patch_got_entry(void** slot, void* new_fn, void** orig_slot) {
 
 #if USE_RELA
 static void scan_reloc_table(ElfW_Addr base, const ElfW_Rela* table, size_t size_bytes, const ElfW_Sym* symtab, const char* strtab) {
+    if (!table || !symtab || !strtab || size_bytes < sizeof(ElfW_Rela)) return;
     size_t count = size_bytes / sizeof(ElfW_Rela);
+    if (count > 65536U) count = 65536U;
     for (size_t i = 0; i < count; i++) {
-        size_t sym_idx = ELF_R_SYM(table[i].r_info);
-        if (sym_idx == 0) continue;
+        if (!is_memory_readable(&table[i], sizeof(ElfW_Rela))) break;
+        uint32_t r_type = ELF_R_TYPE(table[i].r_info);
+        if (!is_got_reloc_type(r_type)) continue;
+        size_t sym_idx = (size_t)ELF_R_SYM(table[i].r_info);
+        if (sym_idx == 0 || sym_idx > 65536U) continue;
+        if (!is_memory_readable(&symtab[sym_idx], sizeof(ElfW_Sym))) continue;
         const char* sym_name = strtab + symtab[sym_idx].st_name;
-        if (!sym_name || !sym_name[0]) continue;
+        if (!is_memory_readable(sym_name, 1) || !sym_name[0]) continue;
         for (size_t h = 0; h < NUM_HOOKS; h++) {
             if (strcmp(sym_name, g_hooks[h].name) == 0) {
                 void** got_slot = (void**)(base + table[i].r_offset);
@@ -1929,12 +1968,18 @@ static void scan_reloc_table(ElfW_Addr base, const ElfW_Rela* table, size_t size
 }
 #else
 static void scan_reloc_table(ElfW_Addr base, const ElfW_Rel* table, size_t size_bytes, const ElfW_Sym* symtab, const char* strtab) {
+    if (!table || !symtab || !strtab || size_bytes < sizeof(ElfW_Rel)) return;
     size_t count = size_bytes / sizeof(ElfW_Rel);
+    if (count > 65536U) count = 65536U;
     for (size_t i = 0; i < count; i++) {
-        size_t sym_idx = ELF_R_SYM(table[i].r_info);
-        if (sym_idx == 0) continue;
+        if (!is_memory_readable(&table[i], sizeof(ElfW_Rel))) break;
+        uint32_t r_type = ELF_R_TYPE(table[i].r_info);
+        if (!is_got_reloc_type(r_type)) continue;
+        size_t sym_idx = (size_t)ELF_R_SYM(table[i].r_info);
+        if (sym_idx == 0 || sym_idx > 65536U) continue;
+        if (!is_memory_readable(&symtab[sym_idx], sizeof(ElfW_Sym))) continue;
         const char* sym_name = strtab + symtab[sym_idx].st_name;
-        if (!sym_name || !sym_name[0]) continue;
+        if (!is_memory_readable(sym_name, 1) || !sym_name[0]) continue;
         for (size_t h = 0; h < NUM_HOOKS; h++) {
             if (strcmp(sym_name, g_hooks[h].name) == 0) {
                 void** got_slot = (void**)(base + table[i].r_offset);
@@ -1945,34 +1990,103 @@ static void scan_reloc_table(ElfW_Addr base, const ElfW_Rel* table, size_t size_
 }
 #endif
 
-static int phdr_callback(struct dl_phdr_info* info, size_t size, void* data) {
-    (void)size;
-    (void)data;
-    if (!info || !info->dlpi_phdr) return 0;
-    const char* name = info->dlpi_name ? info->dlpi_name : "";
-    /* Never patch our own library, Bionic libc/libdl/linker, or libcamera2ndk/libmediandk's own internal GOT
-     * (keeping libcamera2ndk.so and libmediandk.so GOT 100% unmodified against GOT checksum scanners!) */
-    /* Never patch Android system/APEX/vendor libraries (libjavacore.so, libopenjdk.so,
-     * libhwui.so, libstagefright.so, libart.so) so Java File.exists(), FileOutputStream,
-     * BitmapFactory, and MediaExtractor inside the host process never have their file I/O
-     * intercepted. Only patch 3rd-party / host-app shared libraries! */
-    if (strstr(name, "libvcam_ndk") != 0 ||
-        strstr(name, "libcam_hal3_ext_") != 0 ||
-        strstr(name, "libc.so") != 0 ||
-        strstr(name, "libdl.so") != 0 ||
-        strstr(name, "linker") != 0 ||
-        strstr(name, "libcamera2ndk.so") != 0 ||
-        strstr(name, "libmediandk.so") != 0 ||
-        strncmp(name, "/system/", 8) == 0 ||
+static int has_so_suffix(const char* name) {
+    if (!name) return 0;
+    size_t len = strlen(name);
+    if (len < 3) return 0;
+    return (name[len - 3] == '.' && name[len - 2] == 's' && name[len - 1] == 'o');
+}
+
+static int is_eligible_target_library(const char* name) {
+    if (!name) return 0;
+    if (!name[0]) {
+#if defined(__x86_64__)
+        /* Allow main executable in standalone Linux x86_64 IAD test harness */
+        return 1;
+#else
+        /* On Android, main executable is /system/bin/app_process64; unnamed mappings are anonymous/Zygisk */
+        return 0;
+#endif
+    }
+    /* Reject special kernel / anonymous mappings ([vdso], [anon:...], [vectors]) */
+    if (name[0] == '[') return 0;
+
+    /* Must end with .so (rejects Zygisk/LSPosed daemon.apk, classes.dex, .odex, .vdex, .art) */
+    if (!has_so_suffix(name)) return 0;
+
+    /* Never touch system, APEX, vendor, product, ODM, OEM, or Magisk/Zygisk/LSPosed (/data/adb/) partitions */
+    if (strncmp(name, "/system/", 8) == 0 ||
+        strncmp(name, "/system_ext/", 12) == 0 ||
         strncmp(name, "/apex/", 6) == 0 ||
         strncmp(name, "/vendor/", 8) == 0 ||
         strncmp(name, "/product/", 9) == 0 ||
+        strncmp(name, "/odm/", 5) == 0 ||
+        strncmp(name, "/oem/", 5) == 0 ||
+        strncmp(name, "/data/adb/", 10) == 0 ||
+        strncmp(name, "/dev/", 5) == 0 ||
+        strncmp(name, "/memfd:", 7) == 0) {
+        return 0;
+    }
+
+    /* If absolute path on Android, restrict strictly to app-installed or app-data native libraries */
+    if (name[0] == '/') {
+        if (strncmp(name, "/data/app/", 10) != 0 &&
+            strncmp(name, "/data/data/", 11) != 0 &&
+            strncmp(name, "/data/user/", 11) != 0 &&
+            strncmp(name, "/data/user_de/", 14) != 0 &&
+            strncmp(name, "/mnt/asec/", 10) != 0 &&
+            strncmp(name, "/tmp/", 5) != 0) {
+            return 0;
+        }
+    }
+
+    /* Never patch our own library, Zygisk/LSPosed/Xposed modules, Bionic libc/libdl/linker,
+     * or Android framework / NDK camera libraries */
+    if (strstr(name, "libvcam") != 0 ||
+        strstr(name, "vcam_ndk") != 0 ||
+        strstr(name, "libcam_hal3_ext_") != 0 ||
+        strstr(name, "lsposed") != 0 ||
+        strstr(name, "lspd") != 0 ||
+        strstr(name, "zygisk") != 0 ||
+        strstr(name, "riru") != 0 ||
+        strstr(name, "magisk") != 0 ||
+        strstr(name, "shamiko") != 0 ||
+        strstr(name, "xposed") != 0 ||
+        strstr(name, "libc.so") != 0 ||
+        strstr(name, "libdl.so") != 0 ||
+        strstr(name, "libm.so") != 0 ||
+        strstr(name, "libc++.so") != 0 ||
+        strstr(name, "libc++_shared.so") != 0 ||
+        strstr(name, "libstdc++.so") != 0 ||
+        strstr(name, "ld-linux") != 0 ||
+        strstr(name, "linker") != 0 ||
+        strstr(name, "libcamera2ndk.so") != 0 ||
+        strstr(name, "libmediandk.so") != 0 ||
         strstr(name, "libjavacore.so") != 0 ||
         strstr(name, "libopenjdk.so") != 0 ||
         strstr(name, "libart.so") != 0 ||
         strstr(name, "libhwui.so") != 0 ||
         strstr(name, "libstagefright") != 0 ||
-        strstr(name, "libandroid_runtime.so") != 0) {
+        strstr(name, "libandroid_runtime.so") != 0 ||
+        strstr(name, "libandroid.so") != 0 ||
+        strstr(name, "liblog.so") != 0) {
+        return 0;
+    }
+
+    return 1;
+}
+
+static int phdr_callback(struct dl_phdr_info* info, size_t size, void* data) {
+    (void)size;
+    (void)data;
+    if (!info || !info->dlpi_phdr || info->dlpi_phnum == 0 || info->dlpi_phnum > 128U) return 0;
+    const char* name = info->dlpi_name ? info->dlpi_name : "";
+    if (!is_eligible_target_library(name)) {
+        return 0;
+    }
+
+    /* Verify ELF program headers are mapped and readable (guards against Zygisk/LSPosed PROT_NONE ---p pages) */
+    if (!is_memory_readable(info->dlpi_phdr, (size_t)info->dlpi_phnum * sizeof(ElfW_Phdr))) {
         return 0;
     }
 
@@ -1983,7 +2097,7 @@ static int phdr_callback(struct dl_phdr_info* info, size_t size, void* data) {
             break;
         }
     }
-    if (!dyn) return 0;
+    if (!dyn || !is_memory_readable(dyn, sizeof(ElfW_Dyn))) return 0;
 
     const ElfW_Sym* symtab = 0;
     const char* strtab = 0;
@@ -1992,7 +2106,10 @@ static int phdr_callback(struct dl_phdr_info* info, size_t size, void* data) {
     const void* rel = 0;
     size_t relsz = 0;
 
-    for (; dyn->d_tag != DT_NULL; dyn++) {
+    for (int tag_idx = 0; tag_idx < 512; tag_idx++, dyn++) {
+        if (!is_memory_readable(dyn, sizeof(ElfW_Dyn)) || dyn->d_tag == DT_NULL) {
+            break;
+        }
         switch (dyn->d_tag) {
             case DT_SYMTAB:
                 symtab = (const ElfW_Sym*)(dyn->d_un.d_ptr > info->dlpi_addr ? dyn->d_un.d_ptr : info->dlpi_addr + dyn->d_un.d_ptr);
@@ -2025,6 +2142,7 @@ static int phdr_callback(struct dl_phdr_info* info, size_t size, void* data) {
     }
 
     if (!symtab || !strtab) return 0;
+    if (!is_memory_readable(symtab, sizeof(ElfW_Sym)) || !is_memory_readable(strtab, 1)) return 0;
     if (jmprel && pltrelsz > 0) {
         scan_reloc_table(info->dlpi_addr, jmprel, pltrelsz, symtab, strtab);
     }
@@ -2240,6 +2358,6 @@ jint JNI_OnLoad(JavaVM* vm, void* reserved) {
     (void)reserved;
     g_jvm = vm;
     vcam_ndk_install_all_hooks();
-    LOGI("libvcam_ndk.so JNI_OnLoad initialized (29 hooks active)");
+    LOGI("libvcam_ndk.so JNI_OnLoad initialized (27 hooks active)");
     return JNI_VERSION_1_6;
 }
